@@ -1,0 +1,16 @@
+[package]
+name = "ndl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "ndl"
+path = "src/main.rs"
+
+[dependencies]
+needle-core = { path = "../needle-core" }
+
+[dev-dependencies]
+tempfile = "3"

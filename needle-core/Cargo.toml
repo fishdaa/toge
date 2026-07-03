@@ -1,0 +1,19 @@
+[package]
+name = "needle-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+default = []
+# Enable only if raw FFI declarations are not used; otherwise pure stdlib.
+use_libc = ["libc"]
+
+[dependencies]
+# 0-1 external dependency rule. libc is optional; raw FFI is preferred.
+libc = { version = "0.2", optional = true }
+
+[dev-dependencies]
+# Used only by tests; not linked into release builds.
+tempfile = "3"
