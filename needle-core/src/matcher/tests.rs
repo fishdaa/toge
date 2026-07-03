@@ -9,6 +9,7 @@ fn sample_index() -> Index {
     idx.insert("/home/alice/docs/dir1", true);
     idx.insert("/home/bob/music/song.mp3", false);
     idx.insert("/home/bob/music/README", false);
+    idx.entries[0].size = 1024; // placeholder metadata for size filter test
     idx
 }
 

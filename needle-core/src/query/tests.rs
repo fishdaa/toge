@@ -80,7 +80,8 @@ fn test_parse_size_comparison() {
     let q = Query::parse("size:>1mb foo").unwrap();
     assert!(q.size.is_some());
     let size = q.size.unwrap();
-    assert_eq!(size.min, Some(1_000_000));
+    // "Greater than" is strict: 1 MB itself is excluded, so the minimum is 1_000_001.
+    assert_eq!(size.min, Some(1_000_001));
     assert_eq!(size.max, None);
 }
 

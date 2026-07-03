@@ -10,9 +10,17 @@ fn run_needled(args: &[&str]) -> std::process::Output {
 }
 
 #[test]
-fn needled_binary_prints_not_implemented() {
-    let output = run_needled(&[]);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("not yet implemented"));
-    assert!(!output.status.success());
+fn needled_help_exits_zero() {
+    let output = run_needled(&["-h"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("needled") || stdout.contains("Options"));
+    assert!(output.status.success());
+}
+
+#[test]
+fn needled_version_prints_version() {
+    let output = run_needled(&["-v"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("needled 0.1.0"));
+    assert!(output.status.success());
 }

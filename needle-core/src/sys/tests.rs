@@ -81,7 +81,7 @@ fn inotify_parse_create_event() {
     let len = 16 + name.len();
     let mut buf = Vec::with_capacity(len);
     buf.extend_from_slice(&0u32.to_le_bytes()); // wd
-    buf.extend_from_slice(&0u32.to_le_bytes()); // mask = IN_CREATE
+    buf.extend_from_slice(&0x00000100u32.to_le_bytes()); // mask = IN_CREATE
     buf.extend_from_slice(&0u32.to_le_bytes()); // cookie
     buf.extend_from_slice(&(name.len() as u32).to_le_bytes()); // len
     buf.extend_from_slice(name);
@@ -104,7 +104,7 @@ fn inotify_parse_delete_event() {
     let len = 16 + name.len();
     let mut buf = Vec::with_capacity(len);
     buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&0u32.to_le_bytes()); // mask = IN_DELETE
+    buf.extend_from_slice(&0x00000200u32.to_le_bytes()); // mask = IN_DELETE
     buf.extend_from_slice(&0u32.to_le_bytes());
     buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
     buf.extend_from_slice(name);

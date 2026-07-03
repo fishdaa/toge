@@ -50,27 +50,196 @@ pub struct StatusResponse {
     pub build_duration_ms: u64,
 }
 
+impl OutputFormat {
+    fn to_u8(&self) -> u8 {
+        match self {
+            OutputFormat::Default => 0,
+            OutputFormat::Csv => 1,
+            OutputFormat::Tsv => 2,
+            OutputFormat::Txt => 3,
+            OutputFormat::Efu => 4,
+        }
+    }
+
+    fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(OutputFormat::Default),
+            1 => Some(OutputFormat::Csv),
+            2 => Some(OutputFormat::Tsv),
+            3 => Some(OutputFormat::Txt),
+            4 => Some(OutputFormat::Efu),
+            _ => None,
+        }
+    }
+}
+
+fn push_u64(buf: &mut Vec<u8>, v: u64) {
+    buf.extend_from_slice(&v.to_le_bytes());
+}
+
+fn push_usize(buf: &mut Vec<u8>, v: usize) {
+    buf.extend_from_slice(&(v as u64).to_le_bytes());
+}
+
+fn push_string(buf: &mut Vec<u8>, s: &str) {
+    push_usize(buf, s.len());
+    buf.extend_from_slice(s.as_bytes());
+}
+
+fn take_u64(buf: &[u8], off: &mut usize) -> Option<u64> {
+    if *off + 8 > buf.len() {
+        return None;
+    }
+    let v = u64::from_le_bytes([
+        buf[*off],
+        buf[*off + 1],
+        buf[*off + 2],
+        buf[*off + 3],
+        buf[*off + 4],
+        buf[*off + 5],
+        buf[*off + 6],
+        buf[*off + 7],
+    ]);
+    *off += 8;
+    Some(v)
+}
+
+fn take_usize(buf: &[u8], off: &mut usize) -> Option<usize> {
+    take_u64(buf, off).map(|v| v as usize)
+}
+
+fn take_string(buf: &[u8], off: &mut usize) -> Option<String> {
+    let len = take_usize(buf, off)?;
+    if *off + len > buf.len() {
+        return None;
+    }
+    let s = std::str::from_utf8(&buf[*off..*off + len]).ok()?.to_string();
+    *off += len;
+    Some(s)
+}
+
 impl Request {
     pub fn encode(&self) -> Vec<u8> {
-        let _ = self;
-        todo!()
+        let mut buf = Vec::new();
+        match self {
+            Request::Query(q) => {
+                buf.push(1);
+                push_u64(&mut buf, q.id);
+                push_string(&mut buf, &q.raw);
+                push_usize(&mut buf, q.max_results);
+                push_usize(&mut buf, q.offset);
+                buf.push(q.format.to_u8());
+            }
+            Request::Status => buf.push(2),
+            Request::Flush => buf.push(3),
+            Request::Reindex => buf.push(4),
+            Request::Quit => buf.push(5),
+        }
+        buf
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let _ = bytes;
-        todo!()
+        if bytes.is_empty() {
+            return Err("empty message".into());
+        }
+        let mut off = 1;
+        match bytes[0] {
+            1 => {
+                let id = take_u64(bytes, &mut off).ok_or("missing id")?;
+                let raw = take_string(bytes, &mut off).ok_or("missing raw")?;
+                let max_results = take_usize(bytes, &mut off).ok_or("missing max_results")?;
+                let offset = take_usize(bytes, &mut off).ok_or("missing offset")?;
+                let format = bytes
+                    .get(off)
+                    .copied()
+                    .and_then(OutputFormat::from_u8)
+                    .ok_or("missing format")?;
+                Ok(Request::Query(QueryRequest {
+                    id,
+                    raw,
+                    max_results,
+                    offset,
+                    format,
+                }))
+            }
+            2 => Ok(Request::Status),
+            3 => Ok(Request::Flush),
+            4 => Ok(Request::Reindex),
+            5 => Ok(Request::Quit),
+            _ => Err("unknown request type".into()),
+        }
     }
 }
 
 impl Response {
     pub fn encode(&self) -> Vec<u8> {
-        let _ = self;
-        todo!()
+        let mut buf = Vec::new();
+        match self {
+            Response::Results(r) => {
+                buf.push(1);
+                push_u64(&mut buf, r.id);
+                push_usize(&mut buf, r.total_count);
+                push_usize(&mut buf, r.paths.len());
+                for p in &r.paths {
+                    push_string(&mut buf, p);
+                }
+            }
+            Response::Status(s) => {
+                buf.push(2);
+                push_usize(&mut buf, s.indexed_count);
+                buf.push(if s.is_ready { 1 } else { 0 });
+                push_u64(&mut buf, s.last_updated_unix as u64);
+                push_u64(&mut buf, s.build_duration_ms);
+            }
+            Response::Ok => buf.push(3),
+            Response::Error(e) => {
+                buf.push(4);
+                push_string(&mut buf, e);
+            }
+        }
+        buf
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, String> {
-        let _ = bytes;
-        todo!()
+        if bytes.is_empty() {
+            return Err("empty message".into());
+        }
+        let mut off = 1;
+        match bytes[0] {
+            1 => {
+                let id = take_u64(bytes, &mut off).ok_or("missing id")?;
+                let total_count = take_usize(bytes, &mut off).ok_or("missing total_count")?;
+                let path_count = take_usize(bytes, &mut off).ok_or("missing path_count")?;
+                let mut paths = Vec::with_capacity(path_count);
+                for _ in 0..path_count {
+                    paths.push(take_string(bytes, &mut off).ok_or("missing path")?);
+                }
+                Ok(Response::Results(ResultsResponse {
+                    id,
+                    total_count,
+                    paths,
+                }))
+            }
+            2 => {
+                let indexed_count = take_usize(bytes, &mut off).ok_or("missing indexed_count")?;
+                let is_ready = bytes.get(off).copied() == Some(1);
+                off += 1;
+                let last_updated_unix = take_u64(bytes, &mut off).ok_or("missing last_updated")? as i64;
+                let build_duration_ms = take_u64(bytes, &mut off).ok_or("missing build_duration")?;
+                Ok(Response::Status(StatusResponse {
+                    indexed_count,
+                    is_ready,
+                    last_updated_unix,
+                    build_duration_ms,
+                }))
+            }
+            3 => Ok(Response::Ok),
+            4 => {
+                let e = take_string(bytes, &mut off).ok_or("missing error")?;
+                Ok(Response::Error(e))
+            }
+            _ => Err("unknown response type".into()),
+        }
     }
 }
 

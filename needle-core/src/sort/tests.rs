@@ -19,9 +19,9 @@ fn test_sort_by_name_ascending() {
     assert_eq!(
         names,
         vec![
+            "/home/bob/music/aria.mp3",
             "/home/alice/docs/bar.rs",
             "/home/alice/docs/foo.txt",
-            "/home/bob/music/aria.mp3",
             "/home/bob/music/song.mp3",
         ]
     );

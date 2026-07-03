@@ -57,8 +57,8 @@ fn test_search_substring_multiple_matches() {
     let idx = sample_index();
     let mut ids = idx.search_substring("o");
     ids.sort();
-    // foo.txt, song.mp3, README contains 'o'.
-    assert_eq!(ids, vec![0, 3, 4]);
+    // foo.txt and song.mp3 contain 'o' in their filenames; README does not.
+    assert_eq!(ids, vec![0, 3]);
 }
 
 #[test]
@@ -102,8 +102,8 @@ fn test_entry_name_and_extension_offsets() {
     let entry = &idx.entries[0];
     assert_eq!(entry.path, "/home/user/archive.tar.gz");
     assert_eq!(entry.name_off, 11);
-    // Extension offset points at "gz" (last dot + 1).
-    assert_eq!(entry.ext_off, 21);
+    // Extension offset points at "gz" (last dot + 1) -> byte 23.
+    assert_eq!(entry.ext_off, 23);
     assert!(!entry.is_dir);
 }
 
