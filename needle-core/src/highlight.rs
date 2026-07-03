@@ -16,7 +16,7 @@ pub fn render_ansi(input: &str, color: u8) -> String {
             }
             let mut term = String::new();
             let mut closed = false;
-            while let Some(hc) = chars.next() {
+            for hc in chars.by_ref() {
                 if hc == '*' {
                     closed = true;
                     break;

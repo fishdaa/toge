@@ -88,7 +88,11 @@ fn discover_roots(config: &Config) -> Vec<PathBuf> {
 fn build_index(state_dir: &Path, config: &Config) -> (Index, u64) {
     let index_path = state_dir.join("index.bin");
     if let Ok(idx) = Index::load(&index_path) {
-        eprintln!("Loaded {} entries from {}", idx.count(), index_path.display());
+        eprintln!(
+            "Loaded {} entries from {}",
+            idx.count(),
+            index_path.display()
+        );
         return (idx, 0);
     }
 
@@ -133,18 +137,18 @@ fn handle_query(index: &Index, q: &QueryRequest) -> Response {
     };
 
     let mut ids = match_query(index, &query);
-
-    if let Some(sort_str) = query_sort(&query) {
-        let (key, asc) = parse_sort(&sort_str);
-        sort_ids(index, &mut ids, key, asc);
-    }
+    let (sort_key, ascending) = sort_params(query.sort);
+    sort_ids(index, &mut ids, sort_key, ascending);
 
     let total = ids.len();
     let offset = q.offset.min(total);
     let end = (offset + q.max_results).min(total);
     let page = &ids[offset..end];
 
-    let paths: Vec<String> = page.iter().map(|id| index.get_path(*id).unwrap_or("").to_string()).collect();
+    let paths: Vec<String> = page
+        .iter()
+        .map(|id| index.get_path(*id).unwrap_or("").to_string())
+        .collect();
 
     Response::Results(ResultsResponse {
         id: q.id,
@@ -153,38 +157,18 @@ fn handle_query(index: &Index, q: &QueryRequest) -> Response {
     })
 }
 
-fn query_sort(_query: &Query) -> Option<String> {
-    None
-}
-
-fn parse_sort(s: &str) -> (SortKey, bool) {
-    let s = s.to_lowercase();
-    if s.ends_with("-asc") {
-        let base = &s[..s.len() - 4];
-        (sort_key(base), true)
-    } else if s.ends_with("-desc") {
-        let base = &s[..s.len() - 5];
-        (sort_key(base), false)
-    } else {
-        (sort_key(&s), default_ascending(&s))
+fn sort_params(sort: needle_core::query::Sort) -> (SortKey, bool) {
+    match sort {
+        needle_core::query::Sort::NameAsc => (SortKey::Name, true),
+        needle_core::query::Sort::NameDesc => (SortKey::Name, false),
+        needle_core::query::Sort::PathAsc => (SortKey::Path, true),
+        needle_core::query::Sort::PathDesc => (SortKey::Path, false),
+        needle_core::query::Sort::SizeDesc => (SortKey::Size, false),
+        needle_core::query::Sort::ModifiedDesc => (SortKey::Modified, false),
+        needle_core::query::Sort::CreatedDesc => (SortKey::Created, false),
+        needle_core::query::Sort::AccessedDesc => (SortKey::Accessed, false),
+        needle_core::query::Sort::ExtensionAsc => (SortKey::Extension, true),
     }
-}
-
-fn sort_key(s: &str) -> SortKey {
-    match s {
-        "name" => SortKey::Name,
-        "path" => SortKey::Path,
-        "size" => SortKey::Size,
-        "date-modified" | "modified" => SortKey::Modified,
-        "date-created" | "created" => SortKey::Created,
-        "date-accessed" | "accessed" => SortKey::Accessed,
-        "extension" | "ext" => SortKey::Extension,
-        _ => SortKey::Name,
-    }
-}
-
-fn default_ascending(s: &str) -> bool {
-    matches!(s, "name" | "path" | "extension")
 }
 
 fn read_request(stream: &mut UnixStream) -> io::Result<Option<Request>> {
@@ -196,11 +180,16 @@ fn read_request(stream: &mut UnixStream) -> io::Result<Option<Request>> {
     }
     let len = u64::from_le_bytes(len_buf) as usize;
     if len > 10 * 1024 * 1024 {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "request too large"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "request too large",
+        ));
     }
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf)?;
-    Request::decode(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)).map(Some)
+    Request::decode(&buf)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        .map(Some)
 }
 
 fn write_response(stream: &mut UnixStream, resp: &Response) -> io::Result<()> {
@@ -218,6 +207,9 @@ fn serve(
     socket_path: PathBuf,
 ) -> io::Result<()> {
     fs::create_dir_all(state_dir.parent().unwrap_or(&state_dir))?;
+    if let Some(parent) = socket_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let _ = fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)?;
     eprintln!("Listening on {}", socket_path.display());
@@ -334,7 +326,7 @@ fn main() {
     let index_state_dir = state_dir.clone();
     let index_config = config.clone();
     let index_state = Arc::clone(&state);
-    thread::spawn(move || {
+    let spawn_result = thread::Builder::new().spawn(move || {
         let (index, duration) = build_index(&index_state_dir, &index_config);
         let _ = save_index(&index, &index_state_dir);
         let mut st = index_state.lock().unwrap();
@@ -342,6 +334,16 @@ fn main() {
         st.build_duration_ms = duration;
         st.is_ready = true;
     });
+
+    if let Err(err) = spawn_result {
+        eprintln!("background indexing unavailable: {}", err);
+        let (index, duration) = build_index(&state_dir, &config);
+        let _ = save_index(&index, &state_dir);
+        let mut st = state.lock().unwrap();
+        st.index = index;
+        st.build_duration_ms = duration;
+        st.is_ready = true;
+    }
 
     serve(state_dir, config, state, socket).unwrap();
 }

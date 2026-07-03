@@ -3,6 +3,7 @@
 use needle_core::ipc::{OutputFormat as IpcFormat, QueryRequest, Request, Response};
 use needle_core::opts::{NdlOptions, OutputFormat};
 use std::env;
+use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -84,7 +85,13 @@ fn read_response(stream: &mut UnixStream) -> io::Result<Response> {
     Response::decode(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-fn run_query(sock: &Path, raw: &str, max_results: usize, offset: usize, format: OutputFormat) -> io::Result<()> {
+fn run_query(
+    sock: &Path,
+    raw: &str,
+    max_results: usize,
+    offset: usize,
+    format: OutputFormat,
+) -> io::Result<needle_core::ipc::ResultsResponse> {
     let mut stream = connect(sock)?;
     let format = match format {
         OutputFormat::Default => IpcFormat::Default,
@@ -103,18 +110,44 @@ fn run_query(sock: &Path, raw: &str, max_results: usize, offset: usize, format: 
     send_request(&mut stream, &req)?;
     let resp = read_response(&mut stream)?;
     match resp {
-        Response::Results(r) => {
-            for path in r.paths {
-                println!("{}", path);
-            }
-        }
-        Response::Error(e) => {
-            eprintln!("error: {}", e);
-            process::exit(1);
-        }
-        _ => {}
+        Response::Results(r) => Ok(r),
+        Response::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected response type",
+        )),
     }
-    Ok(())
+}
+
+fn render_results(paths: &[String], format: OutputFormat) -> String {
+    match format {
+        OutputFormat::Csv => render_table(paths, "Name", ",", "\r\n"),
+        OutputFormat::Tsv => render_table(paths, "Name", "\t", "\n"),
+        OutputFormat::Txt | OutputFormat::Default | OutputFormat::Efu => {
+            let mut output = paths.join("\n");
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output
+        }
+    }
+}
+
+fn render_table(paths: &[String], header: &str, sep: &str, line_end: &str) -> String {
+    let mut output = String::new();
+    output.push_str(header);
+    output.push_str(line_end);
+    for path in paths {
+        if sep == "," {
+            output.push('"');
+            output.push_str(&path.replace('"', "\"\""));
+            output.push('"');
+        } else {
+            output.push_str(path);
+        }
+        output.push_str(line_end);
+    }
+    output
 }
 
 fn send_simple(sock: &Path, req: Request) -> io::Result<Response> {
@@ -198,8 +231,14 @@ fn main() {
     }
 
     if opts.get_result_count {
-        match run_query(&sock, &opts.search, opts.max_results, opts.offset, opts.format) {
-            Ok(()) => {}
+        match run_query(
+            &sock,
+            &opts.search,
+            opts.max_results,
+            opts.offset,
+            opts.format,
+        ) {
+            Ok(results) => println!("{}", results.total_count),
             Err(e) => {
                 eprintln!("query failed: {}", e);
                 process::exit(1);
@@ -208,7 +247,32 @@ fn main() {
         return;
     }
 
-    if let Err(e) = run_query(&sock, &opts.search, opts.max_results, opts.offset, opts.format) {
+    let results = match run_query(
+        &sock,
+        &opts.search,
+        opts.max_results,
+        opts.offset,
+        opts.format,
+    ) {
+        Ok(results) => results,
+        Err(e) => {
+            eprintln!("query failed: {}", e);
+            process::exit(1);
+        }
+    };
+
+    let output = render_results(&results.paths, opts.format);
+
+    if let Some(path) = &opts.export_file {
+        if let Err(e) = fs::write(path, &output) {
+            eprintln!("failed to write export: {}", e);
+            process::exit(1);
+        }
+        return;
+    }
+
+    print!("{}", output);
+    if let Err(e) = io::stdout().flush() {
         eprintln!("query failed: {}", e);
         process::exit(1);
     }

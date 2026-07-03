@@ -53,14 +53,21 @@ fn test_parse_offset() {
 
 #[test]
 fn test_parse_show_columns() {
-    let opts = NdlOptions::parse(["ndl".into(), "-size".into(), "-dm".into(), "foo".into()]).unwrap();
+    let opts =
+        NdlOptions::parse(["ndl".into(), "-size".into(), "-dm".into(), "foo".into()]).unwrap();
     assert!(opts.show_size);
     assert!(opts.show_modified);
 }
 
 #[test]
 fn test_parse_sort() {
-    let opts = NdlOptions::parse(["ndl".into(), "-sort".into(), "size-desc".into(), "foo".into()]).unwrap();
+    let opts = NdlOptions::parse([
+        "ndl".into(),
+        "-sort".into(),
+        "size-desc".into(),
+        "foo".into(),
+    ])
+    .unwrap();
     assert_eq!(opts.sort, Some("size-desc".into()));
 }
 
@@ -79,7 +86,13 @@ fn test_parse_output_formats() {
 
 #[test]
 fn test_parse_export_file() {
-    let opts = NdlOptions::parse(["ndl".into(), "-export-csv".into(), "out.csv".into(), "foo".into()]).unwrap();
+    let opts = NdlOptions::parse([
+        "ndl".into(),
+        "-export-csv".into(),
+        "out.csv".into(),
+        "foo".into(),
+    ])
+    .unwrap();
     assert_eq!(opts.export_file, Some("out.csv".into()));
     assert_eq!(opts.format, OutputFormat::Csv);
 }

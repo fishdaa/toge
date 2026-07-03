@@ -53,8 +53,7 @@ impl Index {
         let ext_off = if is_dir {
             0
         } else {
-            name
-                .rfind('.')
+            name.rfind('.')
                 .map(|i| name_off as usize + i + 1)
                 .unwrap_or(0) as u16
         };
@@ -160,6 +159,6 @@ impl Index {
 }
 
 #[cfg(test)]
-mod tests;
-#[cfg(test)]
 mod performance_tests;
+#[cfg(test)]
+mod tests;

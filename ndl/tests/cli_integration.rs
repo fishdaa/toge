@@ -34,6 +34,10 @@ fn ndl_export_csv_creates_file() {
     let path = dir.path().join("out.csv");
     let path_str = path.to_str().unwrap();
     let output = run_ndl(&["-export-csv", path_str, "foo"]);
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     assert!(path.exists());
 }

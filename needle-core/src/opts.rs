@@ -198,6 +198,9 @@ impl NdlOptions {
         if opts.match_path {
             search_parts.push("path:".to_string());
         }
+        if let Some(sort) = &opts.sort {
+            search_parts.push(format!("sort:{}", sort));
+        }
         search_parts.extend(positional);
 
         opts.search = search_parts.join(" ");
@@ -221,9 +224,8 @@ fn parse_windows_flag(arg: &str, positional: &mut Vec<String>) -> Result<(), Str
     }
     if let Some(attrs) = arg.strip_prefix("/a") {
         for c in attrs.chars() {
-            match c {
-                'D' => positional.insert(0, "folder:".to_string()),
-                _ => {}
+            if c == 'D' {
+                positional.insert(0, "folder:".to_string());
             }
         }
         return Ok(());

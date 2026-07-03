@@ -113,7 +113,9 @@ fn take_string(buf: &[u8], off: &mut usize) -> Option<String> {
     if *off + len > buf.len() {
         return None;
     }
-    let s = std::str::from_utf8(&buf[*off..*off + len]).ok()?.to_string();
+    let s = std::str::from_utf8(&buf[*off..*off + len])
+        .ok()?
+        .to_string();
     *off += len;
     Some(s)
 }
@@ -224,8 +226,10 @@ impl Response {
                 let indexed_count = take_usize(bytes, &mut off).ok_or("missing indexed_count")?;
                 let is_ready = bytes.get(off).copied() == Some(1);
                 off += 1;
-                let last_updated_unix = take_u64(bytes, &mut off).ok_or("missing last_updated")? as i64;
-                let build_duration_ms = take_u64(bytes, &mut off).ok_or("missing build_duration")?;
+                let last_updated_unix =
+                    take_u64(bytes, &mut off).ok_or("missing last_updated")? as i64;
+                let build_duration_ms =
+                    take_u64(bytes, &mut off).ok_or("missing build_duration")?;
                 Ok(Response::Status(StatusResponse {
                     indexed_count,
                     is_ready,

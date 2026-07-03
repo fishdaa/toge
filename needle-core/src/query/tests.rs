@@ -114,3 +114,9 @@ fn test_parse_invalid_regex_reports_error() {
     let result = Query::parse("regex:(foo");
     assert!(result.is_err());
 }
+
+#[test]
+fn test_parse_sort_function() {
+    let q = Query::parse("sort:size-desc foo").unwrap();
+    assert_eq!(q.sort, Sort::SizeDesc);
+}

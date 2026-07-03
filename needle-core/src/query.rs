@@ -93,8 +93,10 @@ impl Default for Query {
 
 impl Query {
     pub fn parse(input: &str) -> Result<Self, ParseError> {
-        let mut query = Query::default();
-        query.raw = input.to_string();
+        let mut query = Query {
+            raw: input.to_string(),
+            ..Self::default()
+        };
 
         let tokens = tokenize(input)?;
         for token in tokens {
@@ -137,7 +139,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                     current.clear();
                 }
                 let mut quoted = String::new();
-                while let Some(qc) = chars.next() {
+                for qc in chars.by_ref() {
                     if qc == '"' {
                         break;
                     }
@@ -199,7 +201,17 @@ fn is_modifier(name: &str) -> bool {
 fn is_function(name: &str) -> bool {
     matches!(
         name,
-        "ext" | "parent" | "size" | "dm" | "dc" | "da" | "attrib" | "child" | "depth" | "empty"
+        "ext"
+            | "parent"
+            | "size"
+            | "dm"
+            | "dc"
+            | "da"
+            | "attrib"
+            | "child"
+            | "depth"
+            | "empty"
+            | "sort"
     )
 }
 
@@ -256,9 +268,29 @@ fn apply_function(query: &mut Query, name: &str, value: &str) -> Result<(), Pars
         "dc" => query.date_created = Some(parse_date(value)?),
         "da" => query.date_accessed = Some(parse_date(value)?),
         "attrib" => query.attributes = Some(parse_attributes(value)),
+        "sort" => query.sort = parse_sort(value)?,
         _ => {}
     }
     Ok(())
+}
+
+fn parse_sort(value: &str) -> Result<Sort, ParseError> {
+    match value.trim().to_lowercase().as_str() {
+        "name" | "name-asc" => Ok(Sort::NameAsc),
+        "name-desc" => Ok(Sort::NameDesc),
+        "path" | "path-asc" => Ok(Sort::PathAsc),
+        "path-desc" => Ok(Sort::PathDesc),
+        "size" | "size-desc" => Ok(Sort::SizeDesc),
+        "modified" | "date-modified" | "modified-desc" | "date-modified-desc" => {
+            Ok(Sort::ModifiedDesc)
+        }
+        "created" | "date-created" | "created-desc" | "date-created-desc" => Ok(Sort::CreatedDesc),
+        "accessed" | "date-accessed" | "accessed-desc" | "date-accessed-desc" => {
+            Ok(Sort::AccessedDesc)
+        }
+        "extension" | "ext" | "extension-asc" | "ext-asc" => Ok(Sort::ExtensionAsc),
+        other => Err(ParseError(format!("unknown sort: {}", other))),
+    }
 }
 
 fn apply_macro(query: &mut Query, name: &str) -> Result<(), ParseError> {
@@ -451,11 +483,8 @@ fn validate_regex(pattern: &str) -> Result<(), ParseError> {
                     return Err(ParseError("unmatched ]".into()));
                 }
             }
-            '}' => {
-                if stack.pop() != Some('{') {
-                    return Err(ParseError("unmatched }".into()));
-                }
-            }
+            '}' if stack.pop() != Some('{') => return Err(ParseError("unmatched }".into())),
+            '}' => {}
             _ => {}
         }
     }

@@ -18,7 +18,13 @@ fn temp_dir_with_files() -> (tempfile::TempDir, Vec<String>) {
         root.join("docs").join("sub").join("baz.md"),
         root.join("music.mp3"),
     ];
-    (dir, paths.into_iter().map(|p| p.to_string_lossy().to_string()).collect())
+    (
+        dir,
+        paths
+            .into_iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect(),
+    )
 }
 
 #[test]
@@ -26,7 +32,11 @@ fn test_walk_indexes_all_files_and_dirs() {
     let (dir, _paths) = temp_dir_with_files();
     let mut idx = Index::new();
     let count = walk(dir.path(), &mut idx, &Excludes::new());
-    assert!(count >= 6, "expected at least 4 files + 2 dirs, got {}", count);
+    assert!(
+        count >= 6,
+        "expected at least 4 files + 2 dirs, got {}",
+        count
+    );
     assert_eq!(idx.count(), count);
 
     let txt_ids = idx.search_substring("foo.txt");

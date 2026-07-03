@@ -14,7 +14,11 @@ fn test_insert_one_million_entries_under_two_seconds() {
         idx.insert(&path, false);
     }
     let elapsed = start.elapsed();
-    assert!(elapsed.as_secs_f64() < 2.0, "insert took {:.3}s", elapsed.as_secs_f64());
+    assert!(
+        elapsed.as_secs_f64() < 2.0,
+        "insert took {:.3}s",
+        elapsed.as_secs_f64()
+    );
     assert_eq!(idx.count(), 1_000_000);
 }
 
@@ -58,7 +62,15 @@ fn test_save_load_one_million_entries_under_one_second() {
     let loaded = Index::load(&path).unwrap();
     let loaded_time = start.elapsed();
 
-    assert!(saved.as_secs_f64() < 1.0, "save took {:.3}s", saved.as_secs_f64());
-    assert!(loaded_time.as_secs_f64() < 1.0, "load took {:.3}s", loaded_time.as_secs_f64());
+    assert!(
+        saved.as_secs_f64() < 1.0,
+        "save took {:.3}s",
+        saved.as_secs_f64()
+    );
+    assert!(
+        loaded_time.as_secs_f64() < 1.0,
+        "load took {:.3}s",
+        loaded_time.as_secs_f64()
+    );
     assert_eq!(loaded.count(), 1_000_000);
 }

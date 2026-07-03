@@ -84,7 +84,10 @@ pub fn entry_matches(entry: &Entry, query: &Query) -> bool {
         return true;
     }
 
-    query.terms.iter().all(|term| term_matches(entry, term, query))
+    query
+        .terms
+        .iter()
+        .all(|term| term_matches(entry, term, query))
 }
 
 fn term_matches(entry: &Entry, term: &TextTerm, query: &Query) -> bool {

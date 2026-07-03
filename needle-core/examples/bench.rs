@@ -97,7 +97,11 @@ fn bench_save_load(n: usize) {
     let size = fs::metadata(&path).unwrap().len();
     println!();
     println!("persistence {:>6} entries:", n);
-    println!("  save: {:>10.1} ms  ({:.1} MB)", save_ms, size as f64 / 1_000_000.0);
+    println!(
+        "  save: {:>10.1} ms  ({:.1} MB)",
+        save_ms,
+        size as f64 / 1_000_000.0
+    );
     println!("  load: {:>10.1} ms", load_ms);
     assert_eq!(loaded.count(), n);
 

@@ -4,7 +4,7 @@ use needle_core::ipc::{Request, Response};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
@@ -14,12 +14,11 @@ fn test_dir(name: &str) -> PathBuf {
 }
 
 fn socket_path(name: &str) -> PathBuf {
-    test_dir(name).join("needled.sock")
+    test_dir(name).join("state").join("needled.sock")
 }
 
 fn binary_path() -> PathBuf {
-    let manifest = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest).parent().unwrap().join("target/debug/needled")
+    PathBuf::from(env!("CARGO_BIN_EXE_needled"))
 }
 
 fn spawn_needled(args: &[&str]) -> Child {
@@ -31,7 +30,7 @@ fn spawn_needled(args: &[&str]) -> Child {
         .expect("failed to spawn needled")
 }
 
-fn wait_for_socket(path: &PathBuf, timeout_ms: u64) -> bool {
+fn wait_for_socket(path: &Path, timeout_ms: u64) -> bool {
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     while std::time::Instant::now() < deadline {
         if path.exists() {
@@ -42,7 +41,7 @@ fn wait_for_socket(path: &PathBuf, timeout_ms: u64) -> bool {
     false
 }
 
-fn wait_for_ready(sock: &PathBuf, timeout_ms: u64) -> bool {
+fn wait_for_ready(sock: &Path, timeout_ms: u64) -> bool {
     let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
     while std::time::Instant::now() < deadline {
         if let Ok(mut s) = UnixStream::connect(sock) {
@@ -59,7 +58,9 @@ fn wait_for_ready(sock: &PathBuf, timeout_ms: u64) -> bool {
 
 fn send_request(stream: &mut UnixStream, req: &Request) {
     let bytes = req.encode();
-    stream.write_all(&(bytes.len() as u64).to_le_bytes()).unwrap();
+    stream
+        .write_all(&(bytes.len() as u64).to_le_bytes())
+        .unwrap();
     stream.write_all(&bytes).unwrap();
     stream.flush().unwrap();
 }
@@ -109,9 +110,12 @@ fn daemon_starts_and_reports_ready() {
     let sock = socket_path("ready");
 
     let mut child = spawn_needled(&[
-        "--socket", sock.to_str().unwrap(),
-        "--config", cfg.to_str().unwrap(),
-        "--state-dir", state.to_str().unwrap(),
+        "--socket",
+        sock.to_str().unwrap(),
+        "--config",
+        cfg.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
         "--clean",
     ]);
 
@@ -126,9 +130,12 @@ fn daemon_status_returns_entry_count() {
     let sock = socket_path("count");
 
     let mut child = spawn_needled(&[
-        "--socket", sock.to_str().unwrap(),
-        "--config", cfg.to_str().unwrap(),
-        "--state-dir", state.to_str().unwrap(),
+        "--socket",
+        sock.to_str().unwrap(),
+        "--config",
+        cfg.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
         "--clean",
     ]);
 
@@ -139,7 +146,11 @@ fn daemon_status_returns_entry_count() {
     match read_response(&mut stream) {
         Response::Status(s) => {
             assert!(s.is_ready);
-            assert!(s.indexed_count >= 1, "expected at least foo.txt, got {}", s.indexed_count);
+            assert!(
+                s.indexed_count >= 1,
+                "expected at least foo.txt, got {}",
+                s.indexed_count
+            );
         }
         other => panic!("expected status, got {:?}", other),
     }

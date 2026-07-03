@@ -114,7 +114,10 @@ impl Index {
         ]);
         let computed_checksum = fnv1a_64(&[&data[..12], &data[20..]].concat());
         if stored_checksum != computed_checksum {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "checksum mismatch"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "checksum mismatch",
+            ));
         }
 
         let mut offset = 64;
@@ -194,9 +197,12 @@ impl Index {
                 "truncated ext section",
             ));
         }
-        let ext_count =
-            u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-                as usize;
+        let ext_count = u32::from_le_bytes([
+            data[offset],
+            data[offset + 1],
+            data[offset + 2],
+            data[offset + 3],
+        ]) as usize;
         offset += 4;
         let mut by_ext = std::collections::HashMap::with_capacity(ext_count);
         for _ in 0..ext_count {
@@ -206,9 +212,12 @@ impl Index {
                     "truncated ext key",
                 ));
             }
-            let key_len =
-                u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-                    as usize;
+            let key_len = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
             offset += 4;
             if offset + key_len > data.len() {
                 return Err(io::Error::new(
@@ -227,9 +236,12 @@ impl Index {
                     "truncated ext values",
                 ));
             }
-            let value_count =
-                u32::from_le_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
-                    as usize;
+            let value_count = u32::from_le_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]) as usize;
             offset += 4;
             if offset + value_count * 4 > data.len() {
                 return Err(io::Error::new(

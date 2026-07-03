@@ -111,5 +111,10 @@ fn inotify_parse_delete_event() {
 
     let events = InotifyWatcher::parse_buffer(&buf);
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0], WatchEvent::Delete { path: "old.rs".into() });
+    assert_eq!(
+        events[0],
+        WatchEvent::Delete {
+            path: "old.rs".into()
+        }
+    );
 }

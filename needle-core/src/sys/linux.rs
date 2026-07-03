@@ -50,10 +50,30 @@ impl InotifyWatcher {
         let mut move_from: Option<(u32, String)> = None;
 
         while offset + 16 <= buf.len() {
-            let wd = i32::from_le_bytes([buf[offset], buf[offset + 1], buf[offset + 2], buf[offset + 3]]);
-            let mask = u32::from_le_bytes([buf[offset + 4], buf[offset + 5], buf[offset + 6], buf[offset + 7]]);
-            let cookie = u32::from_le_bytes([buf[offset + 8], buf[offset + 9], buf[offset + 10], buf[offset + 11]]);
-            let len = u32::from_le_bytes([buf[offset + 12], buf[offset + 13], buf[offset + 14], buf[offset + 15]]) as usize;
+            let wd = i32::from_le_bytes([
+                buf[offset],
+                buf[offset + 1],
+                buf[offset + 2],
+                buf[offset + 3],
+            ]);
+            let mask = u32::from_le_bytes([
+                buf[offset + 4],
+                buf[offset + 5],
+                buf[offset + 6],
+                buf[offset + 7],
+            ]);
+            let cookie = u32::from_le_bytes([
+                buf[offset + 8],
+                buf[offset + 9],
+                buf[offset + 10],
+                buf[offset + 11],
+            ]);
+            let len = u32::from_le_bytes([
+                buf[offset + 12],
+                buf[offset + 13],
+                buf[offset + 14],
+                buf[offset + 15],
+            ]) as usize;
             offset += 16;
 
             if mask & IN_Q_OVERFLOW != 0 {
@@ -85,7 +105,10 @@ impl InotifyWatcher {
             } else if mask & IN_MOVED_TO != 0 {
                 if let Some((from_cookie, from_path)) = move_from.take() {
                     if from_cookie == cookie && !from_path.is_empty() {
-                        events.push(WatchEvent::Move { from: from_path, to: name });
+                        events.push(WatchEvent::Move {
+                            from: from_path,
+                            to: name,
+                        });
                     }
                 }
             }
@@ -100,10 +123,15 @@ impl InotifyWatcher {
 
 impl FsWatcher for InotifyWatcher {
     fn watch(&mut self, path: &Path) -> io::Result<()> {
-        let path_c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| {
-            io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte")
-        })?;
-        let wd = unsafe { inotify_add_watch(self.fd.as_raw_fd(), path_c.as_ptr() as *const u8, IN_ALL_EVENTS) };
+        let path_c = std::ffi::CString::new(path.as_os_str().as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains null byte"))?;
+        let wd = unsafe {
+            inotify_add_watch(
+                self.fd.as_raw_fd(),
+                path_c.as_ptr() as *const u8,
+                IN_ALL_EVENTS,
+            )
+        };
         if wd < 0 {
             return Err(io::Error::last_os_error());
         }

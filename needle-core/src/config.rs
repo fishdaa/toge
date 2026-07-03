@@ -86,9 +86,7 @@ impl Config {
                     "date_accessed" => cfg.index_date_accessed = parse_bool(value)?,
                     "permissions" => cfg.index_permissions = parse_bool(value)?,
                     "fast_extension" => cfg.fast_sort_extension = parse_bool(value)?,
-                    "whole_filename_wildcards" => {
-                        cfg.whole_filename_wildcards = parse_bool(value)?
-                    }
+                    "whole_filename_wildcards" => cfg.whole_filename_wildcards = parse_bool(value)?,
                     "operator_precedence" => {
                         cfg.operator_precedence = match value {
                             "or_and" => OperatorOrder::OrAnd,
@@ -120,12 +118,10 @@ impl Config {
                     "include_only" => cfg.include_only = parse_string_array(value)?,
                     _ => {}
                 },
-                "polling" => match key {
-                    "interval_secs" => {
-                        cfg.poll_interval_secs = value.parse().map_err(|_| "invalid interval")?
-                    }
-                    _ => {}
-                },
+                "polling" if key == "interval_secs" => {
+                    cfg.poll_interval_secs = value.parse().map_err(|_| "invalid interval")?;
+                }
+                "polling" => {}
                 _ => {}
             }
         }

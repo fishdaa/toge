@@ -28,14 +28,13 @@ impl Excludes {
             }
         }
 
-        if self.skip_hidden {
-            if path
+        if self.skip_hidden
+            && path
                 .file_name()
                 .map(|n| n.as_encoded_bytes().starts_with(b"."))
                 .unwrap_or(false)
-            {
-                return true;
-            }
+        {
+            return true;
         }
 
         let name = path
@@ -43,10 +42,9 @@ impl Excludes {
             .map(|n| n.to_string_lossy())
             .unwrap_or_default();
 
-        if !self.include_only.is_empty() {
-            if !self.include_only.iter().any(|p| glob_match(&name, p)) {
-                return true;
-            }
+        if !self.include_only.is_empty() && !self.include_only.iter().any(|p| glob_match(&name, p))
+        {
+            return true;
         }
 
         if self.patterns.iter().any(|p| glob_match(&name, p)) {
