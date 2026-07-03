@@ -8,3 +8,6 @@ edition = "2021"
 authors = ["fishdaa <git@fishda.net>"]
 license = "Apache-2.0"
 repository = "https://github.com/fishdaa/needle"
+
+[workspace.dependencies]
+needle-core = { version = "0.1.0", path = "needle-core" }

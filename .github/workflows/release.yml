@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches workspace version
+        run: |
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          tag="${GITHUB_REF_NAME#v}"
+          test "$version" = "$tag"
+
+      - name: Run quality checks
+        run: |
+          cargo fmt --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --all-targets
+
+      - name: Build release binaries
+        run: cargo build --workspace --release
+
+      - name: Package release artifacts
+        run: |
+          release_dir="release/needle-${GITHUB_REF_NAME}-linux-x86_64"
+          mkdir -p "$release_dir" dist
+          cp target/release/ndl "$release_dir"/
+          cp target/release/needled "$release_dir"/
+          cp README.md CHANGELOG.md LICENSE "$release_dir"/
+          tar -C release -czf "dist/needle-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" "$(basename "$release_dir")"
+          sha256sum "dist/needle-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" > "dist/needle-${GITHUB_REF_NAME}-linux-x86_64.sha256"
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/needle-*.tar.gz
+            dist/needle-*.sha256

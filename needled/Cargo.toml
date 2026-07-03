@@ -1,16 +1,18 @@
 [package]
 name = "needled"
+description = "Daemon for building and serving the Needle filesystem index"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "needled"
 path = "src/main.rs"
 
 [dependencies]
-needle-core = { path = "../needle-core" }
+needle-core.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

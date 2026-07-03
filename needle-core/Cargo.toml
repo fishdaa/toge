@@ -1,9 +1,11 @@
 [package]
 name = "needle-core"
+description = "Shared indexing, query parsing, and IPC primitives for Needle"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [features]
 default = []
