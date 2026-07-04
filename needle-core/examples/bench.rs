@@ -59,7 +59,18 @@ fn bench_search(n: usize) {
     let results = idx.search_substring("zzzzzzzz");
     let elapsed = start.elapsed();
     println!(
-        "search {:>6} entries: {:>8.1} ms  ({:>3} hits)",
+        "substr miss {:>6} entries: {:>8.1} ms  ({:>3} hits)",
+        n,
+        elapsed.as_secs_f64() * 1000.0,
+        results.len()
+    );
+
+    let happy_query = format!("{:08}", n / 2);
+    let start = Instant::now();
+    let results = idx.search_substring(&happy_query);
+    let elapsed = start.elapsed();
+    println!(
+        "substr hit  {:>6} entries: {:>8.1} ms  ({:>3} hits)",
         n,
         elapsed.as_secs_f64() * 1000.0,
         results.len()

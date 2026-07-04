@@ -77,6 +77,36 @@ cargo test --workspace --all-targets
 
 Note: parts of the implementation are still stubbed, so some tests currently fail until those modules are completed.
 
+### Benchmarks And Profiling
+
+```bash
+cargo run --release --example bench -p needle-core
+cargo run --release --example profile -p needle-core -- insert
+bash scripts/perf.sh run substring-miss substring-miss
+bash scripts/perf.sh run substring-hit substring-hit
+bash scripts/bench.sh run baseline
+bash scripts/bench.sh compare 5
+bash scripts/perf.sh compare substring-hit 5
+```
+
+The `bench` example prints quick timing summaries. The `profile` example keeps each hot path busy for longer so external profilers can capture useful samples. `substring`, `substring-miss`, and `substring-hit` default to more iterations than the other scenarios so the commands above produce denser captures without extra flags.
+
+`bash scripts/perf.sh run ...` stores both the binary capture and a text report in `perf-results/`, which is ignored by git:
+
+```text
+perf-results/substring-miss.data
+perf-results/substring-miss.report.txt
+```
+
+Both helpers also keep a local timestamped history so you can compare the last `x` runs while iterating on performance work:
+
+```text
+bench-results/history/*.tsv
+perf-results/history/<label>/*.summary.tsv
+```
+
+The current perf takeaways and optimization notes live in `needle-docs/findings.md`.
+
 ## Project Goals
 
 - Fast filename and path search on Linux

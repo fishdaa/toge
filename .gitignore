@@ -15,3 +15,7 @@ Thumbs.db
 # Pre-existing upstream
 /legacy/
 /needle-docs/
+
+# Local profiling artifacts
+/perf-results/
+/bench-results/
