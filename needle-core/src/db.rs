@@ -6,7 +6,7 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 
 const MAGIC: &[u8] = b"NDL1";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveStats {
@@ -58,6 +58,13 @@ impl Index {
             data.extend_from_slice(&entry.name_off.to_le_bytes());
             data.extend_from_slice(&entry.ext_off.to_le_bytes());
             data.push(if entry.is_dir { 1 } else { 0 });
+        }
+        // Section 2b: optional metadata fields (size, modified, created, accessed).
+        for entry in &self.entries {
+            data.extend_from_slice(&entry.size.to_le_bytes());
+            data.extend_from_slice(&entry.modified.to_le_bytes());
+            data.extend_from_slice(&entry.created.to_le_bytes());
+            data.extend_from_slice(&entry.accessed.to_le_bytes());
         }
 
         // Section 3: by_ext map.
@@ -189,6 +196,31 @@ impl Index {
             });
         }
         offset += entry_count * 5;
+
+        // Section 2b: optional metadata fields (size, modified, created, accessed).
+        let meta2_size = entry_count * 32;
+        if offset + meta2_size <= data.len() {
+            for (i, entry) in entries.iter_mut().enumerate() {
+                let moff = offset + i * 32;
+                entry.size = u64::from_le_bytes([
+                    data[moff], data[moff + 1], data[moff + 2], data[moff + 3],
+                    data[moff + 4], data[moff + 5], data[moff + 6], data[moff + 7],
+                ]);
+                entry.modified = i64::from_le_bytes([
+                    data[moff + 8], data[moff + 9], data[moff + 10], data[moff + 11],
+                    data[moff + 12], data[moff + 13], data[moff + 14], data[moff + 15],
+                ]);
+                entry.created = i64::from_le_bytes([
+                    data[moff + 16], data[moff + 17], data[moff + 18], data[moff + 19],
+                    data[moff + 20], data[moff + 21], data[moff + 22], data[moff + 23],
+                ]);
+                entry.accessed = i64::from_le_bytes([
+                    data[moff + 24], data[moff + 25], data[moff + 26], data[moff + 27],
+                    data[moff + 28], data[moff + 29], data[moff + 30], data[moff + 31],
+                ]);
+            }
+            offset += meta2_size;
+        }
 
         // Section 3: by_ext map.
         if offset + 4 > data.len() {

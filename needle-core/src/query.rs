@@ -58,11 +58,16 @@ pub enum Sort {
     NameDesc,
     PathAsc,
     PathDesc,
+    SizeAsc,
     SizeDesc,
+    ModifiedAsc,
     ModifiedDesc,
+    CreatedAsc,
     CreatedDesc,
+    AccessedAsc,
     AccessedDesc,
     ExtensionAsc,
+    ExtensionDesc,
 }
 
 impl Default for Query {
@@ -280,15 +285,16 @@ fn parse_sort(value: &str) -> Result<Sort, ParseError> {
         "name-desc" => Ok(Sort::NameDesc),
         "path" | "path-asc" => Ok(Sort::PathAsc),
         "path-desc" => Ok(Sort::PathDesc),
-        "size" | "size-desc" => Ok(Sort::SizeDesc),
-        "modified" | "date-modified" | "modified-desc" | "date-modified-desc" => {
-            Ok(Sort::ModifiedDesc)
-        }
-        "created" | "date-created" | "created-desc" | "date-created-desc" => Ok(Sort::CreatedDesc),
-        "accessed" | "date-accessed" | "accessed-desc" | "date-accessed-desc" => {
-            Ok(Sort::AccessedDesc)
-        }
+        "size" | "size-asc" => Ok(Sort::SizeAsc),
+        "size-desc" => Ok(Sort::SizeDesc),
+        "modified" | "date-modified" | "modified-asc" | "date-modified-asc" => Ok(Sort::ModifiedAsc),
+        "modified-desc" | "date-modified-desc" => Ok(Sort::ModifiedDesc),
+        "created" | "date-created" | "created-asc" | "date-created-asc" => Ok(Sort::CreatedAsc),
+        "created-desc" | "date-created-desc" => Ok(Sort::CreatedDesc),
+        "accessed" | "date-accessed" | "accessed-asc" | "date-accessed-asc" => Ok(Sort::AccessedAsc),
+        "accessed-desc" | "date-accessed-desc" => Ok(Sort::AccessedDesc),
         "extension" | "ext" | "extension-asc" | "ext-asc" => Ok(Sort::ExtensionAsc),
+        "extension-desc" | "ext-desc" => Ok(Sort::ExtensionDesc),
         other => Err(ParseError(format!("unknown sort: {}", other))),
     }
 }

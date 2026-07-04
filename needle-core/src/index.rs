@@ -47,6 +47,18 @@ impl Index {
     }
 
     pub fn insert(&mut self, path: &str, is_dir: bool) -> u32 {
+        self.insert_with_metadata(path, is_dir, 0, 0, 0, 0)
+    }
+
+    pub fn insert_with_metadata(
+        &mut self,
+        path: &str,
+        is_dir: bool,
+        size: u64,
+        modified: i64,
+        created: i64,
+        accessed: i64,
+    ) -> u32 {
         let id = self.entries.len() as u32;
         let name_off = path.rfind('/').map(|i| i + 1).unwrap_or(0) as u16;
         let name = &path[name_off as usize..];
@@ -63,10 +75,10 @@ impl Index {
             name_off,
             ext_off,
             is_dir,
-            size: 0,
-            modified: 0,
-            created: 0,
-            accessed: 0,
+            size,
+            modified,
+            created,
+            accessed,
         };
         self.entries.push(entry);
         self.path_to_id.insert(path.to_string(), id);
@@ -94,7 +106,29 @@ impl Index {
     }
 
     pub fn update_metadata(&mut self, path: &str) -> bool {
-        self.path_to_id.contains_key(path)
+        let Some(&id) = self.path_to_id.get(path) else {
+            return false;
+        };
+        let entry = &mut self.entries[id as usize];
+        if let Ok(metadata) = std::fs::metadata(path) {
+            entry.size = metadata.len();
+            if let Ok(t) = metadata.modified() {
+                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                    entry.modified = d.as_secs() as i64;
+                }
+            }
+            if let Ok(t) = metadata.created() {
+                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                    entry.created = d.as_secs() as i64;
+                }
+            }
+            if let Ok(t) = metadata.accessed() {
+                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
+                    entry.accessed = d.as_secs() as i64;
+                }
+            }
+        }
+        true
     }
 
     pub fn search_substring(&self, text: &str) -> Vec<u32> {

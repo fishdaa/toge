@@ -2,6 +2,36 @@
 
 use crate::index::{Entry, Index};
 use crate::query::{Query, RangeFilter, TextTerm};
+use regex::Regex;
+
+struct CompiledTerms {
+    items: Vec<CompiledTerm>,
+}
+
+enum CompiledTerm {
+    Substring(String),
+    Wildcard(String),
+    Regex(Regex),
+    Not(Box<CompiledTerm>),
+}
+
+fn compile_terms(terms: &[TextTerm]) -> CompiledTerms {
+    let items = terms
+        .iter()
+        .map(|term| match term {
+            TextTerm::Substring(s) => CompiledTerm::Substring(s.clone()),
+            TextTerm::Wildcard(p) => CompiledTerm::Wildcard(p.clone()),
+            TextTerm::Regex(p) => {
+                let re = Regex::new(p).unwrap_or_else(|_| Regex::new(&regex::escape(p)).unwrap());
+                CompiledTerm::Regex(re)
+            }
+            TextTerm::Not(inner) => {
+                CompiledTerm::Not(Box::new(compile_terms(&[inner.as_ref().clone()]).items.into_iter().next().unwrap()))
+            }
+        })
+        .collect();
+    CompiledTerms { items }
+}
 
 pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
     let mut ids: Vec<u32> = (0..index.count() as u32).collect();
@@ -18,15 +48,17 @@ pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
         ids = ext_ids;
     }
 
+    let compiled = compile_terms(&query.terms);
+
     ids.into_iter()
         .filter(|id| {
             let entry = &index.entries[*id as usize];
-            entry_matches(entry, query)
+            entry_matches(entry, query, &compiled)
         })
         .collect()
 }
 
-pub fn entry_matches(entry: &Entry, query: &Query) -> bool {
+fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool {
     if query.require_file && entry.is_dir {
         return false;
     }
@@ -80,24 +112,24 @@ pub fn entry_matches(entry: &Entry, query: &Query) -> bool {
         }
     }
 
-    if query.terms.is_empty() {
+    if compiled.items.is_empty() {
         return true;
     }
 
-    query
-        .terms
+    compiled
+        .items
         .iter()
-        .all(|term| term_matches(entry, term, query))
+        .all(|term| compiled_term_matches(entry, term, query))
 }
 
-fn term_matches(entry: &Entry, term: &TextTerm, query: &Query) -> bool {
+fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> bool {
     match term {
-        TextTerm::Substring(s) => {
+        CompiledTerm::Substring(s) => {
             let haystack = haystack(entry, query);
             let needle = normalize(s, query);
             haystack.contains(&needle)
         }
-        TextTerm::Wildcard(pattern) => {
+        CompiledTerm::Wildcard(pattern) => {
             let name = entry.name();
             let pattern = if query.match_case {
                 pattern.clone()
@@ -115,11 +147,19 @@ fn term_matches(entry: &Entry, term: &TextTerm, query: &Query) -> bool {
                 glob_match_substring(&target, &pattern)
             }
         }
-        TextTerm::Regex(pattern) => {
-            let haystack = haystack(entry, query);
-            haystack.contains(&normalize(pattern, query))
+        CompiledTerm::Regex(re) => {
+            let text = if query.match_path {
+                &entry.path
+            } else {
+                entry.name()
+            };
+            if query.match_case {
+                re.is_match(text)
+            } else {
+                re.is_match(&text.to_lowercase())
+            }
         }
-        TextTerm::Not(inner) => !term_matches(entry, inner, query),
+        CompiledTerm::Not(inner) => !compiled_term_matches(entry, inner, query),
     }
 }
 

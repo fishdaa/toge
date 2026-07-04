@@ -27,7 +27,7 @@ extern "C" {
 /// Linux inotify-based filesystem watcher.
 pub struct InotifyWatcher {
     fd: OwnedFd,
-    watches: HashMap<i32, String>, // wd -> path
+    watches: HashMap<i32, String>, // wd -> dir path
 }
 
 impl InotifyWatcher {
@@ -40,6 +40,62 @@ impl InotifyWatcher {
             fd: unsafe { OwnedFd::from_raw_fd(fd) },
             watches: HashMap::new(),
         })
+    }
+
+    fn resolve_paths(&self, events: Vec<WatchEvent>) -> Vec<WatchEvent> {
+        events
+            .into_iter()
+            .map(|ev| {
+                match &ev {
+                    WatchEvent::Create { path: name, is_dir } => {
+                        let full = self.resolve_full_path(name);
+                        WatchEvent::Create {
+                            path: full,
+                            is_dir: *is_dir,
+                        }
+                    }
+                    WatchEvent::Delete { path: name } => {
+                        WatchEvent::Delete {
+                            path: self.resolve_full_path(name),
+                        }
+                    }
+                    WatchEvent::Modify { path: name } => {
+                        WatchEvent::Modify {
+                            path: self.resolve_full_path(name),
+                        }
+                    }
+                    WatchEvent::Move { from, to } => {
+                        WatchEvent::Move {
+                            from: self.resolve_full_path(from),
+                            to: self.resolve_full_path(to),
+                        }
+                    }
+                    other => other.clone(),
+                }
+            })
+            .collect()
+    }
+
+    fn resolve_full_path(&self, name: &str) -> String {
+        if name.is_empty() {
+            return String::new();
+        }
+        if name.starts_with('/') {
+            return name.to_string();
+        }
+        if name.contains("overflow") {
+            return name.to_string();
+        }
+        for dir in self.watches.values() {
+            let full = format!("{}/{}", dir, name);
+            if std::path::Path::new(&full).exists() {
+                return full;
+            }
+        }
+        if let Some(first_dir) = self.watches.values().next() {
+            return format!("{}/{}", first_dir, name);
+        }
+        name.to_string()
     }
 
     /// Parse a raw inotify event buffer into structured events.
@@ -165,6 +221,7 @@ impl FsWatcher for InotifyWatcher {
             return Err(err);
         }
         let n = n as usize;
-        Ok(Self::parse_buffer(&buf[..n]))
+        let raw_events = Self::parse_buffer(&buf[..n]);
+        Ok(self.resolve_paths(raw_events))
     }
 }

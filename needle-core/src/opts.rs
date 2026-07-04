@@ -199,7 +199,16 @@ impl NdlOptions {
             search_parts.push("path:".to_string());
         }
         if let Some(sort) = &opts.sort {
-            search_parts.push(format!("sort:{}", sort));
+            let sort_lower = sort.to_lowercase();
+            let has_direction = sort_lower.ends_with("-asc") || sort_lower.ends_with("-desc");
+            let sort_str = if has_direction {
+                sort.clone()
+            } else if opts.sort_ascending {
+                format!("{}-asc", sort)
+            } else {
+                format!("{}-desc", sort)
+            };
+            search_parts.push(format!("sort:{}", sort_str));
         }
         search_parts.extend(positional);
 
@@ -227,6 +236,20 @@ fn parse_windows_flag(arg: &str, positional: &mut Vec<String>) -> Result<(), Str
             if c == 'D' {
                 positional.insert(0, "folder:".to_string());
             }
+        }
+        return Ok(());
+    }
+    if let Some(sort) = arg.strip_prefix("/o") {
+        match sort {
+            "N" => positional.push("sort:name-asc".to_string()),
+            "-N" => positional.push("sort:name-desc".to_string()),
+            "S" => positional.push("sort:size-desc".to_string()),
+            "-S" => positional.push("sort:size-asc".to_string()),
+            "E" => positional.push("sort:extension-asc".to_string()),
+            "-E" => positional.push("sort:extension-desc".to_string()),
+            "D" => positional.push("sort:date-modified-desc".to_string()),
+            "-D" => positional.push("sort:date-modified-asc".to_string()),
+            _ => return Err(format!("unknown sort flag: /o{}", sort)),
         }
         return Ok(());
     }

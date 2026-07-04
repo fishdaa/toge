@@ -2,6 +2,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use crate::index::Index;
 
@@ -85,7 +86,35 @@ pub fn walk(root: &Path, index: &mut Index, excludes: &Excludes) -> usize {
                 continue;
             }
 
-            index.insert(path.to_str().unwrap_or(""), is_dir);
+            let metadata = entry.metadata().ok();
+            let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+            let modified = metadata
+                .as_ref()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let created = metadata
+                .as_ref()
+                .and_then(|m| m.created().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let accessed = metadata
+                .as_ref()
+                .and_then(|m| m.accessed().ok())
+                .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+
+            index.insert_with_metadata(
+                path.to_str().unwrap_or(""),
+                is_dir,
+                size,
+                modified,
+                created,
+                accessed,
+            );
             count += 1;
 
             if is_dir {

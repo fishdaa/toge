@@ -16,6 +16,7 @@ pub struct QueryRequest {
     pub max_results: usize,
     pub offset: usize,
     pub format: OutputFormat,
+    pub highlight: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +40,7 @@ pub enum Response {
 pub struct ResultsResponse {
     pub id: u64,
     pub total_count: usize,
+    pub total_size: u64,
     pub paths: Vec<String>,
 }
 
@@ -131,6 +133,7 @@ impl Request {
                 push_usize(&mut buf, q.max_results);
                 push_usize(&mut buf, q.offset);
                 buf.push(q.format.to_u8());
+                buf.push(if q.highlight { 1 } else { 0 });
             }
             Request::Status => buf.push(2),
             Request::Flush => buf.push(3),
@@ -156,12 +159,19 @@ impl Request {
                     .copied()
                     .and_then(OutputFormat::from_u8)
                     .ok_or("missing format")?;
+                off += 1;
+                let highlight = bytes.get(off).copied() == Some(1);
+                #[allow(unused_assignments)]
+                {
+                    off += 1;
+                }
                 Ok(Request::Query(QueryRequest {
                     id,
                     raw,
                     max_results,
                     offset,
                     format,
+                    highlight,
                 }))
             }
             2 => Ok(Request::Status),
@@ -181,6 +191,7 @@ impl Response {
                 buf.push(1);
                 push_u64(&mut buf, r.id);
                 push_usize(&mut buf, r.total_count);
+                push_u64(&mut buf, r.total_size);
                 push_usize(&mut buf, r.paths.len());
                 for p in &r.paths {
                     push_string(&mut buf, p);
@@ -211,6 +222,7 @@ impl Response {
             1 => {
                 let id = take_u64(bytes, &mut off).ok_or("missing id")?;
                 let total_count = take_usize(bytes, &mut off).ok_or("missing total_count")?;
+                let total_size = take_u64(bytes, &mut off).unwrap_or(0);
                 let path_count = take_usize(bytes, &mut off).ok_or("missing path_count")?;
                 let mut paths = Vec::with_capacity(path_count);
                 for _ in 0..path_count {
@@ -219,6 +231,7 @@ impl Response {
                 Ok(Response::Results(ResultsResponse {
                     id,
                     total_count,
+                    total_size,
                     paths,
                 }))
             }

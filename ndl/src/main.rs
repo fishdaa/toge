@@ -1,5 +1,6 @@
 //! ndl — CLI client for needled.
 
+use needle_core::highlight::render_ansi;
 use needle_core::ipc::{OutputFormat as IpcFormat, QueryRequest, Request, Response};
 use needle_core::opts::{NdlOptions, OutputFormat};
 use std::env;
@@ -91,6 +92,7 @@ fn run_query(
     max_results: usize,
     offset: usize,
     format: OutputFormat,
+    highlight: bool,
 ) -> io::Result<needle_core::ipc::ResultsResponse> {
     let mut stream = connect(sock)?;
     let format = match format {
@@ -106,6 +108,7 @@ fn run_query(
         max_results,
         offset,
         format,
+        highlight,
     });
     send_request(&mut stream, &req)?;
     let resp = read_response(&mut stream)?;
@@ -119,10 +122,10 @@ fn run_query(
     }
 }
 
-fn render_results(paths: &[String], format: OutputFormat) -> String {
+fn render_results(paths: &[String], format: OutputFormat, no_header: bool) -> String {
     match format {
-        OutputFormat::Csv => render_table(paths, "Name", ",", "\r\n"),
-        OutputFormat::Tsv => render_table(paths, "Name", "\t", "\n"),
+        OutputFormat::Csv => render_table(paths, "Name", ",", "\r\n", no_header),
+        OutputFormat::Tsv => render_table(paths, "Name", "\t", "\n", no_header),
         OutputFormat::Txt | OutputFormat::Default | OutputFormat::Efu => {
             let mut output = paths.join("\n");
             if !output.is_empty() {
@@ -133,10 +136,12 @@ fn render_results(paths: &[String], format: OutputFormat) -> String {
     }
 }
 
-fn render_table(paths: &[String], header: &str, sep: &str, line_end: &str) -> String {
+fn render_table(paths: &[String], header: &str, sep: &str, line_end: &str, no_header: bool) -> String {
     let mut output = String::new();
-    output.push_str(header);
-    output.push_str(line_end);
+    if !no_header {
+        output.push_str(header);
+        output.push_str(line_end);
+    }
     for path in paths {
         if sep == "," {
             output.push('"');
@@ -237,8 +242,27 @@ fn main() {
             opts.max_results,
             opts.offset,
             opts.format,
+            false,
         ) {
             Ok(results) => println!("{}", results.total_count),
+            Err(e) => {
+                eprintln!("query failed: {}", e);
+                process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if opts.get_total_size {
+        match run_query(
+            &sock,
+            &opts.search,
+            opts.max_results,
+            opts.offset,
+            opts.format,
+            false,
+        ) {
+            Ok(results) => println!("{}", results.total_size),
             Err(e) => {
                 eprintln!("query failed: {}", e);
                 process::exit(1);
@@ -253,6 +277,7 @@ fn main() {
         opts.max_results,
         opts.offset,
         opts.format,
+        opts.highlight,
     ) {
         Ok(results) => results,
         Err(e) => {
@@ -261,7 +286,24 @@ fn main() {
         }
     };
 
-    let output = render_results(&results.paths, opts.format);
+    let mut paths = results.paths;
+    if opts.highlight {
+        let color = opts.highlight_color;
+        paths = paths
+            .into_iter()
+            .map(|p| render_ansi(&p, color))
+            .collect();
+    }
+
+    if opts.no_result_error && paths.is_empty() {
+        process::exit(9);
+    }
+
+    if opts.hide_empty && paths.is_empty() {
+        return;
+    }
+
+    let output = render_results(&paths, opts.format, opts.no_header);
 
     if let Some(path) = &opts.export_file {
         if let Err(e) = fs::write(path, &output) {

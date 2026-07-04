@@ -8,6 +8,7 @@ fn test_request_query_roundtrip() {
         max_results: 100,
         offset: 0,
         format: OutputFormat::Default,
+        highlight: false,
     });
     let bytes = req.encode();
     let decoded = Request::decode(&bytes).unwrap();
@@ -27,6 +28,7 @@ fn test_response_results_roundtrip() {
     let resp = Response::Results(ResultsResponse {
         id: 1,
         total_count: 42,
+        total_size: 0,
         paths: vec!["/a.txt".into(), "/b.txt".into()],
     });
     let bytes = resp.encode();

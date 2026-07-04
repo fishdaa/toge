@@ -6,6 +6,8 @@ use needle_core::ipc::{QueryRequest, Request, Response, ResultsResponse, StatusR
 use needle_core::matcher::match_query;
 use needle_core::query::Query;
 use needle_core::sort::{sort_ids, SortKey};
+use needle_core::sys::FsWatcher;
+use needle_core::sys::{InotifyWatcher, WatchEvent};
 use needle_core::walker::{walk, Excludes};
 use std::env;
 use std::fs;
@@ -141,20 +143,85 @@ fn handle_query(index: &Index, q: &QueryRequest) -> Response {
     sort_ids(index, &mut ids, sort_key, ascending);
 
     let total = ids.len();
+    let total_size: u64 = ids.iter().map(|id| index.entries[*id as usize].size).sum();
+
     let offset = q.offset.min(total);
     let end = (offset + q.max_results).min(total);
     let page = &ids[offset..end];
 
     let paths: Vec<String> = page
         .iter()
-        .map(|id| index.get_path(*id).unwrap_or("").to_string())
+        .map(|id| {
+            let path = index.get_path(*id).unwrap_or("").to_string();
+            if q.highlight && !query.terms.is_empty() {
+                highlight_path(&path, &query)
+            } else {
+                path
+            }
+        })
         .collect();
 
     Response::Results(ResultsResponse {
         id: q.id,
         total_count: total,
+        total_size,
         paths,
     })
+}
+
+fn highlight_path(path: &str, query: &Query) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let parent_end = path.len().saturating_sub(name.len());
+    let parent = &path[..parent_end];
+
+    let mut highlighted = name.to_string();
+    for term in &query.terms {
+        let needle = match term {
+            needle_core::query::TextTerm::Substring(s) => s.clone(),
+            needle_core::query::TextTerm::Wildcard(p) => {
+                let clean: String = p
+                    .chars()
+                    .filter(|c| *c != '*' && *c != '?')
+                    .collect();
+                if clean.is_empty() {
+                    continue;
+                }
+                clean
+            }
+            needle_core::query::TextTerm::Regex(p) => {
+                let clean: String = p
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect();
+                if clean.is_empty() {
+                    continue;
+                }
+                clean
+            }
+            needle_core::query::TextTerm::Not(_) => continue,
+        };
+        let needle_lower = needle.to_lowercase();
+        let name_lower = name.to_lowercase();
+        let mut result = String::new();
+        let mut last = 0;
+        for (pos, _) in name_lower.match_indices(&needle_lower) {
+            result.push_str(&name[last..pos]);
+            result.push('*');
+            result.push_str(&name[pos..pos + needle.len()]);
+            result.push('*');
+            last = pos + needle.len();
+        }
+        if last > 0 {
+            result.push_str(&name[last..]);
+            highlighted = result;
+        }
+    }
+
+    if highlighted != name {
+        format!("{}{}", parent, highlighted)
+    } else {
+        path.to_string()
+    }
 }
 
 fn sort_params(sort: needle_core::query::Sort) -> (SortKey, bool) {
@@ -163,11 +230,16 @@ fn sort_params(sort: needle_core::query::Sort) -> (SortKey, bool) {
         needle_core::query::Sort::NameDesc => (SortKey::Name, false),
         needle_core::query::Sort::PathAsc => (SortKey::Path, true),
         needle_core::query::Sort::PathDesc => (SortKey::Path, false),
+        needle_core::query::Sort::SizeAsc => (SortKey::Size, true),
         needle_core::query::Sort::SizeDesc => (SortKey::Size, false),
+        needle_core::query::Sort::ModifiedAsc => (SortKey::Modified, true),
         needle_core::query::Sort::ModifiedDesc => (SortKey::Modified, false),
+        needle_core::query::Sort::CreatedAsc => (SortKey::Created, true),
         needle_core::query::Sort::CreatedDesc => (SortKey::Created, false),
+        needle_core::query::Sort::AccessedAsc => (SortKey::Accessed, true),
         needle_core::query::Sort::AccessedDesc => (SortKey::Accessed, false),
         needle_core::query::Sort::ExtensionAsc => (SortKey::Extension, true),
+        needle_core::query::Sort::ExtensionDesc => (SortKey::Extension, false),
     }
 }
 
@@ -345,7 +417,175 @@ fn main() {
         st.is_ready = true;
     }
 
+    let watcher_state = Arc::clone(&state);
+    let watcher_state_dir = state_dir.clone();
+    let watcher_config_dir = config_dir.clone();
+    start_watcher(watcher_state, watcher_state_dir, watcher_config_dir);
+
     serve(state_dir, config, state, socket).unwrap();
+}
+
+fn start_watcher(
+    state: Arc<Mutex<DaemonState>>,
+    state_dir: PathBuf,
+    config_dir: PathBuf,
+) {
+    thread::Builder::new()
+        .name("inotify-watcher".into())
+        .spawn(move || {
+            loop {
+                {
+                    let st = state.lock().unwrap();
+                    if st.is_ready {
+                        break;
+                    }
+                }
+                thread::sleep(std::time::Duration::from_millis(100));
+            }
+
+            let mut watcher = match InotifyWatcher::new() {
+                Ok(w) => w,
+                Err(e) => {
+                    eprintln!("Failed to create inotify watcher: {}", e);
+                    return;
+                }
+            };
+
+            {
+                let st = state.lock().unwrap();
+                let mut dirs: Vec<PathBuf> = st
+                    .index
+                    .entries
+                    .iter()
+                    .map(|e| {
+                        let parent_end = e.name_off as usize;
+                        if parent_end > 0 {
+                            PathBuf::from(&e.path[..parent_end.saturating_sub(1)])
+                        } else {
+                            PathBuf::from("/")
+                        }
+                    })
+                    .collect();
+                dirs.sort();
+                dirs.dedup();
+
+                eprintln!(
+                    "Starting inotify watcher on {} directories...",
+                    dirs.len()
+                );
+
+                for dir in &dirs {
+                    if let Err(e) = watcher.watch(dir) {
+                        if e.kind() != io::ErrorKind::PermissionDenied
+                            && io::ErrorKind::NotFound != e.kind()
+                            && e.raw_os_error() != Some(28)
+                        {
+                            eprintln!(
+                                "Failed to watch {}: {}",
+                                dir.display(),
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
+            loop {
+                let events = match watcher.poll_events() {
+                    Ok(ev) => ev,
+                    Err(e) => {
+                        if e.kind() == io::ErrorKind::WouldBlock {
+                            thread::sleep(std::time::Duration::from_millis(100));
+                            continue;
+                        }
+                        eprintln!("inotify poll error: {}", e);
+                        thread::sleep(std::time::Duration::from_secs(1));
+                        continue;
+                    }
+                };
+
+                if events.is_empty() {
+                    thread::sleep(std::time::Duration::from_millis(100));
+                    continue;
+                }
+
+                let mut st = state.lock().unwrap();
+                for event in events {
+                    match &event {
+                        WatchEvent::Create { path, is_dir } => {
+                            if is_own_path(path, &state_dir, &config_dir) {
+                                continue;
+                            }
+                            if *is_dir {
+                                let _ = watcher
+                                    .watch(&PathBuf::from(path));
+                            }
+                            let md = std::fs::metadata(path).ok();
+                            let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
+                            let now = SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+                            st.index.insert_with_metadata(
+                                path,
+                                *is_dir,
+                                size,
+                                now,
+                                now,
+                                now,
+                            );
+                        }
+                        WatchEvent::Delete { path } => {
+                            if is_own_path(path, &state_dir, &config_dir) {
+                                continue;
+                            }
+                            st.index.remove(path);
+                        }
+                        WatchEvent::Modify { path } => {
+                            if is_own_path(path, &state_dir, &config_dir) {
+                                continue;
+                            }
+                            st.index.update_metadata(path);
+                        }
+                        WatchEvent::Move { from, to } => {
+                            if is_own_path(to, &state_dir, &config_dir)
+                                || is_own_path(from, &state_dir, &config_dir)
+                            {
+                                continue;
+                            }
+                            st.index.remove(from);
+                            let is_dir = std::path::Path::new(to).is_dir();
+                            let size = std::fs::metadata(to)
+                                .ok()
+                                .map(|m| m.len())
+                                .unwrap_or(0);
+                            let now = SystemTime::now()
+                                .duration_since(SystemTime::UNIX_EPOCH)
+                                .unwrap_or_default()
+                                .as_secs() as i64;
+                            st.index.insert_with_metadata(
+                                to,
+                                is_dir,
+                                size,
+                                now,
+                                now,
+                                now,
+                            );
+                            st.index.update_metadata(to);
+                        }
+                        WatchEvent::Overflow { .. } => {
+                            eprintln!("inotify queue overflow — some events may have been lost");
+                        }
+                    }
+                }
+            }
+        })
+        .ok();
+}
+
+fn is_own_path(path: &str, state_dir: &Path, config_dir: &Path) -> bool {
+    path.starts_with(state_dir.to_str().unwrap_or(""))
+        || path.starts_with(config_dir.to_str().unwrap_or(""))
 }
 
 #[cfg(test)]

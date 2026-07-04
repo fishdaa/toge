@@ -29,6 +29,7 @@ fn render_csv_adds_header_and_crlf() {
     let output = super::render_results(
         &["/tmp/foo.txt".into()],
         needle_core::opts::OutputFormat::Csv,
+        false,
     );
     assert_eq!(output, "Name\r\n\"/tmp/foo.txt\"\r\n");
 }
@@ -38,6 +39,7 @@ fn render_default_joins_with_newlines() {
     let output = super::render_results(
         &["/tmp/foo.txt".into(), "/tmp/bar.txt".into()],
         needle_core::opts::OutputFormat::Default,
+        false,
     );
     assert_eq!(output, "/tmp/foo.txt\n/tmp/bar.txt\n");
 }
