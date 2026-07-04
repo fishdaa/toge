@@ -28,10 +28,10 @@ fn test_parse_or_operator() {
     let q = Query::parse("foo|bar").unwrap();
     assert_eq!(
         q.terms,
-        vec![
+        vec![TextTerm::Or(vec![
             TextTerm::Substring("foo".into()),
             TextTerm::Substring("bar".into())
-        ]
+        ])]
     );
 }
 
@@ -94,9 +94,27 @@ fn test_parse_size_range() {
 }
 
 #[test]
+fn test_parse_strictly_less_than_zero_size_is_error() {
+    let err = Query::parse("size:<0 foo").unwrap_err();
+    assert!(err.to_string().contains("strictly less than zero"));
+}
+
+#[test]
 fn test_parse_date_modified_today() {
     let q = Query::parse("dm:today foo").unwrap();
     assert!(q.date_modified.is_some());
+}
+
+#[test]
+fn test_parse_date_created_today() {
+    let q = Query::parse("dc:today foo").unwrap();
+    assert!(q.date_created.is_some());
+}
+
+#[test]
+fn test_parse_date_accessed_today() {
+    let q = Query::parse("da:today foo").unwrap();
+    assert!(q.date_accessed.is_some());
 }
 
 #[test]

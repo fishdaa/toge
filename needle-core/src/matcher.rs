@@ -13,6 +13,7 @@ enum CompiledTerm {
     Wildcard(String),
     Regex(Regex),
     Not(Box<CompiledTerm>),
+    Or(Vec<CompiledTerm>),
 }
 
 fn compile_terms(terms: &[TextTerm]) -> CompiledTerms {
@@ -25,9 +26,14 @@ fn compile_terms(terms: &[TextTerm]) -> CompiledTerms {
                 let re = Regex::new(p).unwrap_or_else(|_| Regex::new(&regex::escape(p)).unwrap());
                 CompiledTerm::Regex(re)
             }
-            TextTerm::Not(inner) => {
-                CompiledTerm::Not(Box::new(compile_terms(&[inner.as_ref().clone()]).items.into_iter().next().unwrap()))
-            }
+            TextTerm::Not(inner) => CompiledTerm::Not(Box::new(
+                compile_terms(&[inner.as_ref().clone()])
+                    .items
+                    .into_iter()
+                    .next()
+                    .unwrap(),
+            )),
+            TextTerm::Or(items) => CompiledTerm::Or(compile_terms(items).items),
         })
         .collect();
     CompiledTerms { items }
@@ -127,22 +133,32 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
         CompiledTerm::Substring(s) => {
             let haystack = haystack(entry, query);
             let needle = normalize(s, query);
-            haystack.contains(&needle)
+            if query.match_whole_word {
+                contains_whole_word(&haystack, &needle)
+            } else {
+                haystack.contains(&needle)
+            }
         }
         CompiledTerm::Wildcard(pattern) => {
-            let name = entry.name();
+            let text = if query.match_path {
+                &entry.path
+            } else {
+                entry.name()
+            };
             let pattern = if query.match_case {
                 pattern.clone()
             } else {
                 pattern.to_lowercase()
             };
             let target = if query.match_case {
-                name.to_string()
+                text.to_string()
             } else {
-                name.to_lowercase()
+                text.to_lowercase()
             };
             if query.whole_filename {
                 glob_match(&target, &pattern)
+            } else if query.match_whole_word {
+                glob_match_word(&target, &pattern)
             } else {
                 glob_match_substring(&target, &pattern)
             }
@@ -154,12 +170,15 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
                 entry.name()
             };
             if query.match_case {
-                re.is_match(text)
+                regex_matches(re, text, query.match_whole_word)
             } else {
-                re.is_match(&text.to_lowercase())
+                regex_matches(re, &text.to_lowercase(), query.match_whole_word)
             }
         }
         CompiledTerm::Not(inner) => !compiled_term_matches(entry, inner, query),
+        CompiledTerm::Or(items) => items
+            .iter()
+            .any(|item| compiled_term_matches(entry, item, query)),
     }
 }
 
@@ -196,6 +215,59 @@ fn in_range<T: PartialOrd + Copy>(value: T, range: &RangeFilter<T>) -> bool {
         }
     }
     true
+}
+
+fn contains_whole_word(text: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+
+    word_spans(text)
+        .into_iter()
+        .any(|(start, end)| &text[start..end] == needle)
+}
+
+fn regex_matches(re: &Regex, text: &str, whole_word: bool) -> bool {
+    if !whole_word {
+        return re.is_match(text);
+    }
+
+    word_spans(text).into_iter().any(|(start, end)| {
+        let word = &text[start..end];
+        re.find_iter(word)
+            .any(|m| m.start() == 0 && m.end() == word.len())
+    })
+}
+
+fn glob_match_word(text: &str, pattern: &str) -> bool {
+    word_spans(text)
+        .into_iter()
+        .any(|(start, end)| glob_match(&text[start..end], pattern))
+}
+
+fn word_spans(text: &str) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+
+    for (idx, ch) in text.char_indices() {
+        if is_word_char(ch) {
+            if start.is_none() {
+                start = Some(idx);
+            }
+        } else if let Some(word_start) = start.take() {
+            spans.push((word_start, idx));
+        }
+    }
+
+    if let Some(word_start) = start {
+        spans.push((word_start, text.len()));
+    }
+
+    spans
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_alphanumeric() || ch == '_'
 }
 
 fn glob_match(text: &str, pattern: &str) -> bool {

@@ -203,20 +203,44 @@ impl Index {
             for (i, entry) in entries.iter_mut().enumerate() {
                 let moff = offset + i * 32;
                 entry.size = u64::from_le_bytes([
-                    data[moff], data[moff + 1], data[moff + 2], data[moff + 3],
-                    data[moff + 4], data[moff + 5], data[moff + 6], data[moff + 7],
+                    data[moff],
+                    data[moff + 1],
+                    data[moff + 2],
+                    data[moff + 3],
+                    data[moff + 4],
+                    data[moff + 5],
+                    data[moff + 6],
+                    data[moff + 7],
                 ]);
                 entry.modified = i64::from_le_bytes([
-                    data[moff + 8], data[moff + 9], data[moff + 10], data[moff + 11],
-                    data[moff + 12], data[moff + 13], data[moff + 14], data[moff + 15],
+                    data[moff + 8],
+                    data[moff + 9],
+                    data[moff + 10],
+                    data[moff + 11],
+                    data[moff + 12],
+                    data[moff + 13],
+                    data[moff + 14],
+                    data[moff + 15],
                 ]);
                 entry.created = i64::from_le_bytes([
-                    data[moff + 16], data[moff + 17], data[moff + 18], data[moff + 19],
-                    data[moff + 20], data[moff + 21], data[moff + 22], data[moff + 23],
+                    data[moff + 16],
+                    data[moff + 17],
+                    data[moff + 18],
+                    data[moff + 19],
+                    data[moff + 20],
+                    data[moff + 21],
+                    data[moff + 22],
+                    data[moff + 23],
                 ]);
                 entry.accessed = i64::from_le_bytes([
-                    data[moff + 24], data[moff + 25], data[moff + 26], data[moff + 27],
-                    data[moff + 28], data[moff + 29], data[moff + 30], data[moff + 31],
+                    data[moff + 24],
+                    data[moff + 25],
+                    data[moff + 26],
+                    data[moff + 27],
+                    data[moff + 28],
+                    data[moff + 29],
+                    data[moff + 30],
+                    data[moff + 31],
                 ]);
             }
             offset += meta2_size;

@@ -36,6 +36,7 @@ pub enum TextTerm {
     Wildcard(String),
     Regex(String),
     Not(Box<TextTerm>),
+    Or(Vec<TextTerm>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,11 +288,15 @@ fn parse_sort(value: &str) -> Result<Sort, ParseError> {
         "path-desc" => Ok(Sort::PathDesc),
         "size" | "size-asc" => Ok(Sort::SizeAsc),
         "size-desc" => Ok(Sort::SizeDesc),
-        "modified" | "date-modified" | "modified-asc" | "date-modified-asc" => Ok(Sort::ModifiedAsc),
+        "modified" | "date-modified" | "modified-asc" | "date-modified-asc" => {
+            Ok(Sort::ModifiedAsc)
+        }
         "modified-desc" | "date-modified-desc" => Ok(Sort::ModifiedDesc),
         "created" | "date-created" | "created-asc" | "date-created-asc" => Ok(Sort::CreatedAsc),
         "created-desc" | "date-created-desc" => Ok(Sort::CreatedDesc),
-        "accessed" | "date-accessed" | "accessed-asc" | "date-accessed-asc" => Ok(Sort::AccessedAsc),
+        "accessed" | "date-accessed" | "accessed-asc" | "date-accessed-asc" => {
+            Ok(Sort::AccessedAsc)
+        }
         "accessed-desc" | "date-accessed-desc" => Ok(Sort::AccessedDesc),
         "extension" | "ext" | "extension-asc" | "ext-asc" => Ok(Sort::ExtensionAsc),
         "extension-desc" | "ext-desc" => Ok(Sort::ExtensionDesc),
@@ -315,6 +320,7 @@ fn apply_macro(query: &mut Query, name: &str) -> Result<(), ParseError> {
 }
 
 fn add_text_term(query: &mut Query, text: &str) -> Result<(), ParseError> {
+    let mut terms = Vec::new();
     for part in text.split('|') {
         if part.is_empty() {
             continue;
@@ -330,7 +336,13 @@ fn add_text_term(query: &mut Query, text: &str) -> Result<(), ParseError> {
             }
             _ => TextTerm::Substring(part.to_string()),
         };
-        query.terms.push(term);
+        terms.push(term);
+    }
+
+    match terms.len() {
+        0 => {}
+        1 => query.terms.push(terms.remove(0)),
+        _ => query.terms.push(TextTerm::Or(terms)),
     }
     Ok(())
 }
@@ -368,9 +380,12 @@ fn parse_size(value: &str) -> Result<RangeFilter<u64>, ParseError> {
         });
     }
     if let Some(rest) = value.strip_prefix('<') {
+        let max = parse_size_value(rest)?.checked_sub(1).ok_or_else(|| {
+            ParseError("strictly less than zero bytes is not a valid size filter".into())
+        })?;
         return Ok(RangeFilter {
             min: None,
-            max: Some(parse_size_value(rest)? - 1),
+            max: Some(max),
         });
     }
     Ok(RangeFilter {

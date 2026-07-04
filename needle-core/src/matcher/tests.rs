@@ -126,3 +126,44 @@ fn test_not_term() {
     ids.sort();
     assert_eq!(ids, vec![1, 2, 3, 4]);
 }
+
+#[test]
+fn test_or_term_matches_either_side() {
+    let idx = sample_index();
+    let mut q = substring_query("");
+    q.terms = vec![TextTerm::Or(vec![
+        TextTerm::Substring("foo".into()),
+        TextTerm::Substring("bar".into()),
+    ])];
+    let mut ids = match_query(&idx, &q);
+    ids.sort();
+    assert_eq!(ids, vec![0, 1]);
+}
+
+#[test]
+fn test_whole_word_substring_does_not_match_partial_word() {
+    let idx = sample_index();
+    let mut q = substring_query("read");
+    q.match_whole_word = true;
+    let ids = match_query(&idx, &q);
+    assert!(ids.is_empty());
+
+    q.terms = vec![TextTerm::Substring("README".into())];
+    let ids = match_query(&idx, &q);
+    assert_eq!(ids, vec![4]);
+}
+
+#[test]
+fn test_whole_word_regex_requires_full_word_match() {
+    let idx = sample_index();
+    let mut q = substring_query("");
+    q.mode = SearchMode::Regex;
+    q.match_whole_word = true;
+    q.terms = vec![TextTerm::Regex("read".into())];
+    let ids = match_query(&idx, &q);
+    assert!(ids.is_empty());
+
+    q.terms = vec![TextTerm::Regex("readme".into())];
+    let ids = match_query(&idx, &q);
+    assert_eq!(ids, vec![4]);
+}

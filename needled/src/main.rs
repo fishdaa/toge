@@ -175,31 +175,7 @@ fn highlight_path(path: &str, query: &Query) -> String {
     let parent = &path[..parent_end];
 
     let mut highlighted = name.to_string();
-    for term in &query.terms {
-        let needle = match term {
-            needle_core::query::TextTerm::Substring(s) => s.clone(),
-            needle_core::query::TextTerm::Wildcard(p) => {
-                let clean: String = p
-                    .chars()
-                    .filter(|c| *c != '*' && *c != '?')
-                    .collect();
-                if clean.is_empty() {
-                    continue;
-                }
-                clean
-            }
-            needle_core::query::TextTerm::Regex(p) => {
-                let clean: String = p
-                    .chars()
-                    .filter(|c| c.is_alphanumeric())
-                    .collect();
-                if clean.is_empty() {
-                    continue;
-                }
-                clean
-            }
-            needle_core::query::TextTerm::Not(_) => continue,
-        };
+    for needle in query.terms.iter().flat_map(term_needles) {
         let needle_lower = needle.to_lowercase();
         let name_lower = name.to_lowercase();
         let mut result = String::new();
@@ -221,6 +197,30 @@ fn highlight_path(path: &str, query: &Query) -> String {
         format!("{}{}", parent, highlighted)
     } else {
         path.to_string()
+    }
+}
+
+fn term_needles(term: &needle_core::query::TextTerm) -> Vec<String> {
+    match term {
+        needle_core::query::TextTerm::Substring(s) => vec![s.clone()],
+        needle_core::query::TextTerm::Wildcard(p) => {
+            let clean: String = p.chars().filter(|c| *c != '*' && *c != '?').collect();
+            if clean.is_empty() {
+                Vec::new()
+            } else {
+                vec![clean]
+            }
+        }
+        needle_core::query::TextTerm::Regex(p) => {
+            let clean: String = p.chars().filter(|c| c.is_alphanumeric()).collect();
+            if clean.is_empty() {
+                Vec::new()
+            } else {
+                vec![clean]
+            }
+        }
+        needle_core::query::TextTerm::Not(_) => Vec::new(),
+        needle_core::query::TextTerm::Or(items) => items.iter().flat_map(term_needles).collect(),
     }
 }
 
@@ -425,11 +425,7 @@ fn main() {
     serve(state_dir, config, state, socket).unwrap();
 }
 
-fn start_watcher(
-    state: Arc<Mutex<DaemonState>>,
-    state_dir: PathBuf,
-    config_dir: PathBuf,
-) {
+fn start_watcher(state: Arc<Mutex<DaemonState>>, state_dir: PathBuf, config_dir: PathBuf) {
     thread::Builder::new()
         .name("inotify-watcher".into())
         .spawn(move || {
@@ -469,10 +465,7 @@ fn start_watcher(
                 dirs.sort();
                 dirs.dedup();
 
-                eprintln!(
-                    "Starting inotify watcher on {} directories...",
-                    dirs.len()
-                );
+                eprintln!("Starting inotify watcher on {} directories...", dirs.len());
 
                 for dir in &dirs {
                     if let Err(e) = watcher.watch(dir) {
@@ -480,11 +473,7 @@ fn start_watcher(
                             && io::ErrorKind::NotFound != e.kind()
                             && e.raw_os_error() != Some(28)
                         {
-                            eprintln!(
-                                "Failed to watch {}: {}",
-                                dir.display(),
-                                e
-                            );
+                            eprintln!("Failed to watch {}: {}", dir.display(), e);
                         }
                     }
                 }
@@ -517,8 +506,7 @@ fn start_watcher(
                                 continue;
                             }
                             if *is_dir {
-                                let _ = watcher
-                                    .watch(&PathBuf::from(path));
+                                let _ = watcher.watch(&PathBuf::from(path));
                             }
                             let md = std::fs::metadata(path).ok();
                             let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
@@ -526,14 +514,8 @@ fn start_watcher(
                                 .duration_since(SystemTime::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs() as i64;
-                            st.index.insert_with_metadata(
-                                path,
-                                *is_dir,
-                                size,
-                                now,
-                                now,
-                                now,
-                            );
+                            st.index
+                                .insert_with_metadata(path, *is_dir, size, now, now, now);
                         }
                         WatchEvent::Delete { path } => {
                             if is_own_path(path, &state_dir, &config_dir) {
@@ -555,22 +537,13 @@ fn start_watcher(
                             }
                             st.index.remove(from);
                             let is_dir = std::path::Path::new(to).is_dir();
-                            let size = std::fs::metadata(to)
-                                .ok()
-                                .map(|m| m.len())
-                                .unwrap_or(0);
+                            let size = std::fs::metadata(to).ok().map(|m| m.len()).unwrap_or(0);
                             let now = SystemTime::now()
                                 .duration_since(SystemTime::UNIX_EPOCH)
                                 .unwrap_or_default()
                                 .as_secs() as i64;
-                            st.index.insert_with_metadata(
-                                to,
-                                is_dir,
-                                size,
-                                now,
-                                now,
-                                now,
-                            );
+                            st.index
+                                .insert_with_metadata(to, is_dir, size, now, now, now);
                             st.index.update_metadata(to);
                         }
                         WatchEvent::Overflow { .. } => {

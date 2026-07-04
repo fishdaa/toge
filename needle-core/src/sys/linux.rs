@@ -45,33 +45,25 @@ impl InotifyWatcher {
     fn resolve_paths(&self, events: Vec<WatchEvent>) -> Vec<WatchEvent> {
         events
             .into_iter()
-            .map(|ev| {
-                match &ev {
-                    WatchEvent::Create { path: name, is_dir } => {
-                        let full = self.resolve_full_path(name);
-                        WatchEvent::Create {
-                            path: full,
-                            is_dir: *is_dir,
-                        }
+            .map(|ev| match &ev {
+                WatchEvent::Create { path: name, is_dir } => {
+                    let full = self.resolve_full_path(name);
+                    WatchEvent::Create {
+                        path: full,
+                        is_dir: *is_dir,
                     }
-                    WatchEvent::Delete { path: name } => {
-                        WatchEvent::Delete {
-                            path: self.resolve_full_path(name),
-                        }
-                    }
-                    WatchEvent::Modify { path: name } => {
-                        WatchEvent::Modify {
-                            path: self.resolve_full_path(name),
-                        }
-                    }
-                    WatchEvent::Move { from, to } => {
-                        WatchEvent::Move {
-                            from: self.resolve_full_path(from),
-                            to: self.resolve_full_path(to),
-                        }
-                    }
-                    other => other.clone(),
                 }
+                WatchEvent::Delete { path: name } => WatchEvent::Delete {
+                    path: self.resolve_full_path(name),
+                },
+                WatchEvent::Modify { path: name } => WatchEvent::Modify {
+                    path: self.resolve_full_path(name),
+                },
+                WatchEvent::Move { from, to } => WatchEvent::Move {
+                    from: self.resolve_full_path(from),
+                    to: self.resolve_full_path(to),
+                },
+                other => other.clone(),
             })
             .collect()
     }

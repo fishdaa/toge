@@ -136,7 +136,13 @@ fn render_results(paths: &[String], format: OutputFormat, no_header: bool) -> St
     }
 }
 
-fn render_table(paths: &[String], header: &str, sep: &str, line_end: &str, no_header: bool) -> String {
+fn render_table(
+    paths: &[String],
+    header: &str,
+    sep: &str,
+    line_end: &str,
+    no_header: bool,
+) -> String {
     let mut output = String::new();
     if !no_header {
         output.push_str(header);
@@ -289,10 +295,7 @@ fn main() {
     let mut paths = results.paths;
     if opts.highlight {
         let color = opts.highlight_color;
-        paths = paths
-            .into_iter()
-            .map(|p| render_ansi(&p, color))
-            .collect();
+        paths = paths.into_iter().map(|p| render_ansi(&p, color)).collect();
     }
 
     if opts.no_result_error && paths.is_empty() {

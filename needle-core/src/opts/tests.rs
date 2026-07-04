@@ -98,6 +98,24 @@ fn test_parse_export_file() {
 }
 
 #[test]
+fn test_parse_display_flags() {
+    let opts = NdlOptions::parse([
+        "ndl".into(),
+        "-no-header".into(),
+        "-pause".into(),
+        "-highlight".into(),
+        "-highlight-color".into(),
+        "7".into(),
+        "foo".into(),
+    ])
+    .unwrap();
+    assert!(opts.no_header);
+    assert!(opts.pause);
+    assert!(opts.highlight);
+    assert_eq!(opts.highlight_color, 7);
+}
+
+#[test]
 fn test_parse_meta_flags() {
     let opts = NdlOptions::parse(["ndl".into(), "-status".into()]).unwrap();
     assert!(opts.status);
@@ -113,6 +131,29 @@ fn test_parse_meta_flags() {
 
     let opts = NdlOptions::parse(["ndl".into(), "-get-total-size".into(), "foo".into()]).unwrap();
     assert!(opts.get_total_size);
+}
+
+#[test]
+fn test_parse_sort_direction_flags_affect_search() {
+    let opts = NdlOptions::parse([
+        "ndl".into(),
+        "-sort".into(),
+        "size".into(),
+        "-sort-ascending".into(),
+        "foo".into(),
+    ])
+    .unwrap();
+    assert!(opts.search.contains("sort:size-asc"));
+
+    let opts = NdlOptions::parse([
+        "ndl".into(),
+        "-sort".into(),
+        "size".into(),
+        "-sort-descending".into(),
+        "foo".into(),
+    ])
+    .unwrap();
+    assert!(opts.search.contains("sort:size-desc"));
 }
 
 #[test]
