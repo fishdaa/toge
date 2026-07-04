@@ -1,6 +1,7 @@
 //! Index persistence: save/load binary format.
 
-use crate::index::{Entry, Index};
+use crate::index::{fnv1a_64, lowered_bytes, unique_trigrams, Entry, Index};
+use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::Path;
@@ -12,17 +13,6 @@ const VERSION: u32 = 2;
 pub struct SaveStats {
     pub entry_count: u32,
     pub bytes_written: u64,
-}
-
-fn fnv1a_64(data: &[u8]) -> u64 {
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-    let mut hash = FNV_OFFSET;
-    for &b in data {
-        hash ^= b as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-    }
-    hash
 }
 
 impl Index {
@@ -109,7 +99,7 @@ impl Index {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
         }
         let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        if version != VERSION {
+        if version > VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported version",
@@ -179,8 +169,9 @@ impl Index {
             ));
         }
         let mut entries = Vec::with_capacity(entry_count);
-        for (i, path) in paths.into_iter().enumerate() {
-            let meta_off = offset + i * 5;
+        for path in paths {
+            let meta_off = offset;
+            offset += 5;
             let name_off = u16::from_le_bytes([data[meta_off], data[meta_off + 1]]);
             let ext_off = u16::from_le_bytes([data[meta_off + 2], data[meta_off + 3]]);
             let is_dir = data[meta_off + 4] != 0;
@@ -195,7 +186,6 @@ impl Index {
                 accessed: 0,
             });
         }
-        offset += entry_count * 5;
 
         // Section 2b: optional metadata fields (size, modified, created, accessed).
         let meta2_size = entry_count * 32;
@@ -260,7 +250,7 @@ impl Index {
             data[offset + 3],
         ]) as usize;
         offset += 4;
-        let mut by_ext = std::collections::HashMap::with_capacity(ext_count);
+        let mut by_ext = HashMap::with_capacity(ext_count);
         for _ in 0..ext_count {
             if offset + 4 > data.len() {
                 return Err(io::Error::new(
@@ -319,15 +309,35 @@ impl Index {
             by_ext.insert(key, ids);
         }
 
-        let mut path_to_id = std::collections::HashMap::with_capacity(entry_count);
+        let mut path_to_id = HashMap::with_capacity(entry_count);
         for (id, entry) in entries.iter().enumerate() {
-            path_to_id.insert(entry.path.clone(), id as u32);
+            let path_hash = fnv1a_64(entry.path.as_bytes());
+            path_to_id.insert(path_hash, id as u32);
+        }
+
+        // Rebuild trigram and prefix indexes from loaded entries.
+        let mut trigrams = HashMap::new();
+        let mut prefix_first_byte = HashMap::new();
+        for (id, entry) in entries.iter().enumerate() {
+            let id = id as u32;
+            let name_lower = lowered_bytes(entry.name());
+            for trigram in unique_trigrams(&name_lower) {
+                trigrams.entry(trigram).or_insert_with(Vec::new).push(id);
+            }
+            if let Some(&first_byte) = name_lower.first() {
+                prefix_first_byte
+                    .entry(first_byte)
+                    .or_insert_with(Vec::new)
+                    .push(id);
+            }
         }
 
         Ok(Index {
             entries,
             by_ext,
             path_to_id,
+            trigrams,
+            prefix_first_byte,
         })
     }
 }

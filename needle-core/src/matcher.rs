@@ -1,6 +1,6 @@
 //! Evaluate a parsed Query against Index entries.
 
-use crate::index::{Entry, Index};
+use crate::index::{contains_ignore_case, Entry, Index};
 use crate::query::{Query, RangeFilter, TextTerm};
 use regex::Regex;
 
@@ -74,17 +74,30 @@ fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool
 
     if let Some(path_filter) = &query.path_filter {
         let haystack = if query.match_case {
-            entry.path.clone()
+            entry.path.as_bytes()
         } else {
-            entry.path.to_lowercase()
+            &[]
         };
-        let needle = if query.match_case {
-            path_filter.clone()
+        let needle_bytes: Vec<u8> = if query.match_case {
+            path_filter.as_bytes().to_vec()
         } else {
-            path_filter.to_lowercase()
+            path_filter.to_lowercase().bytes().collect()
         };
-        if !haystack.contains(&needle) {
-            return false;
+        if query.match_case {
+            if !haystack
+                .windows(needle_bytes.len())
+                .any(|w| w == needle_bytes)
+            {
+                return false;
+            }
+        } else {
+            let path_lower: Vec<u8> = entry.path.to_lowercase().bytes().collect();
+            if !path_lower
+                .windows(needle_bytes.len())
+                .any(|w| w == needle_bytes)
+            {
+                return false;
+            }
         }
     }
 
@@ -131,12 +144,39 @@ fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool
 fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> bool {
     match term {
         CompiledTerm::Substring(s) => {
-            let haystack = haystack(entry, query);
-            let needle = normalize(s, query);
-            if query.match_whole_word {
-                contains_whole_word(&haystack, &needle)
+            let needle = if query.match_case {
+                s.as_bytes().to_vec()
             } else {
-                haystack.contains(&needle)
+                s.to_lowercase().bytes().collect()
+            };
+            if needle.is_empty() {
+                return true;
+            }
+            if query.match_path {
+                let haystack: Vec<u8> = if query.match_case {
+                    entry.path.as_bytes().to_vec()
+                } else {
+                    entry.path.to_lowercase().bytes().collect()
+                };
+                if query.match_whole_word {
+                    contains_whole_word_bytes(&haystack, &needle)
+                } else {
+                    haystack.windows(needle.len()).any(|w| w == needle)
+                }
+            } else {
+                let name = entry.name();
+                if query.match_whole_word {
+                    let haystack: Vec<u8> = if query.match_case {
+                        name.as_bytes().to_vec()
+                    } else {
+                        name.to_lowercase().bytes().collect()
+                    };
+                    contains_whole_word_bytes(&haystack, &needle)
+                } else if query.match_case {
+                    name.as_bytes().windows(needle.len()).any(|w| w == needle)
+                } else {
+                    contains_ignore_case(name, &needle)
+                }
             }
         }
         CompiledTerm::Wildcard(pattern) => {
@@ -182,27 +222,6 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
     }
 }
 
-fn haystack(entry: &Entry, query: &Query) -> String {
-    let text = if query.match_path {
-        &entry.path
-    } else {
-        entry.name()
-    };
-    if query.match_case {
-        text.to_string()
-    } else {
-        text.to_lowercase()
-    }
-}
-
-fn normalize(s: &str, query: &Query) -> String {
-    if query.match_case {
-        s.to_string()
-    } else {
-        s.to_lowercase()
-    }
-}
-
 fn in_range<T: PartialOrd + Copy>(value: T, range: &RangeFilter<T>) -> bool {
     if let Some(min) = range.min {
         if value < min {
@@ -217,12 +236,17 @@ fn in_range<T: PartialOrd + Copy>(value: T, range: &RangeFilter<T>) -> bool {
     true
 }
 
-fn contains_whole_word(text: &str, needle: &str) -> bool {
+fn contains_whole_word_bytes(text: &[u8], needle: &[u8]) -> bool {
     if needle.is_empty() {
         return true;
     }
+    if !text.is_ascii() || !needle.is_ascii() {
+        let text = std::str::from_utf8(text).unwrap_or_default();
+        let needle = std::str::from_utf8(needle).unwrap_or_default();
+        return contains_whole_word(text, needle);
+    }
 
-    word_spans(text)
+    word_spans_bytes(text)
         .into_iter()
         .any(|(start, end)| &text[start..end] == needle)
 }
@@ -245,12 +269,43 @@ fn glob_match_word(text: &str, pattern: &str) -> bool {
         .any(|(start, end)| glob_match(&text[start..end], pattern))
 }
 
+fn contains_whole_word(text: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+
+    word_spans(text)
+        .into_iter()
+        .any(|(start, end)| &text[start..end] == needle)
+}
+
 fn word_spans(text: &str) -> Vec<(usize, usize)> {
     let mut spans = Vec::new();
     let mut start = None;
 
     for (idx, ch) in text.char_indices() {
         if is_word_char(ch) {
+            if start.is_none() {
+                start = Some(idx);
+            }
+        } else if let Some(word_start) = start.take() {
+            spans.push((word_start, idx));
+        }
+    }
+
+    if let Some(word_start) = start {
+        spans.push((word_start, text.len()));
+    }
+
+    spans
+}
+
+fn word_spans_bytes(text: &[u8]) -> Vec<(usize, usize)> {
+    let mut spans = Vec::new();
+    let mut start = None;
+
+    for (idx, &ch) in text.iter().enumerate() {
+        if ch.is_ascii_alphanumeric() || ch == b'_' {
             if start.is_none() {
                 start = Some(idx);
             }

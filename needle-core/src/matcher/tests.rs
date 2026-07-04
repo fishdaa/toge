@@ -167,3 +167,22 @@ fn test_whole_word_regex_requires_full_word_match() {
     let ids = match_query(&idx, &q);
     assert_eq!(ids, vec![4]);
 }
+
+#[test]
+fn test_matcher_case_insensitive_unicode_substring() {
+    let mut idx = Index::new();
+    idx.insert("/tmp/Äpfel.txt", false);
+    let q = substring_query("äpf");
+    let ids = match_query(&idx, &q);
+    assert_eq!(ids, vec![0]);
+}
+
+#[test]
+fn test_matcher_whole_word_unicode_substring() {
+    let mut idx = Index::new();
+    idx.insert("/tmp/straße.rs", false);
+    let mut q = substring_query("straße");
+    q.match_whole_word = true;
+    let ids = match_query(&idx, &q);
+    assert_eq!(ids, vec![0]);
+}

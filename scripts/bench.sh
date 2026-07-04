@@ -30,47 +30,43 @@ parse_bench_output() {
     local output_file="$2"
 
     awk '
-    function print_row(metric, ms, aux) {
-        printf "%s\t%s\t%s\n", metric, ms, aux
+    function to_us(val, unit) {
+        gsub(/[^0-9.]/, "", val)
+        if (unit ~ /µs|us/) return val + 0
+        if (unit ~ /ms/) return (val + 0) * 1000
+        if (unit ~ /s/)  return (val + 0) * 1000000
+        return val + 0
+    }
+    function print_row(metric, us, aux) {
+        printf "%s\t%.1f\t%s\n", metric, us, aux
     }
     /^insert[[:space:]]+[0-9]+ entries:/ {
-        size=$2
-        ms=$4
-        gsub(/[^0-9.]/, "", ms)
-        print_row("insert-" size, ms, $6)
+        size=$2; val=$4; unit=$5
+        print_row("insert-" size, to_us(val, unit), $6)
     }
     /^substr miss[[:space:]]+[0-9]+ entries:/ {
-        size=$3
-        ms=$5
-        gsub(/[^0-9.]/, "", ms)
-        print_row("substr-miss-" size, ms, $7)
+        size=$3; val=$5; unit=$6
+        print_row("substr-miss-" size, to_us(val, unit), $7)
     }
     /^substr hit[[:space:]]+[0-9]+ entries:/ {
-        size=$3
-        ms=$5
-        gsub(/[^0-9.]/, "", ms)
-        print_row("substr-hit-" size, ms, $7)
+        size=$3; val=$5; unit=$6
+        print_row("substr-hit-" size, to_us(val, unit), $7)
     }
     /^prefix[[:space:]]+[0-9]+ entries:/ {
-        size=$2
-        ms=$4
-        gsub(/[^0-9.]/, "", ms)
-        print_row("prefix-" size, ms, $6)
+        size=$2; val=$4; unit=$5
+        print_row("prefix-" size, to_us(val, unit), $6)
     }
     /^  save:/ {
-        ms=$2
-        gsub(/[^0-9.]/, "", ms)
-        print_row("persistence-save", ms, $4)
+        val=$2; unit=$3
+        print_row("persistence-save", to_us(val, unit), $4)
     }
     /^  load:/ {
-        ms=$2
-        gsub(/[^0-9.]/, "", ms)
-        print_row("persistence-load", ms, "")
+        val=$2; unit=$3
+        print_row("persistence-load", to_us(val, unit), "")
     }
     /^walk[[:space:]]+/ {
-        ms=$4
-        gsub(/[^0-9.]/, "", ms)
-        print_row("walk-synthetic", ms, $6)
+        val=$4; unit=$5
+        print_row("walk-synthetic", to_us(val, unit), $6)
     }
     ' "$input_file" > "$output_file"
 }
@@ -108,6 +104,11 @@ compare_bench() {
     fi
 
     awk -F '\t' '
+    function fmt_us(us) {
+        if (us < 1000) return sprintf("%4.0f µs", us)
+        if (us < 1000000) return sprintf("%7.2f ms", us / 1000)
+        return sprintf("%7.2f  s", us / 1000000)
+    }
     FNR == 1 {
         file_index++
         files[file_index] = FILENAME
@@ -122,7 +123,7 @@ compare_bench() {
     END {
         printf "%-24s", "metric"
         for (i = 1; i <= file_index; i++) {
-            printf " | %12s", files[i]
+            printf " | %14s", files[i]
         }
         printf "\n"
 
@@ -133,10 +134,10 @@ compare_bench() {
             for (i = 1; i <= file_index; i++) {
                 if ((key, i) in values) {
                     if (i == 1 || !((key, i - 1) in values) || values[key, i - 1] == 0) {
-                        printf " | %7.1f %4s", values[key, i], "-"
+                        printf " | %7s %4s", fmt_us(values[key, i]), "-"
                     } else {
                         delta = ((values[key, i] - values[key, i - 1]) / values[key, i - 1]) * 100
-                        printf " | %7.1f %+.1f%%", values[key, i], delta
+                        printf " | %7s %+.1f%%", fmt_us(values[key, i]), delta
                     }
                 } else {
                     printf " | %12s", "-"

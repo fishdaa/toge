@@ -3,7 +3,7 @@
 
 use needle_core::index::Index;
 use std::fs;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 fn temp_dir() -> std::path::PathBuf {
     let mut dir = std::env::temp_dir();
@@ -31,6 +31,17 @@ fn main() {
     bench_walk_synthetic();
 }
 
+fn fmt_dur(d: Duration) -> String {
+    let us = d.as_micros();
+    if us < 1000 {
+        format!("{:>4} µs", us)
+    } else if us < 1_000_000 {
+        format!("{:>7.2} ms", d.as_secs_f64() * 1000.0)
+    } else {
+        format!("{:>7.2} s", d.as_secs_f64())
+    }
+}
+
 fn bench_insert(n: usize) {
     let start = Instant::now();
     let mut idx = Index::new();
@@ -41,9 +52,9 @@ fn bench_insert(n: usize) {
     let elapsed = start.elapsed();
     let rate = n as f64 / elapsed.as_secs_f64();
     println!(
-        "insert {:>6} entries: {:>8.1} ms  ({:>10.0} entries/s)",
+        "insert {:>6} entries: {}  ({:>10.0} entries/s)",
         n,
-        elapsed.as_secs_f64() * 1000.0,
+        fmt_dur(elapsed),
         rate
     );
 }
@@ -55,34 +66,37 @@ fn bench_search(n: usize) {
         idx.insert(&path, false);
     }
 
+    // Substring miss
     let start = Instant::now();
     let results = idx.search_substring("zzzzzzzz");
     let elapsed = start.elapsed();
     println!(
-        "substr miss {:>6} entries: {:>8.1} ms  ({:>3} hits)",
+        "substr miss {:>6} entries: {}  ({:>3} hits)",
         n,
-        elapsed.as_secs_f64() * 1000.0,
+        fmt_dur(elapsed),
         results.len()
     );
 
+    // Substring hit
     let happy_query = format!("{:08}", n / 2);
     let start = Instant::now();
     let results = idx.search_substring(&happy_query);
     let elapsed = start.elapsed();
     println!(
-        "substr hit  {:>6} entries: {:>8.1} ms  ({:>3} hits)",
+        "substr hit  {:>6} entries: {}  ({:>3} hits)",
         n,
-        elapsed.as_secs_f64() * 1000.0,
+        fmt_dur(elapsed),
         results.len()
     );
 
+    // Prefix
     let start = Instant::now();
     let results = idx.search_prefix("file_000");
     let elapsed = start.elapsed();
     println!(
-        "prefix {:>6} entries: {:>8.1} ms  ({:>3} hits)",
+        "prefix {:>6} entries: {}  ({:>3} hits)",
         n,
-        elapsed.as_secs_f64() * 1000.0,
+        fmt_dur(elapsed),
         results.len()
     );
 }
@@ -99,21 +113,21 @@ fn bench_save_load(n: usize) {
 
     let start = Instant::now();
     idx.save(&path).unwrap();
-    let save_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let save_dur = start.elapsed();
 
     let start = Instant::now();
     let loaded = Index::load(&path).unwrap();
-    let load_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let load_dur = start.elapsed();
 
     let size = fs::metadata(&path).unwrap().len();
     println!();
     println!("persistence {:>6} entries:", n);
     println!(
-        "  save: {:>10.1} ms  ({:.1} MB)",
-        save_ms,
+        "  save: {}  ({:.1} MB)",
+        fmt_dur(save_dur),
         size as f64 / 1_000_000.0
     );
-    println!("  load: {:>10.1} ms", load_ms);
+    println!("  load: {}", fmt_dur(load_dur));
     assert_eq!(loaded.count(), n);
 
     fs::remove_dir_all(&dir).ok();
@@ -157,9 +171,9 @@ fn bench_walk_synthetic() {
 
     println!();
     println!(
-        "walk  {} entries: {:>10.1} ms  ({:>8} dirs/files)",
+        "walk  {} entries: {}  ({:>8} dirs/files)",
         fmt_count(expected),
-        elapsed.as_secs_f64() * 1000.0,
+        fmt_dur(elapsed),
         count
     );
 

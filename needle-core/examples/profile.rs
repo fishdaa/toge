@@ -8,6 +8,7 @@
 //!   perf record --call-graph dwarf cargo run --release --example profile -- insert
 //!   perf record --call-graph dwarf cargo run --release --example profile -- substring-miss
 //!   samply record cargo run --release --example profile -- walk
+//!   heaptrack cargo run --release --example profile -- insert
 
 use needle_core::index::Index;
 use needle_core::walker::{self, Excludes};

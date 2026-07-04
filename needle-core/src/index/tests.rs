@@ -74,6 +74,28 @@ fn test_search_prefix() {
 }
 
 #[test]
+fn test_search_prefix_empty_matches_all_entries() {
+    let idx = sample_index();
+    let mut ids = idx.search_prefix("");
+    ids.sort();
+    assert_eq!(ids, vec![0, 1, 2, 3, 4]);
+}
+
+#[test]
+fn test_search_substring_dedups_repeated_trigram_matches() {
+    let mut idx = Index::new();
+    idx.insert("/tmp/aaaa.txt", false);
+    assert_eq!(idx.search_substring("aaa"), vec![0]);
+}
+
+#[test]
+fn test_search_substring_case_insensitive_unicode() {
+    let mut idx = Index::new();
+    idx.insert("/tmp/Äpfel.txt", false);
+    assert_eq!(idx.search_substring("äpf"), vec![0]);
+}
+
+#[test]
 fn test_remove_entry() {
     let mut idx = sample_index();
     assert!(idx.remove("/home/alice/docs/foo.txt"));
