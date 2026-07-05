@@ -70,7 +70,7 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "ndl"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "needle-core",
  "tempfile",
@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "needle-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "libc",
  "regex",
@@ -87,7 +87,7 @@ dependencies = [
 
 [[package]]
 name = "needled"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "needle-core",
  "tempfile",
