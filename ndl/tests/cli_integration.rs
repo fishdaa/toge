@@ -114,6 +114,9 @@ fn setup(name: &str) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
         r#"
 [roots]
 include = ["{}"]
+
+[index]
+size = true
 "#,
         root.display()
     );
