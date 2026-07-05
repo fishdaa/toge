@@ -130,7 +130,10 @@ fn test_remove_swapped_entry_can_be_removed_after_prior_delete() {
     assert!(idx.remove("/tmp/cobra-a.log"));
 
     let trigram = pack_trigram(b'o', b'b', b'r');
-    let list = idx.trigrams.get(&trigram).expect("cobra trigram bucket exists");
+    let list = idx
+        .trigrams
+        .get(&trigram)
+        .expect("cobra trigram bucket exists");
     assert!(
         list.windows(2).all(|w| w[0] < w[1]),
         "trigram posting list must remain sorted after swap_remove, got {:?}",

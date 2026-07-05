@@ -118,8 +118,8 @@ pub(crate) fn intersect_trigram_lists(trigrams: &HashMap<u32, Vec<u32>>, keys: &
         }
 
         result.push(candidate);
-        for i in 0..lists.len() {
-            idx[i] += 1;
+        for cursor in idx.iter_mut().take(lists.len()) {
+            *cursor += 1;
         }
     }
 
@@ -168,25 +168,13 @@ pub(crate) fn starts_with_ignore_case(haystack: &str, prefix_lower: &[u8]) -> bo
 }
 
 /// Tiered search index.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Index {
     pub entries: Vec<Entry>,
     pub(crate) by_ext: HashMap<String, Vec<u32>>,
     pub(crate) path_to_id: HashMap<u64, u32>,
     pub(crate) trigrams: HashMap<u32, Vec<u32>>,
     pub(crate) prefix_first_byte: HashMap<u8, Vec<u32>>,
-}
-
-impl Default for Index {
-    fn default() -> Self {
-        Self {
-            entries: Vec::new(),
-            by_ext: HashMap::new(),
-            path_to_id: HashMap::new(),
-            trigrams: HashMap::new(),
-            prefix_first_byte: HashMap::new(),
-        }
-    }
 }
 
 impl Index {
