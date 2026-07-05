@@ -1,0 +1,59 @@
+name: Auto Tag Stable
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: auto-tag-stable-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  tag-stable:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release commit version
+        id: version
+        shell: bash
+        run: |
+          message="$(git show -s --format=%B HEAD)"
+          release_line="$(printf '%s\n' "$message" | grep -E '^chore\(release\): cut v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+          if [[ -z "$release_line" ]]; then
+            printf 'should_tag=false\n' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          version="${release_line#chore(release): cut v}"
+          manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [[ "$manifest_version" != "$version" ]]; then
+            printf 'release commit version %s does not match workspace version %s\n' "$version" "$manifest_version" >&2
+            exit 1
+          fi
+
+          git fetch --tags --force
+          if git rev-parse -q --verify "refs/tags/v${version}" >/dev/null; then
+            printf 'should_tag=false\n' >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          printf 'should_tag=true\n' >>"$GITHUB_OUTPUT"
+          printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
+
+      - name: Create stable tag
+        if: steps.version.outputs.should_tag == 'true'
+        env:
+          TAG_NAME: v${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG_NAME" -m "Stable release $TAG_NAME"
+          git push origin "$TAG_NAME"

@@ -41,10 +41,10 @@ The canonical version lives in the workspace root `Cargo.toml`.
 1. Merge releasable pull requests into `main` with the correct release labels.
 2. Let the `Release PR` workflow open or refresh the automated release PR.
 3. Review and merge the release PR once the version bump and changelog look correct.
-4. Create `release/x.y` from the merged release commit when you want a beta lane.
-5. Push fixes to `release/x.y`; each push publishes a new `vX.Y.Z-beta.N` prerelease.
-6. When the beta line is approved, run the `Promote Stable` workflow for that `release/x.y` branch.
-7. The workflow creates the stable `vX.Y.Z` tag, which triggers the stable release publish flow.
+4. Merging the release PR to `main` creates the stable `vX.Y.Z` tag automatically, which triggers artifact packaging and stable publishing.
+5. Create `release/x.y` from the stable release commit when you want a beta lane.
+6. Push fixes to `release/x.y`; each push publishes a new `vX.Y.Z-beta.N` prerelease.
+7. When the beta line is approved, run the `Promote Stable` workflow for that `release/x.y` branch if you need to publish directly from the beta branch.
 
 ### Nightly releases
 
@@ -57,6 +57,7 @@ The canonical version lives in the workspace root `Cargo.toml`.
 
 - Set `CARGO_REGISTRY_TOKEN` in GitHub repository secrets before enabling registry publishing.
 - Keep GitHub release permissions enabled for workflow-created tags and releases.
+- Enable `Read and write permissions` and `Allow GitHub Actions to create and approve pull requests` in repository Actions settings.
 
 ## Branch Protection
 

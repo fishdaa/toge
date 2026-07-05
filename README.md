@@ -124,6 +124,7 @@ Needle follows Semantic Versioning.
 - Beta prereleases use `vX.Y.Z-beta.N`
 - A rolling `nightly` tag backs the nightly prerelease channel
 - Pull requests must carry exactly one of `release:major`, `release:minor`, `release:patch`, or `release:none`
+- Merging the automated release PR on `main` creates the matching stable tag and triggers release publishing
 - GitHub Actions runs reusable checks on pull requests, `main`, `release/*`, and release tags
 - `main` also publishes nightly prerelease artifacts automatically
 
