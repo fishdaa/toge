@@ -30,6 +30,30 @@ pub struct InotifyWatcher {
     watches: HashMap<i32, String>, // wd -> dir path
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ParsedWatchEvent {
+    Create {
+        wd: i32,
+        name: String,
+        is_dir: bool,
+    },
+    Delete {
+        wd: i32,
+        name: String,
+    },
+    Modify {
+        wd: i32,
+        name: String,
+    },
+    Move {
+        from_wd: i32,
+        from_name: String,
+        to_wd: i32,
+        to_name: String,
+    },
+    Overflow,
+}
+
 impl InotifyWatcher {
     pub fn new() -> io::Result<Self> {
         let fd = unsafe { inotify_init1(IN_NONBLOCK | IN_CLOEXEC) };
@@ -42,60 +66,63 @@ impl InotifyWatcher {
         })
     }
 
-    fn resolve_paths(&self, events: Vec<WatchEvent>) -> Vec<WatchEvent> {
+    #[cfg(test)]
+    pub(crate) fn from_watch_map(fd: OwnedFd, watches: HashMap<i32, String>) -> Self {
+        Self { fd, watches }
+    }
+
+    fn resolve_paths(&self, events: Vec<ParsedWatchEvent>) -> Vec<WatchEvent> {
         events
             .into_iter()
             .map(|ev| match &ev {
-                WatchEvent::Create { path: name, is_dir } => {
-                    let full = self.resolve_full_path(name);
+                ParsedWatchEvent::Create { wd, name, is_dir } => {
+                    let full = self.resolve_full_path(*wd, name);
                     WatchEvent::Create {
                         path: full,
                         is_dir: *is_dir,
                     }
                 }
-                WatchEvent::Delete { path: name } => WatchEvent::Delete {
-                    path: self.resolve_full_path(name),
+                ParsedWatchEvent::Delete { wd, name } => WatchEvent::Delete {
+                    path: self.resolve_full_path(*wd, name),
                 },
-                WatchEvent::Modify { path: name } => WatchEvent::Modify {
-                    path: self.resolve_full_path(name),
+                ParsedWatchEvent::Modify { wd, name } => WatchEvent::Modify {
+                    path: self.resolve_full_path(*wd, name),
                 },
-                WatchEvent::Move { from, to } => WatchEvent::Move {
-                    from: self.resolve_full_path(from),
-                    to: self.resolve_full_path(to),
+                ParsedWatchEvent::Move {
+                    from_wd,
+                    from_name,
+                    to_wd,
+                    to_name,
+                } => WatchEvent::Move {
+                    from: self.resolve_full_path(*from_wd, from_name),
+                    to: self.resolve_full_path(*to_wd, to_name),
                 },
-                other => other.clone(),
+                ParsedWatchEvent::Overflow => WatchEvent::Overflow {
+                    path: String::new(),
+                },
             })
             .collect()
     }
 
-    fn resolve_full_path(&self, name: &str) -> String {
+    pub(crate) fn resolve_full_path(&self, wd: i32, name: &str) -> String {
         if name.is_empty() {
             return String::new();
         }
         if name.starts_with('/') {
             return name.to_string();
         }
-        if name.contains("overflow") {
-            return name.to_string();
-        }
-        for dir in self.watches.values() {
-            let full = format!("{}/{}", dir, name);
-            if std::path::Path::new(&full).exists() {
-                return full;
-            }
-        }
-        if let Some(first_dir) = self.watches.values().next() {
-            return format!("{}/{}", first_dir, name);
+        if let Some(dir) = self.watches.get(&wd) {
+            return format!("{}/{}", dir, name);
         }
         name.to_string()
     }
 
     /// Parse a raw inotify event buffer into structured events.
     /// Exposed for unit testing the parsing logic without touching the kernel.
-    pub fn parse_buffer(buf: &[u8]) -> Vec<WatchEvent> {
+    pub(crate) fn parse_buffer(buf: &[u8]) -> Vec<ParsedWatchEvent> {
         let mut events = Vec::new();
         let mut offset = 0;
-        let mut move_from: Option<(u32, String)> = None;
+        let mut move_from: Option<(u32, i32, String)> = None;
 
         while offset + 16 <= buf.len() {
             let wd = i32::from_le_bytes([
@@ -125,9 +152,7 @@ impl InotifyWatcher {
             offset += 16;
 
             if mask & IN_Q_OVERFLOW != 0 {
-                events.push(WatchEvent::Overflow {
-                    path: String::new(),
-                });
+                events.push(ParsedWatchEvent::Overflow);
                 continue;
             }
 
@@ -143,26 +168,25 @@ impl InotifyWatcher {
             let is_dir = mask & IN_ISDIR != 0;
 
             if mask & IN_CREATE != 0 {
-                events.push(WatchEvent::Create { path: name, is_dir });
+                events.push(ParsedWatchEvent::Create { wd, name, is_dir });
             } else if mask & IN_DELETE != 0 {
-                events.push(WatchEvent::Delete { path: name });
+                events.push(ParsedWatchEvent::Delete { wd, name });
             } else if mask & IN_MODIFY != 0 {
-                events.push(WatchEvent::Modify { path: name });
+                events.push(ParsedWatchEvent::Modify { wd, name });
             } else if mask & IN_MOVED_FROM != 0 {
-                move_from = Some((cookie, name));
+                move_from = Some((cookie, wd, name));
             } else if mask & IN_MOVED_TO != 0 {
-                if let Some((from_cookie, from_path)) = move_from.take() {
-                    if from_cookie == cookie && !from_path.is_empty() {
-                        events.push(WatchEvent::Move {
-                            from: from_path,
-                            to: name,
+                if let Some((from_cookie, from_wd, from_name)) = move_from.take() {
+                    if from_cookie == cookie && !from_name.is_empty() {
+                        events.push(ParsedWatchEvent::Move {
+                            from_wd,
+                            from_name,
+                            to_wd: wd,
+                            to_name: name,
                         });
                     }
                 }
             }
-
-            // wd -1 indicates an error/overflow from the kernel.
-            let _ = wd;
         }
 
         events

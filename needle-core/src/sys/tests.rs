@@ -1,4 +1,8 @@
 use super::*;
+#[cfg(target_os = "linux")]
+use crate::sys::linux::ParsedWatchEvent;
+use std::collections::HashMap;
+use std::os::fd::OwnedFd;
 use std::path::Path;
 
 /// A fake watcher for testing higher-level code without touching inotify.
@@ -90,8 +94,9 @@ fn inotify_parse_create_event() {
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0],
-        WatchEvent::Create {
-            path: "foo.txt".into(),
+        ParsedWatchEvent::Create {
+            wd: 0,
+            name: "foo.txt".into(),
             is_dir: false,
         }
     );
@@ -113,8 +118,28 @@ fn inotify_parse_delete_event() {
     assert_eq!(events.len(), 1);
     assert_eq!(
         events[0],
-        WatchEvent::Delete {
-            path: "old.rs".into()
+        ParsedWatchEvent::Delete {
+            wd: 0,
+            name: "old.rs".into()
         }
+    );
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn inotify_resolves_duplicate_basenames_by_watch_descriptor() {
+    let fd = OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
+    let watcher = InotifyWatcher::from_watch_map(
+        fd,
+        HashMap::from([(7, "/tmp/a".to_string()), (9, "/tmp/b".to_string())]),
+    );
+
+    assert_eq!(
+        watcher.resolve_full_path(9, "shared.txt"),
+        "/tmp/b/shared.txt"
+    );
+    assert_eq!(
+        watcher.resolve_full_path(7, "shared.txt"),
+        "/tmp/a/shared.txt"
     );
 }

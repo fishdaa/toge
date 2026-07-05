@@ -32,7 +32,7 @@ fn usage() {
 }
 
 fn version() {
-    println!("ndl 0.1.0");
+    println!("ndl 0.1.1");
 }
 
 fn default_state_dir() -> PathBuf {
@@ -63,6 +63,31 @@ fn ensure_daemon_running(sock: &Path) {
             return;
         }
     }
+}
+
+fn wait_for_ready(sock: &Path, timeout: Duration) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        match send_simple(sock, Request::Status) {
+            Ok(Response::Status(status)) if status.is_ready => return Ok(()),
+            Ok(Response::Status(_)) => {}
+            Ok(Response::Error(e)) => return Err(io::Error::other(e)),
+            Ok(_) => {}
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    io::ErrorKind::NotFound
+                        | io::ErrorKind::ConnectionRefused
+                        | io::ErrorKind::ConnectionAborted
+                ) => {}
+            Err(e) => return Err(e),
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "daemon did not become ready in time",
+    ))
 }
 
 fn connect(sock: &Path) -> io::Result<UnixStream> {
@@ -198,8 +223,14 @@ fn main() {
         match send_simple(&sock, Request::Status) {
             Ok(Response::Status(s)) => {
                 println!(
-                    "Index: {} files | ready: {} | build time: {} ms",
-                    s.indexed_count, s.is_ready, s.build_duration_ms
+                    "Index: {} files | ready: {} | watcher healthy: {} | watched dirs: {} | watch failures: {} | overflows: {} | build time: {} ms",
+                    s.indexed_count,
+                    s.is_ready,
+                    s.watcher_healthy,
+                    s.watched_dir_count,
+                    s.watch_failure_count,
+                    s.watch_overflow_count,
+                    s.build_duration_ms
                 );
             }
             Ok(_) => eprintln!("unexpected response"),
@@ -242,6 +273,10 @@ fn main() {
     }
 
     if opts.get_result_count {
+        if let Err(e) = wait_for_ready(&sock, Duration::from_secs(30)) {
+            eprintln!("query failed: {}", e);
+            process::exit(1);
+        }
         match run_query(
             &sock,
             &opts.search,
@@ -260,6 +295,10 @@ fn main() {
     }
 
     if opts.get_total_size {
+        if let Err(e) = wait_for_ready(&sock, Duration::from_secs(30)) {
+            eprintln!("query failed: {}", e);
+            process::exit(1);
+        }
         match run_query(
             &sock,
             &opts.search,
@@ -275,6 +314,11 @@ fn main() {
             }
         }
         return;
+    }
+
+    if let Err(e) = wait_for_ready(&sock, Duration::from_secs(30)) {
+        eprintln!("query failed: {}", e);
+        process::exit(1);
     }
 
     let results = match run_query(

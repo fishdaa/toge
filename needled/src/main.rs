@@ -23,6 +23,15 @@ struct DaemonState {
     index: Index,
     is_ready: bool,
     build_duration_ms: u64,
+    watcher: WatcherStatus,
+}
+
+#[derive(Clone, Debug, Default)]
+struct WatcherStatus {
+    is_healthy: bool,
+    watched_dir_count: usize,
+    watch_failure_count: usize,
+    watch_overflow_count: u64,
 }
 
 fn usage() {
@@ -37,7 +46,7 @@ fn usage() {
 }
 
 fn version() {
-    println!("needled 0.1.0");
+    println!("needled 0.1.1");
 }
 
 fn default_state_dir() -> PathBuf {
@@ -134,6 +143,115 @@ fn save_index(index: &Index, state_dir: &Path) -> io::Result<()> {
     let path = state_dir.join("index.bin");
     index.save(&path)?;
     Ok(())
+}
+
+fn current_unix_time() -> i64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+fn status_response(st: &DaemonState) -> StatusResponse {
+    StatusResponse {
+        indexed_count: st.index.count(),
+        is_ready: st.is_ready,
+        watcher_healthy: st.watcher.is_healthy,
+        watched_dir_count: st.watcher.watched_dir_count,
+        watch_failure_count: st.watcher.watch_failure_count,
+        watch_overflow_count: st.watcher.watch_overflow_count,
+        last_updated_unix: current_unix_time(),
+        build_duration_ms: st.build_duration_ms,
+    }
+}
+
+fn watched_dirs(index: &Index) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = index
+        .entries
+        .iter()
+        .map(|e| {
+            let parent_end = e.name_off as usize;
+            if parent_end > 0 {
+                PathBuf::from(&e.path[..parent_end.saturating_sub(1)])
+            } else {
+                PathBuf::from("/")
+            }
+        })
+        .collect();
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
+fn install_watches(
+    watcher: &mut InotifyWatcher,
+    dirs: &[PathBuf],
+    watcher_status: &mut WatcherStatus,
+) {
+    eprintln!("Starting inotify watcher on {} directories...", dirs.len());
+
+    watcher_status.watched_dir_count = 0;
+    watcher_status.watch_failure_count = 0;
+
+    for dir in dirs {
+        match watcher.watch(dir) {
+            Ok(()) => watcher_status.watched_dir_count += 1,
+            Err(e)
+                if e.kind() == io::ErrorKind::PermissionDenied
+                    || e.kind() == io::ErrorKind::NotFound
+                    || e.raw_os_error() == Some(28) =>
+            {
+                watcher_status.watch_failure_count += 1;
+            }
+            Err(e) => {
+                watcher_status.watch_failure_count += 1;
+                eprintln!("Failed to watch {}: {}", dir.display(), e);
+            }
+        }
+    }
+
+    watcher_status.is_healthy = watcher_status.watch_failure_count == 0;
+}
+
+fn handle_request(
+    req: Request,
+    state_dir: &Path,
+    config: &Config,
+    state: &Arc<Mutex<DaemonState>>,
+) -> Response {
+    match req {
+        Request::Flush => {
+            let st = state.lock().unwrap();
+            match save_index(&st.index, state_dir) {
+                Ok(()) => Response::Ok,
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+        Request::Reindex => {
+            let _ = fs::remove_file(state_dir.join("index.bin"));
+            let (new_index, duration) = build_index(state_dir, config);
+            if let Err(e) = save_index(&new_index, state_dir) {
+                return Response::Error(e.to_string());
+            }
+            let mut st = state.lock().unwrap();
+            st.index = new_index;
+            st.build_duration_ms = duration;
+            st.is_ready = true;
+            Response::Ok
+        }
+        Request::Status => {
+            let st = state.lock().unwrap();
+            Response::Status(status_response(&st))
+        }
+        Request::Query(q) => {
+            let st = state.lock().unwrap();
+            if !st.is_ready {
+                return Response::Error("daemon not ready".into());
+            }
+            handle_query(&st.index, &q)
+        }
+        Request::Quit => unreachable!(),
+    }
 }
 
 fn handle_query(index: &Index, q: &QueryRequest) -> Response {
@@ -307,32 +425,7 @@ fn serve(
                     break;
                 }
 
-                let mut st = state.lock().unwrap();
-                let resp = match req {
-                    Request::Flush => match save_index(&st.index, &state_dir) {
-                        Ok(()) => Response::Ok,
-                        Err(e) => Response::Error(e.to_string()),
-                    },
-                    Request::Reindex => {
-                        let _ = fs::remove_file(state_dir.join("index.bin"));
-                        let (new_index, duration) = build_index(&state_dir, &config);
-                        st.index = new_index;
-                        st.build_duration_ms = duration;
-                        st.is_ready = true;
-                        Response::Ok
-                    }
-                    Request::Status => Response::Status(StatusResponse {
-                        indexed_count: st.index.count(),
-                        is_ready: st.is_ready,
-                        last_updated_unix: SystemTime::now()
-                            .duration_since(SystemTime::UNIX_EPOCH)
-                            .unwrap_or_default()
-                            .as_secs() as i64,
-                        build_duration_ms: st.build_duration_ms,
-                    }),
-                    Request::Query(q) => handle_query(&st.index, &q),
-                    Request::Quit => unreachable!(),
-                };
+                let resp = handle_request(req, &state_dir, &config, &state);
 
                 let _ = write_response(&mut s, &resp);
             }
@@ -397,6 +490,7 @@ fn main() {
         index: Index::new(),
         is_ready: false,
         build_duration_ms: 0,
+        watcher: WatcherStatus::default(),
     }));
 
     let index_state_dir = state_dir.clone();
@@ -424,12 +518,23 @@ fn main() {
     let watcher_state = Arc::clone(&state);
     let watcher_state_dir = state_dir.clone();
     let watcher_config_dir = config_dir.clone();
-    start_watcher(watcher_state, watcher_state_dir, watcher_config_dir);
+    let watcher_config = config.clone();
+    start_watcher(
+        watcher_state,
+        watcher_state_dir,
+        watcher_config_dir,
+        watcher_config,
+    );
 
     serve(state_dir, config, state, socket).unwrap();
 }
 
-fn start_watcher(state: Arc<Mutex<DaemonState>>, state_dir: PathBuf, config_dir: PathBuf) {
+fn start_watcher(
+    state: Arc<Mutex<DaemonState>>,
+    state_dir: PathBuf,
+    config_dir: PathBuf,
+    config: Config,
+) {
     thread::Builder::new()
         .name("inotify-watcher".into())
         .spawn(move || {
@@ -451,36 +556,14 @@ fn start_watcher(state: Arc<Mutex<DaemonState>>, state_dir: PathBuf, config_dir:
                 }
             };
 
-            {
+            let dirs = {
                 let st = state.lock().unwrap();
-                let mut dirs: Vec<PathBuf> = st
-                    .index
-                    .entries
-                    .iter()
-                    .map(|e| {
-                        let parent_end = e.name_off as usize;
-                        if parent_end > 0 {
-                            PathBuf::from(&e.path[..parent_end.saturating_sub(1)])
-                        } else {
-                            PathBuf::from("/")
-                        }
-                    })
-                    .collect();
-                dirs.sort();
-                dirs.dedup();
+                watched_dirs(&st.index)
+            };
 
-                eprintln!("Starting inotify watcher on {} directories...", dirs.len());
-
-                for dir in &dirs {
-                    if let Err(e) = watcher.watch(dir) {
-                        if e.kind() != io::ErrorKind::PermissionDenied
-                            && io::ErrorKind::NotFound != e.kind()
-                            && e.raw_os_error() != Some(28)
-                        {
-                            eprintln!("Failed to watch {}: {}", dir.display(), e);
-                        }
-                    }
-                }
+            {
+                let mut st = state.lock().unwrap();
+                install_watches(&mut watcher, &dirs, &mut st.watcher);
             }
 
             loop {
@@ -502,57 +585,89 @@ fn start_watcher(state: Arc<Mutex<DaemonState>>, state_dir: PathBuf, config_dir:
                     continue;
                 }
 
-                let mut st = state.lock().unwrap();
-                for event in events {
-                    match &event {
-                        WatchEvent::Create { path, is_dir } => {
-                            if is_own_path(path, &state_dir, &config_dir) {
-                                continue;
+                let mut needs_reindex = false;
+                {
+                    let mut st = state.lock().unwrap();
+                    for event in events {
+                        match &event {
+                            WatchEvent::Create { path, is_dir } => {
+                                if is_own_path(path, &state_dir, &config_dir) {
+                                    continue;
+                                }
+                                if *is_dir {
+                                    match watcher.watch(&PathBuf::from(path)) {
+                                        Ok(()) => st.watcher.watched_dir_count += 1,
+                                        Err(e)
+                                            if e.kind() == io::ErrorKind::PermissionDenied
+                                                || e.kind() == io::ErrorKind::NotFound
+                                                || e.raw_os_error() == Some(28) =>
+                                        {
+                                            st.watcher.watch_failure_count += 1;
+                                            st.watcher.is_healthy = false;
+                                        }
+                                        Err(e) => {
+                                            st.watcher.watch_failure_count += 1;
+                                            st.watcher.is_healthy = false;
+                                            eprintln!("Failed to watch {}: {}", path, e);
+                                        }
+                                    }
+                                }
+                                let md = std::fs::metadata(path).ok();
+                                let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
+                                let now = current_unix_time();
+                                st.index
+                                    .insert_with_metadata(path, *is_dir, size, now, now, now);
                             }
-                            if *is_dir {
-                                let _ = watcher.watch(&PathBuf::from(path));
+                            WatchEvent::Delete { path } => {
+                                if is_own_path(path, &state_dir, &config_dir) {
+                                    continue;
+                                }
+                                st.index.remove(path);
                             }
-                            let md = std::fs::metadata(path).ok();
-                            let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
-                            let now = SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as i64;
-                            st.index
-                                .insert_with_metadata(path, *is_dir, size, now, now, now);
-                        }
-                        WatchEvent::Delete { path } => {
-                            if is_own_path(path, &state_dir, &config_dir) {
-                                continue;
+                            WatchEvent::Modify { path } => {
+                                if is_own_path(path, &state_dir, &config_dir) {
+                                    continue;
+                                }
+                                st.index.update_metadata(path);
                             }
-                            st.index.remove(path);
-                        }
-                        WatchEvent::Modify { path } => {
-                            if is_own_path(path, &state_dir, &config_dir) {
-                                continue;
+                            WatchEvent::Move { from, to } => {
+                                if is_own_path(to, &state_dir, &config_dir)
+                                    || is_own_path(from, &state_dir, &config_dir)
+                                {
+                                    continue;
+                                }
+                                st.index.remove(from);
+                                let is_dir = std::path::Path::new(to).is_dir();
+                                let size = std::fs::metadata(to).ok().map(|m| m.len()).unwrap_or(0);
+                                let now = current_unix_time();
+                                st.index
+                                    .insert_with_metadata(to, is_dir, size, now, now, now);
+                                st.index.update_metadata(to);
                             }
-                            st.index.update_metadata(path);
-                        }
-                        WatchEvent::Move { from, to } => {
-                            if is_own_path(to, &state_dir, &config_dir)
-                                || is_own_path(from, &state_dir, &config_dir)
-                            {
-                                continue;
+                            WatchEvent::Overflow { .. } => {
+                                eprintln!(
+                                    "inotify queue overflow — some events may have been lost"
+                                );
+                                st.watcher.watch_overflow_count += 1;
+                                st.watcher.is_healthy = false;
+                                needs_reindex = true;
                             }
-                            st.index.remove(from);
-                            let is_dir = std::path::Path::new(to).is_dir();
-                            let size = std::fs::metadata(to).ok().map(|m| m.len()).unwrap_or(0);
-                            let now = SystemTime::now()
-                                .duration_since(SystemTime::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_secs() as i64;
-                            st.index
-                                .insert_with_metadata(to, is_dir, size, now, now, now);
-                            st.index.update_metadata(to);
                         }
-                        WatchEvent::Overflow { .. } => {
-                            eprintln!("inotify queue overflow — some events may have been lost");
-                        }
+                    }
+                    st.watcher.is_healthy = st.watcher.watch_failure_count == 0 && !needs_reindex;
+                }
+
+                if needs_reindex {
+                    let _ = fs::remove_file(state_dir.join("index.bin"));
+                    let (new_index, duration) = build_index(&state_dir, &config);
+                    let _ = save_index(&new_index, &state_dir);
+                    let dirs = watched_dirs(&new_index);
+                    {
+                        let mut st = state.lock().unwrap();
+                        st.index = new_index;
+                        st.build_duration_ms = duration;
+                        st.is_ready = true;
+                        install_watches(&mut watcher, &dirs, &mut st.watcher);
                     }
                 }
             }

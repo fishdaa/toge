@@ -48,6 +48,10 @@ pub struct ResultsResponse {
 pub struct StatusResponse {
     pub indexed_count: usize,
     pub is_ready: bool,
+    pub watcher_healthy: bool,
+    pub watched_dir_count: usize,
+    pub watch_failure_count: usize,
+    pub watch_overflow_count: u64,
     pub last_updated_unix: i64,
     pub build_duration_ms: u64,
 }
@@ -201,6 +205,10 @@ impl Response {
                 buf.push(2);
                 push_usize(&mut buf, s.indexed_count);
                 buf.push(if s.is_ready { 1 } else { 0 });
+                buf.push(if s.watcher_healthy { 1 } else { 0 });
+                push_usize(&mut buf, s.watched_dir_count);
+                push_usize(&mut buf, s.watch_failure_count);
+                push_u64(&mut buf, s.watch_overflow_count);
                 push_u64(&mut buf, s.last_updated_unix as u64);
                 push_u64(&mut buf, s.build_duration_ms);
             }
@@ -239,6 +247,14 @@ impl Response {
                 let indexed_count = take_usize(bytes, &mut off).ok_or("missing indexed_count")?;
                 let is_ready = bytes.get(off).copied() == Some(1);
                 off += 1;
+                let watcher_healthy = bytes.get(off).copied() == Some(1);
+                off += 1;
+                let watched_dir_count =
+                    take_usize(bytes, &mut off).ok_or("missing watched_dir_count")?;
+                let watch_failure_count =
+                    take_usize(bytes, &mut off).ok_or("missing watch_failure_count")?;
+                let watch_overflow_count =
+                    take_u64(bytes, &mut off).ok_or("missing watch_overflow_count")?;
                 let last_updated_unix =
                     take_u64(bytes, &mut off).ok_or("missing last_updated")? as i64;
                 let build_duration_ms =
@@ -246,6 +262,10 @@ impl Response {
                 Ok(Response::Status(StatusResponse {
                     indexed_count,
                     is_ready,
+                    watcher_healthy,
+                    watched_dir_count,
+                    watch_failure_count,
+                    watch_overflow_count,
                     last_updated_unix,
                     build_duration_ms,
                 }))

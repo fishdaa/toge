@@ -20,7 +20,7 @@ fn ndl_help_exits_zero() {
 fn ndl_version_prints_version() {
     let output = run_ndl(&["-v"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("ndl 0.1.0"));
+    assert!(stdout.contains("ndl 0.1.1"));
     assert!(output.status.success());
 }
 

@@ -41,6 +41,10 @@ fn test_response_status_roundtrip() {
     let resp = Response::Status(StatusResponse {
         indexed_count: 1234,
         is_ready: true,
+        watcher_healthy: true,
+        watched_dir_count: 12,
+        watch_failure_count: 1,
+        watch_overflow_count: 2,
         last_updated_unix: 1700000000,
         build_duration_ms: 567,
     });
