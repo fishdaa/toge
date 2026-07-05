@@ -46,7 +46,7 @@ jobs:
 
       - name: Compute release metadata
         id: plan
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           LAST_STABLE_TAG: ${{ steps.latest-tag.outputs.tag }}
           LAST_STABLE_DATE: ${{ steps.latest-tag.outputs.date }}

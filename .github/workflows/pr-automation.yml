@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ensure required labels exist
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const required = [
@@ -55,7 +55,7 @@ jobs:
             }
 
       - name: Auto-apply release labels where safe
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const pr = context.payload.pull_request;
@@ -104,7 +104,7 @@ jobs:
             }
 
       - name: Enforce exactly one release label
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const { data: issue } = await github.rest.issues.get({
