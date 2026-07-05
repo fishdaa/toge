@@ -1,6 +1,5 @@
 //! CLI display and export integration tests using a real toged instance.
 
-use toge_core::ipc::{Request, Response};
 use std::fs;
 use std::io::{Read, Write};
 use std::os::unix::net::UnixStream;
@@ -8,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::Duration;
+use toge_core::ipc::{Request, Response};
 
 fn test_dir(name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("toge-cli-test-{}-{}", std::process::id(), name))

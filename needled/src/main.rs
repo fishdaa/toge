@@ -1,14 +1,5 @@
 //! toged — background indexing daemon.
 
-use toge_core::config::Config;
-use toge_core::index::Index;
-use toge_core::ipc::{QueryRequest, Request, Response, ResultsResponse, StatusResponse};
-use toge_core::matcher::match_query;
-use toge_core::query::Query;
-use toge_core::sort::{sort_ids, SortKey};
-use toge_core::sys::FsWatcher;
-use toge_core::sys::{InotifyWatcher, WatchEvent};
-use toge_core::walker::{walk, Excludes};
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -18,6 +9,15 @@ use std::process;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Instant, SystemTime};
+use toge_core::config::Config;
+use toge_core::index::Index;
+use toge_core::ipc::{QueryRequest, Request, Response, ResultsResponse, StatusResponse};
+use toge_core::matcher::match_query;
+use toge_core::query::Query;
+use toge_core::sort::{sort_ids, SortKey};
+use toge_core::sys::FsWatcher;
+use toge_core::sys::{InotifyWatcher, WatchEvent};
+use toge_core::walker::{walk, Excludes};
 
 struct DaemonState {
     index: Index,

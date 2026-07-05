@@ -1,8 +1,5 @@
 //! toge — CLI client for toged.
 
-use toge_core::highlight::render_ansi;
-use toge_core::ipc::{OutputFormat as IpcFormat, QueryRequest, Request, Response};
-use toge_core::opts::{NdlOptions, OutputFormat};
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -11,6 +8,9 @@ use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::thread;
 use std::time::Duration;
+use toge_core::highlight::render_ansi;
+use toge_core::ipc::{OutputFormat as IpcFormat, QueryRequest, Request, Response};
+use toge_core::opts::{NdlOptions, OutputFormat};
 
 fn usage() {
     println!("toge [options] <search text>");

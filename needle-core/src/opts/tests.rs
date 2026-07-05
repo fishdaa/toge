@@ -126,7 +126,8 @@ fn test_parse_meta_flags() {
     let opts = NdlOptions::parse(["toge".into(), "-reindex".into()]).unwrap();
     assert!(opts.reindex);
 
-    let opts = NdlOptions::parse(["toge".into(), "-get-result-count".into(), "foo".into()]).unwrap();
+    let opts =
+        NdlOptions::parse(["toge".into(), "-get-result-count".into(), "foo".into()]).unwrap();
     assert!(opts.get_result_count);
 
     let opts = NdlOptions::parse(["toge".into(), "-get-total-size".into(), "foo".into()]).unwrap();

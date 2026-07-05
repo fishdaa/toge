@@ -10,13 +10,13 @@
 //!   samply record cargo run --release --example profile -- walk
 //!   heaptrack cargo run --release --example profile -- insert
 
-use toge_core::index::Index;
-use toge_core::walker::{self, Excludes};
 use std::env;
 use std::fs;
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use toge_core::index::Index;
+use toge_core::walker::{self, Excludes};
 
 const DEFAULT_SIZE: usize = 500_000;
 const DEFAULT_ITERATIONS: usize = 20;

@@ -1,9 +1,9 @@
 //! Performance benchmarks for toge-core.
 //! Run with: cargo run --release --example bench
 
-use toge_core::index::Index;
 use std::fs;
 use std::time::{Duration, Instant};
+use toge_core::index::Index;
 
 fn temp_dir() -> std::path::PathBuf {
     let mut dir = std::env::temp_dir();
