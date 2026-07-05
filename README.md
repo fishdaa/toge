@@ -70,7 +70,7 @@ cargo build --workspace
 ### Development Checks
 
 ```bash
-cargo fmt --check
+cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
 ```
@@ -120,9 +120,12 @@ The current perf takeaways and optimization notes live in `needle-docs/findings.
 Needle follows Semantic Versioning.
 
 - The canonical version is declared in the workspace root `Cargo.toml`
-- Git tags use the `vX.Y.Z` format
-- GitHub Actions runs CI on pushes and pull requests
-- Release tags trigger the release workflow and GitHub Release packaging
+- Stable Git tags use the `vX.Y.Z` format
+- Beta prereleases use `vX.Y.Z-beta.N`
+- A rolling `nightly` tag backs the nightly prerelease channel
+- Pull requests must carry exactly one of `release:major`, `release:minor`, `release:patch`, or `release:none`
+- GitHub Actions runs reusable checks on pull requests, `main`, `release/*`, and release tags
+- `main` also publishes nightly prerelease artifacts automatically
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and release checklist.
 

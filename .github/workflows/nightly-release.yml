@@ -1,0 +1,72 @@
+name: Nightly Release
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nightly-release
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: refs/heads/main
+
+  publish-nightly:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compute nightly version
+        id: nightly
+        shell: bash
+        run: |
+          base_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          nightly_version="${base_version}-nightly.$(date -u +%Y%m%d)+$(git rev-parse --short HEAD)"
+          printf 'version=%s\n' "$nightly_version" >>"$GITHUB_OUTPUT"
+
+      - name: Build release binaries
+        run: cargo build --workspace --release
+
+      - name: Package nightly artifacts
+        run: scripts/release/package-artifacts.sh "${{ steps.nightly.outputs.version }}" nightly
+
+      - name: Move rolling nightly tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f nightly
+          git push origin refs/tags/nightly --force
+
+      - name: Publish nightly GitHub prerelease
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: nightly
+          prerelease: true
+          make_latest: false
+          body: |
+            Rolling nightly build from `main`.
+
+            Version: `${{ steps.nightly.outputs.version }}`
+          files: |
+            dist/needle-*.tar.gz
+            dist/needle-*.sha256
+

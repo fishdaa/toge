@@ -1,0 +1,87 @@
+name: Beta Release
+
+on:
+  push:
+    branches:
+      - "release/**"
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: Release branch to publish, for example release/0.2
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beta-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: ${{ inputs.release_branch && format('refs/heads/{0}', inputs.release_branch) || github.ref }}
+
+  publish-beta:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_branch || github.ref_name }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Compute beta tag
+        id: beta
+        shell: bash
+        run: |
+          base_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          tag="$(scripts/release/next-beta-tag.sh "$base_version")"
+          printf 'tag=%s\n' "$tag" >>"$GITHUB_OUTPUT"
+          printf 'version=%s\n' "${tag#v}" >>"$GITHUB_OUTPUT"
+
+      - name: Set beta workspace version
+        run: scripts/release/set-version.sh "${{ steps.beta.outputs.version }}"
+
+      - name: Build release binaries
+        run: cargo build --workspace --release
+
+      - name: Package beta artifacts
+        id: package
+        run: scripts/release/package-artifacts.sh "${{ steps.beta.outputs.tag }}" beta
+
+      - name: Create beta tag
+        env:
+          TAG_NAME: ${{ steps.beta.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG_NAME" -m "Beta release $TAG_NAME"
+          git push origin "$TAG_NAME"
+
+      - name: Publish beta GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.beta.outputs.tag }}
+          name: ${{ steps.beta.outputs.tag }}
+          prerelease: true
+          generate_release_notes: true
+          make_latest: false
+          files: |
+            dist/needle-*.tar.gz
+            dist/needle-*.sha256
+
+      - name: Publish beta crates
+        if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: scripts/release/publish-crates.sh beta

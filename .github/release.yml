@@ -1,0 +1,15 @@
+changelog:
+  categories:
+    - title: Added
+      labels:
+        - release:minor
+    - title: Fixed
+      labels:
+        - release:patch
+    - title: Changed
+      labels:
+        - release:major
+        - dependencies
+    - title: Internal
+      labels:
+        - release:none

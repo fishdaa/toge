@@ -1,13 +1,26 @@
-name: CI
+name: Checks
 
 on:
   push:
     branches:
       - main
+      - "release/**"
+    tags:
+      - "v*"
   pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to validate
+        required: false
+        type: string
 
 permissions:
   contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   checks:
@@ -15,6 +28,9 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref || github.ref }}
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -25,7 +41,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
-        run: cargo fmt --check
+        run: cargo fmt --all -- --check
 
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets -- -D warnings

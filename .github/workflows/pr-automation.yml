@@ -1,0 +1,122 @@
+name: PR Automation
+
+on:
+  pull_request_target:
+    types:
+      - opened
+      - reopened
+      - synchronize
+      - labeled
+      - unlabeled
+      - edited
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: pr-automation-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ensure required labels exist
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const required = [
+              { name: "release:major", color: "B60205", description: "Next release requires a major version bump" },
+              { name: "release:minor", color: "FBCA04", description: "Next release requires a minor version bump" },
+              { name: "release:patch", color: "0E8A16", description: "Next release requires a patch version bump" },
+              { name: "release:none", color: "5319E7", description: "No end-user release impact" },
+              { name: "dependencies", color: "1D76DB", description: "Dependency maintenance" },
+            ];
+
+            for (const label of required) {
+              try {
+                await github.rest.issues.getLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  name: label.name,
+                });
+              } catch (error) {
+                if (error.status !== 404) {
+                  throw error;
+                }
+                await github.rest.issues.createLabel({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ...label,
+                });
+              }
+            }
+
+      - name: Auto-apply release labels where safe
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr = context.payload.pull_request;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const labelSet = new Set(pr.labels.map((label) => label.name));
+            const releaseLabels = ["release:major", "release:minor", "release:patch", "release:none"];
+            const currentReleaseLabels = releaseLabels.filter((label) => labelSet.has(label));
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: pr.number,
+              per_page: 100,
+            });
+            const changedFiles = files.map((file) => file.filename);
+
+            const docsOnly = changedFiles.length > 0 && changedFiles.every((file) =>
+              file.startsWith(".github/") ||
+              file === "README.md" ||
+              file === "CONTRIBUTING.md" ||
+              file === "CHANGELOG.md" ||
+              file === "SECURITY.md" ||
+              file === "LICENSE"
+            );
+
+            const labelsToAdd = [];
+            if (pr.user.login === "dependabot[bot]") {
+              if (!labelSet.has("dependencies")) {
+                labelsToAdd.push("dependencies");
+              }
+              if (currentReleaseLabels.length === 0) {
+                labelsToAdd.push("release:patch");
+              }
+            } else if (docsOnly && currentReleaseLabels.length === 0) {
+              labelsToAdd.push("release:none");
+            }
+
+            if (labelsToAdd.length > 0) {
+              await github.rest.issues.addLabels({
+                owner,
+                repo,
+                issue_number: pr.number,
+                labels: labelsToAdd,
+              });
+            }
+
+      - name: Enforce exactly one release label
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const { data: issue } = await github.rest.issues.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.payload.pull_request.number,
+            });
+            const releaseLabels = ["release:major", "release:minor", "release:patch", "release:none"];
+            const present = issue.labels
+              .map((label) => label.name)
+              .filter((label) => releaseLabels.includes(label));
+
+            if (present.length !== 1) {
+              core.setFailed(`Expected exactly one release label, found: ${present.join(", ") || "none"}`);
+            }

@@ -1,0 +1,64 @@
+name: Promote Stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_branch:
+        description: Release branch to promote, for example release/0.2
+        required: true
+        type: string
+      expected_version:
+        description: Optional stable version override
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: promote-stable-${{ inputs.release_branch }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: refs/heads/${{ inputs.release_branch }}
+
+  tag-stable:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out release branch
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.release_branch }}
+
+      - name: Resolve stable version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${{ inputs.release_branch }}" != release/* ]]; then
+            printf 'release_branch must start with release/: %s\n' "${{ inputs.release_branch }}" >&2
+            exit 1
+          fi
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
+          if [[ "$version" == *-* ]]; then
+            printf 'refusing to promote prerelease version %s\n' "$version" >&2
+            exit 1
+          fi
+          if [[ -n "${{ inputs.expected_version }}" && "${{ inputs.expected_version }}" != "$version" ]]; then
+            printf 'expected version %s does not match manifest version %s\n' "${{ inputs.expected_version }}" "$version" >&2
+            exit 1
+          fi
+          printf 'version=%s\n' "$version" >>"$GITHUB_OUTPUT"
+
+      - name: Create stable tag
+        env:
+          TAG_NAME: v${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG_NAME" -m "Stable release $TAG_NAME"
+          git push origin "$TAG_NAME"

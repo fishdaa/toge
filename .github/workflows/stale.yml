@@ -1,0 +1,31 @@
+name: Stale
+
+on:
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mark stale issues and pull requests
+        uses: actions/stale@v10
+        with:
+          days-before-stale: 45
+          days-before-close: 14
+          stale-issue-label: stale
+          stale-pr-label: stale
+          exempt-issue-labels: security, pinned
+          exempt-pr-labels: release:major, release:minor, release:patch
+          stale-issue-message: >
+            This issue has been quiet for 45 days, so it has been marked stale.
+            Comment or update it to keep it active.
+          stale-pr-message: >
+            This pull request has been quiet for 45 days, so it has been marked stale.
+            Comment or push new changes to keep it active.
+

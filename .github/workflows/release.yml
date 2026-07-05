@@ -8,12 +8,26 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: stable-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  checks:
+    if: ${{ !contains(github.ref_name, '-') }}
+    uses: ./.github/workflows/checks.yml
+    with:
+      ref: ${{ github.ref }}
+
   build-release:
+    if: ${{ !contains(github.ref_name, '-') }}
+    needs: checks
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -24,34 +38,26 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Verify tag matches workspace version
-        run: |
-          version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          tag="${GITHUB_REF_NAME#v}"
-          test "$version" = "$tag"
-
-      - name: Run quality checks
-        run: |
-          cargo fmt --check
-          cargo clippy --workspace --all-targets -- -D warnings
-          cargo test --workspace --all-targets
+        run: scripts/release/verify-tag.sh "${GITHUB_REF_NAME}"
 
       - name: Build release binaries
         run: cargo build --workspace --release
 
       - name: Package release artifacts
-        run: |
-          release_dir="release/needle-${GITHUB_REF_NAME}-linux-x86_64"
-          mkdir -p "$release_dir" dist
-          cp target/release/ndl "$release_dir"/
-          cp target/release/needled "$release_dir"/
-          cp README.md CHANGELOG.md LICENSE "$release_dir"/
-          tar -C release -czf "dist/needle-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" "$(basename "$release_dir")"
-          sha256sum "dist/needle-${GITHUB_REF_NAME}-linux-x86_64.tar.gz" > "dist/needle-${GITHUB_REF_NAME}-linux-x86_64.sha256"
+        run: scripts/release/package-artifacts.sh "${GITHUB_REF_NAME}" stable
+
+      - name: Publish stable crates
+        if: ${{ secrets.CARGO_REGISTRY_TOKEN != '' }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: scripts/release/publish-crates.sh stable
 
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
+          prerelease: false
+          make_latest: true
           files: |
             dist/needle-*.tar.gz
             dist/needle-*.sha256

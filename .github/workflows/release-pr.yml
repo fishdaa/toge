@@ -1,0 +1,183 @@
+name: Release PR
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: release-pr-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare-release-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Determine latest stable tag
+        id: latest-tag
+        shell: bash
+        run: |
+          tag="$(git tag --list 'v*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n1 || true)"
+          printf 'tag=%s\n' "$tag" >>"$GITHUB_OUTPUT"
+          if [[ -n "$tag" ]]; then
+            printf 'date=%s\n' "$(git log -1 --format=%cI "$tag")" >>"$GITHUB_OUTPUT"
+          else
+            printf 'date=%s\n' "1970-01-01T00:00:00Z" >>"$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute release metadata
+        id: plan
+        uses: actions/github-script@v8
+        env:
+          LAST_STABLE_TAG: ${{ steps.latest-tag.outputs.tag }}
+          LAST_STABLE_DATE: ${{ steps.latest-tag.outputs.date }}
+        with:
+          script: |
+            const fs = require("fs");
+
+            const manifest = fs.readFileSync("Cargo.toml", "utf8");
+            const versionMatch = manifest.match(/\[workspace\.package\][\s\S]*?^version = "([^"]+)"/m);
+            if (!versionMatch) {
+              core.setFailed("Could not find workspace version in Cargo.toml");
+              return;
+            }
+
+            const currentVersion = versionMatch[1];
+            const [major, minor, patch] = currentVersion.split(".").map(Number);
+            const sinceDate = process.env.LAST_STABLE_DATE;
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+
+            const query = `repo:${owner}/${repo} is:pr is:merged base:main merged:>=${sinceDate.slice(0, 10)}`;
+            const results = await github.paginate(github.rest.search.issuesAndPullRequests, {
+              q: query,
+              sort: "updated",
+              order: "desc",
+              per_page: 100,
+            });
+
+            const prs = results
+              .filter((pr) => pr.pull_request)
+              .filter((pr) => !pr.title.startsWith("chore(release): cut v"))
+              .filter((pr) => !pr.labels.some((label) => label.name === "release:none"));
+
+            const bumpRank = {
+              "release:patch": 1,
+              "release:minor": 2,
+              "release:major": 3,
+            };
+
+            let highest = 0;
+            const sections = {
+              Added: [],
+              Fixed: [],
+              Changed: [],
+            };
+
+            for (const pr of prs) {
+              const labelNames = pr.labels.map((label) => label.name);
+              for (const [label, rank] of Object.entries(bumpRank)) {
+                if (labelNames.includes(label) && rank > highest) {
+                  highest = rank;
+                }
+              }
+
+              let section = "Changed";
+              if (labelNames.includes("release:minor")) {
+                section = "Added";
+              } else if (labelNames.includes("release:patch")) {
+                section = "Fixed";
+              }
+
+              if (labelNames.includes("dependencies")) {
+                section = "Changed";
+              }
+
+              sections[section].push(`- ${pr.title} (#${pr.number})`);
+            }
+
+            if (highest === 0) {
+              core.setOutput("should_release", "false");
+              return;
+            }
+
+            let nextVersion = `${major}.${minor}.${patch}`;
+            if (highest === 3) {
+              nextVersion = `${major + 1}.0.0`;
+            } else if (highest === 2) {
+              nextVersion = `${major}.${minor + 1}.0`;
+            } else {
+              nextVersion = `${major}.${minor}.${patch + 1}`;
+            }
+
+            const renderedSections = Object.entries(sections)
+              .filter(([, items]) => items.length > 0)
+              .map(([title, items]) => `### ${title}\n\n${items.join("\n")}`)
+              .join("\n\n");
+
+            fs.writeFileSync("release-notes.md", renderedSections + "\n");
+
+            core.setOutput("should_release", "true");
+            core.setOutput("version", nextVersion);
+            core.setOutput("release_branch", `automation/release-v${nextVersion}`);
+            core.setOutput("title", `chore(release): cut v${nextVersion}`);
+
+      - name: Stop when there is nothing to release
+        if: steps.plan.outputs.should_release != 'true'
+        run: echo "No releasable PRs found since the last stable tag."
+
+      - name: Update workspace version
+        if: steps.plan.outputs.should_release == 'true'
+        run: scripts/release/set-version.sh "${{ steps.plan.outputs.version }}"
+
+      - name: Update changelog
+        if: steps.plan.outputs.should_release == 'true'
+        run: scripts/release/update-changelog.sh "${{ steps.plan.outputs.version }}" release-notes.md
+
+      - name: Validate release PR contents
+        if: steps.plan.outputs.should_release == 'true'
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets -- -D warnings
+          cargo test --workspace --all-targets
+
+      - name: Create release pull request
+        if: steps.plan.outputs.should_release == 'true'
+        uses: peter-evans/create-pull-request@v7
+        with:
+          branch: ${{ steps.plan.outputs.release_branch }}
+          commit-message: ${{ steps.plan.outputs.title }}
+          title: ${{ steps.plan.outputs.title }}
+          body: |
+            ## Summary
+
+            - bump the workspace version to `${{ steps.plan.outputs.version }}`
+            - roll changelog entries into the next stable release
+
+            ## Testing
+
+            - [x] `cargo fmt --all -- --check`
+            - [x] `cargo clippy --workspace --all-targets -- -D warnings`
+            - [x] `cargo test --workspace --all-targets`
+          labels: |
+            release:none
+          delete-branch: true
