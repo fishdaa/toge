@@ -1,3 +1,8 @@
+### Fixed
+
+- Automation/release v0.1.1 (#7)
+- fix: Fixed `needled` readiness semantics to ensure queries fail until… (#6)
+
 ### Changed
 
 - chore(deps): Bump peter-evans/create-pull-request from 7 to 8 (#4)
