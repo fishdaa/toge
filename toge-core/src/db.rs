@@ -4,10 +4,17 @@ use crate::index::{fnv1a_64, lowered_bytes, unique_trigrams, Entry, Index};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 const MAGIC: &[u8] = b"NDL1";
 const VERSION: u32 = 2;
+const MAX_INDEX_FILE_SIZE: usize = 1024 * 1024 * 1024;
+const MAX_PATH_SECTION_LEN: usize = 512 * 1024 * 1024;
+const MAX_ENTRY_COUNT: usize = 10_000_000;
+const MAX_EXT_KEY_LEN: usize = 1024;
+const MAX_EXT_VALUE_COUNT: usize = 10_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SaveStats {
@@ -75,6 +82,8 @@ impl Index {
         data[12..20].copy_from_slice(&checksum.to_le_bytes());
 
         let mut file = fs::File::create(&tmp_path)?;
+        #[cfg(unix)]
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
         file.write_all(&data)?;
         file.sync_all()?;
         drop(file);
@@ -91,6 +100,12 @@ impl Index {
         let mut file = fs::File::open(path)?;
         let mut data = Vec::new();
         file.read_to_end(&mut data)?;
+        if data.len() > MAX_INDEX_FILE_SIZE {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "index file too large",
+            ));
+        }
 
         if data.len() < 64 {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "file too short"));
@@ -106,6 +121,12 @@ impl Index {
             ));
         }
         let entry_count = u32::from_le_bytes([data[8], data[9], data[10], data[11]]) as usize;
+        if entry_count > MAX_ENTRY_COUNT {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "entry count exceeds limit",
+            ));
+        }
         let stored_checksum = u64::from_le_bytes([
             data[12], data[13], data[14], data[15], data[16], data[17], data[18], data[19],
         ]);
@@ -137,6 +158,12 @@ impl Index {
             data[offset + 7],
         ]) as usize;
         offset += 8;
+        if path_section_len > MAX_PATH_SECTION_LEN {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "path section exceeds limit",
+            ));
+        }
         if offset + path_section_len > data.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -162,7 +189,10 @@ impl Index {
         }
 
         // Section 2: metadata.
-        if offset + entry_count * 5 > data.len() {
+        let metadata_size = entry_count
+            .checked_mul(5)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "metadata overflow"))?;
+        if offset + metadata_size > data.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "truncated metadata section",
@@ -188,7 +218,9 @@ impl Index {
         }
 
         // Section 2b: optional metadata fields (size, modified, created, accessed).
-        let meta2_size = entry_count * 32;
+        let meta2_size = entry_count.checked_mul(32).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidData, "metadata section overflow")
+        })?;
         if offset + meta2_size <= data.len() {
             for (i, entry) in entries.iter_mut().enumerate() {
                 let moff = offset + i * 32;
@@ -265,6 +297,12 @@ impl Index {
                 data[offset + 3],
             ]) as usize;
             offset += 4;
+            if key_len > MAX_EXT_KEY_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ext key exceeds limit",
+                ));
+            }
             if offset + key_len > data.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -289,7 +327,16 @@ impl Index {
                 data[offset + 3],
             ]) as usize;
             offset += 4;
-            if offset + value_count * 4 > data.len() {
+            if value_count > MAX_EXT_VALUE_COUNT {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ext value count exceeds limit",
+                ));
+            }
+            let values_size = value_count
+                .checked_mul(4)
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "ext values overflow"))?;
+            if offset + values_size > data.len() {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "ext values overrun",
@@ -305,7 +352,7 @@ impl Index {
                     data[id_off + 3],
                 ]));
             }
-            offset += value_count * 4;
+            offset += values_size;
             by_ext.insert(key, ids);
         }
 
