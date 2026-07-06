@@ -1,6 +1,7 @@
 [package]
 name = "toged"
 description = "Daemon for building and serving the Toge filesystem index"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

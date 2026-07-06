@@ -1,6 +1,7 @@
 [package]
 name = "toge"
 description = "CLI client for querying the Toge search daemon"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
