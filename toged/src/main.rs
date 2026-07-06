@@ -183,15 +183,14 @@ fn watched_dirs(index: &Index) -> Vec<PathBuf> {
     dirs
 }
 
-fn install_watches(
-    watcher: &mut InotifyWatcher,
-    dirs: &[PathBuf],
-    watcher_status: &mut WatcherStatus,
-) {
+fn install_watches(watcher: &mut InotifyWatcher, dirs: &[PathBuf]) -> WatcherStatus {
     eprintln!("Starting inotify watcher on {} directories...", dirs.len());
 
-    watcher_status.watched_dir_count = 0;
-    watcher_status.watch_failure_count = 0;
+    let mut watcher_status = WatcherStatus {
+        watched_dir_count: 0,
+        watch_failure_count: 0,
+        ..WatcherStatus::default()
+    };
 
     for dir in dirs {
         match watcher.watch(dir) {
@@ -211,6 +210,7 @@ fn install_watches(
     }
 
     watcher_status.is_healthy = watcher_status.watch_failure_count == 0;
+    watcher_status
 }
 
 fn handle_request(
@@ -296,30 +296,57 @@ fn highlight_path(path: &str, query: &Query) -> String {
     let parent_end = path.len().saturating_sub(name.len());
     let parent = &path[..parent_end];
 
-    let mut highlighted = name.to_string();
+    let mut ranges = Vec::new();
     for needle in query.terms.iter().flat_map(term_needles) {
+        if needle.is_empty() {
+            continue;
+        }
         let needle_lower = needle.to_lowercase();
         let name_lower = name.to_lowercase();
-        let mut result = String::new();
-        let mut last = 0;
         for (pos, _) in name_lower.match_indices(&needle_lower) {
-            result.push_str(&name[last..pos]);
-            result.push('*');
-            result.push_str(&name[pos..pos + needle.len()]);
-            result.push('*');
-            last = pos + needle.len();
-        }
-        if last > 0 {
-            result.push_str(&name[last..]);
-            highlighted = result;
+            ranges.push((pos, pos + needle.len()));
         }
     }
 
+    let highlighted = apply_highlight_ranges(name, &mut ranges);
     if highlighted != name {
         format!("{}{}", parent, highlighted)
     } else {
         path.to_string()
     }
+}
+
+fn apply_highlight_ranges(text: &str, ranges: &mut [(usize, usize)]) -> String {
+    if ranges.is_empty() {
+        return text.to_string();
+    }
+
+    ranges.sort_unstable_by_key(|(start, end)| (*start, *end));
+    let mut merged = Vec::with_capacity(ranges.len());
+    for &(start, end) in ranges.iter() {
+        if let Some((_, last_end)) = merged.last_mut() {
+            if start <= *last_end {
+                *last_end = (*last_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+
+    let mut result = String::new();
+    let mut last = 0;
+    for (start, end) in merged {
+        if start > text.len() || end > text.len() || start >= end {
+            continue;
+        }
+        result.push_str(&text[last..start]);
+        result.push('*');
+        result.push_str(&text[start..end]);
+        result.push('*');
+        last = end;
+    }
+    result.push_str(&text[last..]);
+    result
 }
 
 fn term_needles(term: &toge_core::query::TextTerm) -> Vec<String> {
@@ -561,9 +588,10 @@ fn start_watcher(
                 watched_dirs(&st.index)
             };
 
+            let watcher_status = install_watches(&mut watcher, &dirs);
             {
                 let mut st = state.lock().unwrap();
-                install_watches(&mut watcher, &dirs, &mut st.watcher);
+                st.watcher = watcher_status;
             }
 
             loop {
@@ -642,7 +670,6 @@ fn start_watcher(
                                 let now = current_unix_time();
                                 st.index
                                     .insert_with_metadata(to, is_dir, size, now, now, now);
-                                st.index.update_metadata(to);
                             }
                             WatchEvent::Overflow { .. } => {
                                 eprintln!(
@@ -662,12 +689,13 @@ fn start_watcher(
                     let (new_index, duration) = build_index(&state_dir, &config);
                     let _ = save_index(&new_index, &state_dir);
                     let dirs = watched_dirs(&new_index);
+                    let watcher_status = install_watches(&mut watcher, &dirs);
                     {
                         let mut st = state.lock().unwrap();
                         st.index = new_index;
                         st.build_duration_ms = duration;
                         st.is_ready = true;
-                        install_watches(&mut watcher, &dirs, &mut st.watcher);
+                        st.watcher = watcher_status;
                     }
                 }
             }

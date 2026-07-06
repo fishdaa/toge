@@ -1,5 +1,6 @@
 ### Fixed
 
+- chore(release): update version to 0.1.8 and adjust release workflow (#14)
 - Automation/release v0.1.1 (#7)
 - fix: Fixed `needled` readiness semantics to ensure queries fail until… (#6)
 

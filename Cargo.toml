@@ -3,11 +3,11 @@ members = ["toge-core", "toged", "toge"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 authors = ["fishdaa <git@fishda.net>"]
 license = "Apache-2.0"
 repository = "https://github.com/fishdaa/needle"
 
 [workspace.dependencies]
-toge-core = { package = "toge-core", version = "0.1.8", path = "toge-core" }
+toge-core = { package = "toge-core", version = "0.1.9", path = "toge-core" }

@@ -22,10 +22,9 @@ fn compile_terms(terms: &[TextTerm]) -> CompiledTerms {
         .map(|term| match term {
             TextTerm::Substring(s) => CompiledTerm::Substring(s.clone()),
             TextTerm::Wildcard(p) => CompiledTerm::Wildcard(p.clone()),
-            TextTerm::Regex(p) => {
-                let re = Regex::new(p).unwrap_or_else(|_| Regex::new(&regex::escape(p)).unwrap());
-                CompiledTerm::Regex(re)
-            }
+            TextTerm::Regex(p) => CompiledTerm::Regex(
+                Regex::new(p).expect("regex patterns should be validated during query parsing"),
+            ),
             TextTerm::Not(inner) => CompiledTerm::Not(Box::new(
                 compile_terms(&[inner.as_ref().clone()])
                     .items

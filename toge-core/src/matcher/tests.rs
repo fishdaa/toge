@@ -186,3 +186,43 @@ fn test_matcher_whole_word_unicode_substring() {
     let ids = match_query(&idx, &q);
     assert_eq!(ids, vec![0]);
 }
+
+#[test]
+fn test_match_path_filter_excludes_non_matching_paths() {
+    let idx = sample_index();
+    let mut q = substring_query("");
+    q.path_filter = Some("videos".into());
+    let ids = match_query(&idx, &q);
+    assert!(ids.is_empty());
+}
+
+#[test]
+fn test_all_terms_must_match_for_and_query() {
+    let idx = sample_index();
+    let q = Query {
+        raw: "foo missing".into(),
+        mode: SearchMode::Substring,
+        match_case: false,
+        match_whole_word: false,
+        match_path: false,
+        require_file: false,
+        require_folder: false,
+        whole_filename: false,
+        terms: vec![
+            TextTerm::Substring("foo".into()),
+            TextTerm::Substring("missing".into()),
+        ],
+        ext: None,
+        path_filter: None,
+        size: None,
+        date_modified: None,
+        date_created: None,
+        date_accessed: None,
+        attributes: None,
+        offset: 0,
+        max_results: usize::MAX,
+        sort: crate::query::Sort::NameAsc,
+    };
+    let ids = match_query(&idx, &q);
+    assert!(ids.is_empty());
+}

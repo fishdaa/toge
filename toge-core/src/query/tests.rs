@@ -106,6 +106,42 @@ fn test_parse_date_modified_today() {
 }
 
 #[test]
+fn test_parse_date_modified_explicit_day() {
+    let q = Query::parse("dm:2025-01-01 foo").unwrap();
+    assert_eq!(
+        q.date_modified,
+        Some(RangeFilter {
+            min: Some(1_735_689_600),
+            max: Some(1_735_775_999),
+        })
+    );
+}
+
+#[test]
+fn test_parse_date_modified_invalid_value_errors() {
+    let err = Query::parse("dm:not-a-date foo").unwrap_err();
+    assert!(err.to_string().contains("invalid date"));
+}
+
+#[test]
+fn test_parse_date_modified_invalid_calendar_day_errors() {
+    let err = Query::parse("dm:2025-02-29 foo").unwrap_err();
+    assert!(err.to_string().contains("invalid date"));
+}
+
+#[test]
+fn test_parse_date_modified_invalid_month_errors() {
+    let err = Query::parse("dm:2025-13-01 foo").unwrap_err();
+    assert!(err.to_string().contains("invalid date"));
+}
+
+#[test]
+fn test_parse_date_modified_missing_day_errors() {
+    let err = Query::parse("dm:2025-01 foo").unwrap_err();
+    assert!(err.to_string().contains("invalid date"));
+}
+
+#[test]
 fn test_parse_date_created_today() {
     let q = Query::parse("dc:today foo").unwrap();
     assert!(q.date_created.is_some());
@@ -127,10 +163,30 @@ fn test_parse_file_type_macro_doc() {
 }
 
 #[test]
+fn test_parse_file_type_macro_pic_uses_webp() {
+    let q = Query::parse("pic: image").unwrap();
+    let exts = q.ext.unwrap();
+    assert!(exts.contains(&"webp".into()));
+    assert!(!exts.contains(&"webm".into()));
+}
+
+#[test]
 fn test_parse_invalid_regex_reports_error() {
     // Unclosed group should produce a parse error.
     let result = Query::parse("regex:(foo");
     assert!(result.is_err());
+}
+
+#[test]
+fn test_parse_semantically_invalid_regex_reports_error() {
+    let result = Query::parse("regex:(?P< foo");
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_parse_invalid_sort_reports_error() {
+    let err = Query::parse("sort:not-a-sort foo").unwrap_err();
+    assert!(err.to_string().contains("unknown sort"));
 }
 
 #[test]
