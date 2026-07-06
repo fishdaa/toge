@@ -131,7 +131,10 @@ fn highlight_path_leaves_non_matching_name_unchanged() {
         sort: Sort::NameAsc,
     };
 
-    assert_eq!(highlight_path("/tmp/foo_bar.txt", &query), "/tmp/foo_bar.txt");
+    assert_eq!(
+        highlight_path("/tmp/foo_bar.txt", &query),
+        "/tmp/foo_bar.txt"
+    );
 }
 
 #[test]
