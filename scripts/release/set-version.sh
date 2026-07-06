@@ -30,7 +30,7 @@ workspace_package_pattern = re.compile(
     re.MULTILINE | re.DOTALL,
 )
 workspace_dependency_pattern = re.compile(
-    r'(\[workspace\.dependencies\][^\[]*?^toge-core = \{ version = ")([^"]+)(")',
+    r'(\[workspace\.dependencies\][^\[]*?^toge-core = \{[^}]*\bversion = ")([^"]+)(")',
     re.MULTILINE | re.DOTALL,
 )
 
