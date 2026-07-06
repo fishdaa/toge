@@ -1,10 +1,14 @@
-use crate::{handle_request, DaemonState, WatcherStatus};
+use crate::{
+    apply_highlight_ranges, handle_request, highlight_path, term_needles, DaemonState,
+    WatcherStatus,
+};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
 
 use toge_core::config::Config;
 use toge_core::index::Index;
 use toge_core::ipc::{OutputFormat, QueryRequest, Request, Response};
+use toge_core::query::{Query, SearchMode, Sort, TextTerm};
 
 /// Helper to build and run the daemon binary with given args.
 fn run_needled(args: &[&str]) -> std::process::Output {
@@ -56,4 +60,82 @@ fn query_before_ready_returns_not_ready_error() {
     );
 
     assert_eq!(resp, Response::Error("daemon not ready".into()));
+}
+
+#[test]
+fn highlight_ranges_merge_overlapping_matches() {
+    let highlighted = apply_highlight_ranges("foobar", &mut vec![(0, 3), (3, 6)]);
+    assert_eq!(highlighted, "*foobar*");
+}
+
+#[test]
+fn highlight_path_marks_multiple_terms() {
+    let query = Query {
+        raw: "foo bar".into(),
+        mode: SearchMode::Substring,
+        match_case: false,
+        match_whole_word: false,
+        match_path: false,
+        require_file: false,
+        require_folder: false,
+        whole_filename: false,
+        terms: vec![
+            TextTerm::Substring("foo".into()),
+            TextTerm::Substring("bar".into()),
+        ],
+        ext: None,
+        path_filter: None,
+        size: None,
+        date_modified: None,
+        date_created: None,
+        date_accessed: None,
+        attributes: None,
+        offset: 0,
+        max_results: usize::MAX,
+        sort: Sort::NameAsc,
+    };
+
+    assert_eq!(
+        highlight_path("/tmp/foo_bar.txt", &query),
+        "/tmp/*foo*_*bar*.txt"
+    );
+}
+
+#[test]
+fn term_needles_ignores_negated_terms() {
+    let needles = term_needles(&TextTerm::Not(Box::new(TextTerm::Substring("foo".into()))));
+    assert!(needles.is_empty());
+}
+
+#[test]
+fn highlight_path_leaves_non_matching_name_unchanged() {
+    let query = Query {
+        raw: "missing".into(),
+        mode: SearchMode::Substring,
+        match_case: false,
+        match_whole_word: false,
+        match_path: false,
+        require_file: false,
+        require_folder: false,
+        whole_filename: false,
+        terms: vec![TextTerm::Substring("missing".into())],
+        ext: None,
+        path_filter: None,
+        size: None,
+        date_modified: None,
+        date_created: None,
+        date_accessed: None,
+        attributes: None,
+        offset: 0,
+        max_results: usize::MAX,
+        sort: Sort::NameAsc,
+    };
+
+    assert_eq!(highlight_path("/tmp/foo_bar.txt", &query), "/tmp/foo_bar.txt");
+}
+
+#[test]
+fn highlight_ranges_ignore_invalid_spans() {
+    let highlighted = apply_highlight_ranges("foobar", &mut vec![(10, 12), (4, 4)]);
+    assert_eq!(highlighted, "foobar");
 }

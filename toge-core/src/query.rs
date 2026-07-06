@@ -309,7 +309,7 @@ fn apply_macro(query: &mut Query, name: &str) -> Result<(), ParseError> {
         "audio" => "aac;ac3;aiff;flac;m4a;mid;midi;mp3;ogg;ra;wav;wma",
         "doc" => "doc;docx;xls;xlsx;ppt;pptx;pdf;txt;rtf;csv",
         "exe" => "exe;com;bat;cmd;msi;scr;pif",
-        "pic" => "bmp;gif;ico;jpg;jpeg;png;psd;svg;tif;tiff;webm",
+        "pic" => "bmp;gif;ico;jpg;jpeg;png;psd;svg;tif;tiff;webp",
         "video" => "avi;flv;m4v;mkv;mov;mp4;mpeg;mpg;wmv",
         "zip" => "7z;cab;bz2;gz;rar;tar;tgz;zip",
         _ => return Ok(()),
@@ -436,24 +436,81 @@ fn parse_size_value(s: &str) -> Result<u64, ParseError> {
 }
 
 fn parse_date(value: &str) -> Result<RangeFilter<i64>, ParseError> {
+    let trimmed = value.trim();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64;
-    let (start, end) = match value.trim().to_lowercase().as_str() {
+    let (start, end) = match trimmed.to_lowercase().as_str() {
         "today" => (start_of_day(now), end_of_day(now)),
         "yesterday" => (start_of_day(now - 86400), end_of_day(now - 86400)),
-        _ => {
-            return Ok(RangeFilter {
-                min: Some(now - 86400),
-                max: Some(now),
-            });
-        }
+        _ => parse_explicit_date(trimmed)?,
     };
     Ok(RangeFilter {
         min: Some(start),
         max: Some(end),
     })
+}
+
+fn parse_explicit_date(value: &str) -> Result<(i64, i64), ParseError> {
+    let mut parts = value.split('-');
+    let year = parts
+        .next()
+        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?
+        .parse::<i32>()
+        .map_err(|_| ParseError(format!("invalid date: {}", value)))?;
+    let month = parts
+        .next()
+        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?
+        .parse::<u32>()
+        .map_err(|_| ParseError(format!("invalid date: {}", value)))?;
+    let day = parts
+        .next()
+        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?
+        .parse::<u32>()
+        .map_err(|_| ParseError(format!("invalid date: {}", value)))?;
+    if parts.next().is_some() {
+        return Err(ParseError(format!("invalid date: {}", value)));
+    }
+
+    let days = days_since_unix_epoch(year, month, day)
+        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?;
+    let start = days * 86400;
+    Ok((start, start + 86400 - 1))
+}
+
+fn days_since_unix_epoch(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) {
+        return None;
+    }
+    let max_day = days_in_month(year, month);
+    if !(1..=max_day).contains(&day) {
+        return None;
+    }
+
+    let adjust = if month <= 2 { 1 } else { 0 };
+    let y = i64::from(year - adjust);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let m = i64::from(month);
+    let d = i64::from(day);
+    let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some(era * 146097 + doe - 719468)
+}
+
+fn days_in_month(year: i32, month: u32) -> u32 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        _ => 0,
+    }
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
 }
 
 fn start_of_day(ts: i64) -> i64 {
@@ -512,7 +569,9 @@ fn validate_regex(pattern: &str) -> Result<(), ParseError> {
     if !stack.is_empty() {
         return Err(ParseError("unclosed group".into()));
     }
-    Ok(())
+    regex::Regex::new(pattern)
+        .map(|_| ())
+        .map_err(|e| ParseError(format!("invalid regex: {}", e)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
