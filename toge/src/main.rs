@@ -9,7 +9,9 @@ use std::process::{self, Command};
 use std::thread;
 use std::time::Duration;
 use toge_core::highlight::render_ansi;
-use toge_core::ipc::{OutputFormat as IpcFormat, QueryRequest, Request, Response};
+use toge_core::ipc::{
+    OutputFormat as IpcFormat, QueryRequest, Request, Response, MAX_IPC_MESSAGE_SIZE,
+};
 use toge_core::opts::{NdlOptions, OutputFormat};
 
 fn usage() {
@@ -56,7 +58,7 @@ fn ensure_daemon_running(sock: &Path) {
         return;
     }
     eprintln!("toged is not running. Starting it...");
-    let _ = Command::new("toged").spawn();
+    let _ = daemon_command().spawn();
     for _ in 0..10 {
         thread::sleep(Duration::from_millis(50));
         if sock.exists() {
@@ -103,12 +105,34 @@ fn send_request(stream: &mut UnixStream, req: &Request) -> io::Result<()> {
 }
 
 fn read_response(stream: &mut UnixStream) -> io::Result<Response> {
+    read_response_from(stream)
+}
+
+fn read_response_from<R: Read>(reader: &mut R) -> io::Result<Response> {
     let mut len_buf = [0u8; 8];
-    stream.read_exact(&mut len_buf)?;
+    reader.read_exact(&mut len_buf)?;
     let len = u64::from_le_bytes(len_buf) as usize;
+    if len > MAX_IPC_MESSAGE_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "response too large",
+        ));
+    }
     let mut buf = vec![0u8; len];
-    stream.read_exact(&mut buf)?;
+    reader.read_exact(&mut buf)?;
     Response::decode(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn daemon_command() -> Command {
+    if let Ok(current) = env::current_exe() {
+        if let Some(bin_dir) = current.parent() {
+            let sibling = bin_dir.join("toged");
+            if sibling.exists() {
+                return Command::new(sibling);
+            }
+        }
+    }
+    Command::new("toged")
 }
 
 fn run_query(

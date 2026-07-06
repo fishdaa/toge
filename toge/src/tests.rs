@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::process::Command;
 
 fn run_ndl(args: &[&str]) -> std::process::Output {
@@ -62,4 +63,27 @@ fn render_default_joins_with_newlines() {
         false,
     );
     assert_eq!(output, "/tmp/foo.txt\n/tmp/bar.txt\n");
+}
+
+#[test]
+fn read_response_rejects_large_payloads() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&((toge_core::ipc::MAX_IPC_MESSAGE_SIZE + 1) as u64).to_le_bytes());
+    let mut reader = Cursor::new(bytes);
+
+    let err = super::read_response_from(&mut reader).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("response too large"));
+}
+
+#[test]
+fn read_response_rejects_malformed_body() {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    bytes.push(99);
+    let mut reader = Cursor::new(bytes);
+
+    let err = super::read_response_from(&mut reader).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("unknown response type"));
 }

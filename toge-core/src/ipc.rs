@@ -1,5 +1,8 @@
 //! IPC protocol types and serialization.
 
+pub const MAX_IPC_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+pub const MAX_RESPONSE_PATHS: usize = 1_000_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Query(QueryRequest),
@@ -232,6 +235,9 @@ impl Response {
                 let total_count = take_usize(bytes, &mut off).ok_or("missing total_count")?;
                 let total_size = take_u64(bytes, &mut off).unwrap_or(0);
                 let path_count = take_usize(bytes, &mut off).ok_or("missing path_count")?;
+                if path_count > MAX_RESPONSE_PATHS {
+                    return Err("too many paths".into());
+                }
                 let mut paths = Vec::with_capacity(path_count);
                 for _ in 0..path_count {
                     paths.push(take_string(bytes, &mut off).ok_or("missing path")?);

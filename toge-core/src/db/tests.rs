@@ -72,3 +72,88 @@ fn test_metadata_size_reported_by_saved_index() {
     let idx = sample_index();
     assert!(idx.metadata_size() > 0);
 }
+
+#[test]
+fn test_load_rejects_huge_path_section_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("huge-paths.bin");
+
+    let mut data = Vec::new();
+    data.extend_from_slice(b"NDL1");
+    data.extend_from_slice(&2u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0i64.to_le_bytes());
+    data.resize(64, 0);
+    data.extend_from_slice(&((MAX_PATH_SECTION_LEN as u64) + 1).to_le_bytes());
+    let checksum = crate::index::fnv1a_64(&[&data[..12], &data[20..]].concat());
+    data[12..20].copy_from_slice(&checksum.to_le_bytes());
+
+    fs::write(&path, data).unwrap();
+    let err = Index::load(&path).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("path section exceeds limit"));
+}
+
+#[test]
+fn test_save_restricts_index_permissions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+
+    sample_index().save(&path).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+}
+
+#[test]
+fn test_load_rejects_excessive_entry_count() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("too-many-entries.bin");
+
+    let mut data = Vec::new();
+    data.extend_from_slice(b"NDL1");
+    data.extend_from_slice(&2u32.to_le_bytes());
+    data.extend_from_slice(&((MAX_ENTRY_COUNT as u32) + 1).to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0i64.to_le_bytes());
+    data.resize(64, 0);
+    let checksum = crate::index::fnv1a_64(&[&data[..12], &data[20..]].concat());
+    data[12..20].copy_from_slice(&checksum.to_le_bytes());
+
+    fs::write(&path, data).unwrap();
+    let err = Index::load(&path).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("entry count exceeds limit"));
+}
+
+#[test]
+fn test_load_rejects_excessive_ext_key_length() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ext-key-too-large.bin");
+
+    let mut data = Vec::new();
+    data.extend_from_slice(b"NDL1");
+    data.extend_from_slice(&2u32.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.extend_from_slice(&0u32.to_le_bytes());
+    data.extend_from_slice(&0i64.to_le_bytes());
+    data.resize(64, 0);
+    data.extend_from_slice(&0u64.to_le_bytes());
+    data.extend_from_slice(&1u32.to_le_bytes());
+    data.extend_from_slice(&((MAX_EXT_KEY_LEN as u32) + 1).to_le_bytes());
+    let checksum = crate::index::fnv1a_64(&[&data[..12], &data[20..]].concat());
+    data[12..20].copy_from_slice(&checksum.to_le_bytes());
+
+    fs::write(&path, data).unwrap();
+    let err = Index::load(&path).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert!(err.to_string().contains("ext key exceeds limit"));
+}

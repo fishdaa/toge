@@ -1,6 +1,7 @@
 [package]
 name = "toge-core"
 description = "Shared indexing, query parsing, and IPC primitives for Toge"
+readme = "README.md"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

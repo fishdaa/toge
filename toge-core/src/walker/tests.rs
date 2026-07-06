@@ -154,3 +154,26 @@ fn test_excludes_system_paths() {
     assert!(ex.is_excluded(Path::new("/dev")));
     assert!(!ex.is_excluded(Path::new("/home/user")));
 }
+
+#[cfg(unix)]
+#[test]
+fn test_walk_skips_symlink_entries() {
+    use std::os::unix::fs::symlink;
+
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("real")).unwrap();
+    fs::write(dir.path().join("real").join("inside.txt"), "x").unwrap();
+    symlink(dir.path().join("real"), dir.path().join("linked-real")).unwrap();
+    symlink(
+        dir.path().join("real").join("inside.txt"),
+        dir.path().join("linked-file"),
+    )
+    .unwrap();
+
+    let mut idx = Index::new();
+    walk(dir.path(), &mut idx, &Excludes::new(), true);
+
+    assert!(idx.search_substring("linked-real").is_empty());
+    assert!(idx.search_substring("linked-file").is_empty());
+    assert!(!idx.search_substring("inside.txt").is_empty());
+}

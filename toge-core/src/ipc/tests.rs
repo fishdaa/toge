@@ -57,3 +57,44 @@ fn test_response_status_roundtrip() {
 fn test_decode_garbage_returns_error() {
     assert!(Response::decode(b"not a valid message").is_err());
 }
+
+#[test]
+fn test_request_decode_rejects_invalid_format_byte() {
+    let mut bytes = vec![1];
+    bytes.extend_from_slice(&7u64.to_le_bytes());
+    bytes.extend_from_slice(&3u64.to_le_bytes());
+    bytes.extend_from_slice(b"foo");
+    bytes.extend_from_slice(&10u64.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.push(99);
+    bytes.push(0);
+
+    let err = Request::decode(&bytes).unwrap_err();
+    assert_eq!(err, "missing format");
+}
+
+#[test]
+fn test_response_decode_rejects_excessive_path_count() {
+    let mut bytes = vec![1];
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.extend_from_slice(&0u64.to_le_bytes());
+    bytes.extend_from_slice(&((MAX_RESPONSE_PATHS + 1) as u64).to_le_bytes());
+
+    let err = Response::decode(&bytes).unwrap_err();
+    assert!(err.contains("too many paths"));
+}
+
+#[test]
+fn test_response_decode_rejects_truncated_path_payload() {
+    let mut bytes = vec![1];
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    bytes.extend_from_slice(&10u64.to_le_bytes());
+    bytes.extend_from_slice(&1u64.to_le_bytes());
+    bytes.extend_from_slice(&5u64.to_le_bytes());
+    bytes.extend_from_slice(b"abc");
+
+    let err = Response::decode(&bytes).unwrap_err();
+    assert_eq!(err, "missing path");
+}

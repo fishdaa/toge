@@ -3,6 +3,8 @@
 use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -11,7 +13,9 @@ use std::thread;
 use std::time::{Instant, SystemTime};
 use toge_core::config::Config;
 use toge_core::index::Index;
-use toge_core::ipc::{QueryRequest, Request, Response, ResultsResponse, StatusResponse};
+use toge_core::ipc::{
+    QueryRequest, Request, Response, ResultsResponse, StatusResponse, MAX_IPC_MESSAGE_SIZE,
+};
 use toge_core::matcher::match_query;
 use toge_core::query::Query;
 use toge_core::sort::{sort_ids, SortKey};
@@ -32,6 +36,56 @@ struct WatcherStatus {
     watched_dir_count: usize,
     watch_failure_count: usize,
     watch_overflow_count: u64,
+}
+
+fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    fs::create_dir_all(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+}
+
+fn set_owner_only(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
+    let fd = stream.as_raw_fd();
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    let rc = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut _ as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if len as usize != std::mem::size_of::<libc::ucred>() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected peer credential size",
+        ));
+    }
+    Ok(cred.uid)
+}
+
+fn authorize_peer(stream: &UnixStream) -> io::Result<()> {
+    let peer = peer_uid(stream)?;
+    let owner = unsafe { libc::geteuid() };
+    if peer != owner {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "unauthorized peer uid",
+        ));
+    }
+    Ok(())
 }
 
 fn usage() {
@@ -139,7 +193,7 @@ fn build_index(state_dir: &Path, config: &Config) -> (Index, u64) {
 }
 
 fn save_index(index: &Index, state_dir: &Path) -> io::Result<()> {
-    fs::create_dir_all(state_dir)?;
+    ensure_private_dir(state_dir)?;
     let path = state_dir.join("index.bin");
     index.save(&path)?;
     Ok(())
@@ -400,7 +454,7 @@ fn read_request(stream: &mut UnixStream) -> io::Result<Option<Request>> {
         Err(e) => return Err(e),
     }
     let len = u64::from_le_bytes(len_buf) as usize;
-    if len > 10 * 1024 * 1024 {
+    if len > MAX_IPC_MESSAGE_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "request too large",
@@ -427,17 +481,22 @@ fn serve(
     state: Arc<Mutex<DaemonState>>,
     socket_path: PathBuf,
 ) -> io::Result<()> {
-    fs::create_dir_all(state_dir.parent().unwrap_or(&state_dir))?;
+    ensure_private_dir(state_dir.parent().unwrap_or(&state_dir))?;
     if let Some(parent) = socket_path.parent() {
-        fs::create_dir_all(parent)?;
+        ensure_private_dir(parent)?;
     }
     let _ = fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)?;
+    set_owner_only(&socket_path)?;
     eprintln!("Listening on {}", socket_path.display());
 
     for stream in listener.incoming() {
         match stream {
             Ok(mut s) => {
+                if let Err(e) = authorize_peer(&s) {
+                    let _ = write_response(&mut s, &Response::Error(e.to_string()));
+                    continue;
+                }
                 let req = match read_request(&mut s) {
                     Ok(Some(req)) => req,
                     Ok(None) => continue,
@@ -498,8 +557,8 @@ fn main() {
 
     let state_dir = state_dir.unwrap_or_else(default_state_dir);
     let config_dir = default_config_dir();
-    fs::create_dir_all(&state_dir).unwrap();
-    fs::create_dir_all(&config_dir).unwrap();
+    ensure_private_dir(&state_dir).unwrap();
+    ensure_private_dir(&config_dir).unwrap();
 
     if clean {
         let _ = fs::remove_file(state_dir.join("index.bin"));
@@ -704,8 +763,15 @@ fn start_watcher(
 }
 
 fn is_own_path(path: &str, state_dir: &Path, config_dir: &Path) -> bool {
-    path.starts_with(state_dir.to_str().unwrap_or(""))
-        || path.starts_with(config_dir.to_str().unwrap_or(""))
+    let path = Path::new(path);
+    canonical_starts_with(path, state_dir) || canonical_starts_with(path, config_dir)
+}
+
+fn canonical_starts_with(path: &Path, root: &Path) -> bool {
+    match (fs::canonicalize(path), fs::canonicalize(root)) {
+        (Ok(path), Ok(root)) => path.starts_with(root),
+        _ => false,
+    }
 }
 
 #[cfg(test)]

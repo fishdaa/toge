@@ -7,6 +7,10 @@ pub enum SearchMode {
     Regex,
 }
 
+const MAX_REGEX_PATTERN_LEN: usize = 512;
+const MAX_REGEX_GROUP_DEPTH: usize = 8;
+const MAX_REGEX_ALTERNATIONS: usize = 32;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Query {
     pub raw: String,
@@ -541,8 +545,19 @@ fn parse_attributes(value: &str) -> AttributeFilter {
 }
 
 fn validate_regex(pattern: &str) -> Result<(), ParseError> {
+    if pattern.len() > MAX_REGEX_PATTERN_LEN {
+        return Err(ParseError(format!(
+            "regex too long: {} bytes exceeds {}",
+            pattern.len(),
+            MAX_REGEX_PATTERN_LEN
+        )));
+    }
+
     let mut stack = Vec::new();
     let mut escaped = false;
+    let mut group_depth = 0usize;
+    let mut max_group_depth = 0usize;
+    let mut alternations = 0usize;
     for c in pattern.chars() {
         if escaped {
             escaped = false;
@@ -550,11 +565,17 @@ fn validate_regex(pattern: &str) -> Result<(), ParseError> {
         }
         match c {
             '\\' => escaped = true,
-            '(' | '[' | '{' => stack.push(c),
+            '(' => {
+                stack.push(c);
+                group_depth += 1;
+                max_group_depth = max_group_depth.max(group_depth);
+            }
+            '[' | '{' => stack.push(c),
             ')' => {
                 if stack.pop() != Some('(') {
                     return Err(ParseError("unmatched )".into()));
                 }
+                group_depth = group_depth.saturating_sub(1);
             }
             ']' => {
                 if stack.pop() != Some('[') {
@@ -563,11 +584,24 @@ fn validate_regex(pattern: &str) -> Result<(), ParseError> {
             }
             '}' if stack.pop() != Some('{') => return Err(ParseError("unmatched }".into())),
             '}' => {}
+            '|' => alternations += 1,
             _ => {}
         }
     }
     if !stack.is_empty() {
         return Err(ParseError("unclosed group".into()));
+    }
+    if max_group_depth > MAX_REGEX_GROUP_DEPTH {
+        return Err(ParseError(format!(
+            "regex too complex: group nesting exceeds {}",
+            MAX_REGEX_GROUP_DEPTH
+        )));
+    }
+    if alternations > MAX_REGEX_ALTERNATIONS {
+        return Err(ParseError(format!(
+            "regex too complex: alternations exceed {}",
+            MAX_REGEX_ALTERNATIONS
+        )));
     }
     regex::Regex::new(pattern)
         .map(|_| ())

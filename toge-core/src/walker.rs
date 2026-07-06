@@ -79,8 +79,21 @@ pub fn walk(root: &Path, index: &mut Index, excludes: &Excludes, fetch_metadata:
         for entry in entries.flatten() {
             let path = entry.path();
             let is_dir = match entry.file_type() {
-                Ok(ft) => ft.is_dir(),
-                Err(_) => path.is_dir(),
+                Ok(ft) => {
+                    if ft.is_symlink() {
+                        continue;
+                    }
+                    ft.is_dir()
+                }
+                Err(_) => match fs::symlink_metadata(&path) {
+                    Ok(md) => {
+                        if md.file_type().is_symlink() {
+                            continue;
+                        }
+                        md.is_dir()
+                    }
+                    Err(_) => path.is_dir(),
+                },
             };
 
             if excludes.is_excluded(&path) {
@@ -88,7 +101,7 @@ pub fn walk(root: &Path, index: &mut Index, excludes: &Excludes, fetch_metadata:
             }
 
             if fetch_metadata {
-                let metadata = entry.metadata().ok();
+                let metadata = fs::symlink_metadata(&path).ok();
                 let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
                 let modified = metadata
                     .as_ref()
