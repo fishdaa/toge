@@ -128,6 +128,16 @@ pub fn copy_to_clipboard(text: String) {
 }
 
 #[tauri::command]
+pub fn trash_path(path: String) -> Result<(), String> {
+    crate::actions::trash_path(&path)
+}
+
+#[tauri::command]
+pub fn delete_path(path: String) -> Result<(), String> {
+    crate::actions::delete_path(&path)
+}
+
+#[tauri::command]
 pub fn reindex_index(state: State<'_, AppState>) -> Result<(), String> {
     let socket = state.socket_path();
     ipc_client::ensure_daemon_running(&socket).map_err(|e| e.to_string())?;

@@ -57,8 +57,7 @@ describe('SearchBar', () => {
 
     expect(get(query)).toBe('needle')
     expect(invoke).toHaveBeenCalledWith('search_query', {
-      query: 'needle sort:name',
-      maxResults: 50
+      query: 'needle sort:name'
     })
   })
 

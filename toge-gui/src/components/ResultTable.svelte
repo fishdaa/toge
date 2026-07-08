@@ -1,6 +1,6 @@
 <script lang="ts">
   import { results, sortColumn, sortDirection, selectedIndex, hasResults, isLoading, sizeIndexed, tableColumnWidths } from '$lib/searchStore'
-  import { setSort, selectRow, openSelected, revealSelected, copySelectedPath, formatSize, formatTimestamp, setTableColumnWidths } from '$lib/searchStore'
+  import { setSort, selectRow, selectNext, selectPrevious, openSelected, revealSelected, copySelectedPath, trashSelected, deleteSelected, formatSize, formatTimestamp, setTableColumnWidths } from '$lib/searchStore'
   import ContextMenu from './ContextMenu.svelte'
   import type { SortColumn } from '$lib/types'
   import { onDestroy, onMount } from 'svelte'
@@ -11,13 +11,14 @@
     { key: 'size', label: 'SIZE', width: 88, min: 72 },
     { key: 'modified', label: 'MODIFIED', width: 140, min: 110 }
   ]
-  const ROW_HEIGHT = 37
+  const ROW_HEIGHT = 27
   const OVERSCAN_ROWS = 8
 
   let contextMenu = $state({ visible: false, x: 0, y: 0 })
   let scrollEl: HTMLDivElement | undefined = $state(undefined)
   let scrollTop = $state(0)
   let viewportHeight = $state(0)
+  let programmaticScroll = false
 
   let removeResizeListeners: (() => void) | null = null
   let removeViewportListeners: (() => void) | null = null
@@ -41,6 +42,31 @@
 
   function closeContextMenu() {
     contextMenu.visible = false
+  }
+
+  function handleKeydown(e: KeyboardEvent) {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      selectNext()
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      selectPrevious()
+    } else if (e.key === 'Enter') {
+      e.preventDefault()
+      openSelected()
+    } else if (e.key === 'Delete' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault()
+      trashSelected()
+    } else if (e.key === 'Delete' && e.shiftKey) {
+      e.preventDefault()
+      deleteSelected()
+    } else if (e.key === 'c' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      copySelectedPath()
+    } else if (e.key === 'o' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      openSelected()
+    }
   }
 
   function startResize(index: number, event: PointerEvent) {
@@ -124,13 +150,50 @@
       modifiedLabel: formatTimestamp(row.modified_unix)
     }))
   })
+
+  const selectedPath = $derived(
+    $selectedIndex >= 0 && $selectedIndex < $results.length
+      ? $results[$selectedIndex].path
+      : null
+  )
+
+  $effect(() => {
+    const idx = $selectedIndex
+    if (idx < 0 || !scrollEl) return
+
+    const rowTop = idx * ROW_HEIGHT
+    const rowBottom = rowTop + ROW_HEIGHT
+    const currentTop = scrollEl.scrollTop
+    const currentBottom = currentTop + viewportHeight
+
+    if (rowTop < currentTop) {
+      programmaticScroll = true
+      scrollEl.scrollTop = rowTop
+      scrollTop = rowTop
+    } else if (rowBottom > currentBottom) {
+      programmaticScroll = true
+      scrollEl.scrollTop = rowBottom - viewportHeight
+      scrollTop = rowBottom - viewportHeight
+    }
+  })
 </script>
 
 <div class="result-table" style={`--table-columns: ${columnTemplate()};`}>
+  <!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
   <div
     class="table-scroll"
     bind:this={scrollEl}
+    tabindex="0"
+    role="grid"
+    aria-label="Search results"
+    onkeydown={handleKeydown}
+    onclick={() => scrollEl?.focus()}
     onscroll={() => {
+      if (programmaticScroll) {
+        programmaticScroll = false
+        return
+      }
       scrollTop = scrollEl?.scrollTop ?? 0
     }}
   >
@@ -169,16 +232,15 @@
       {/if}
 
       {#each visibleRows as row, offset (row.path)}
-        {@const index = startIndex + offset}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
         <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="table-row"
-          class:selected={index === $selectedIndex}
-          class:even={index % 2 === 0}
-          onclick={() => selectRow(index)}
+          class:selected={row.path === selectedPath}
+          class:even={(startIndex + offset) % 2 === 0}
+          onclick={() => selectRow(startIndex + offset)}
           ondblclick={() => openSelected()}
-          oncontextmenu={(e) => showContextMenu(e, index)}
+          oncontextmenu={(e) => showContextMenu(e, startIndex + offset)}
         >
           <div class="cell cell-name">
             <span class="icon" aria-hidden="true">{row.is_dir ? '▸' : '•'}</span>
@@ -211,6 +273,8 @@
       onopen={() => { openSelected(); closeContextMenu() }}
       onreveal={() => { revealSelected(); closeContextMenu() }}
       oncopypath={() => { copySelectedPath(); closeContextMenu() }}
+      ontrash={() => { trashSelected(); closeContextMenu() }}
+      ondelete={() => { deleteSelected(); closeContextMenu() }}
       onclose={closeContextMenu}
     />
   {/if}
@@ -229,6 +293,12 @@
     flex: 1;
     overflow: auto;
     scrollbar-gutter: stable;
+    outline: none;
+  }
+
+  .table-scroll:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: -2px;
   }
 
   .table-header {
@@ -315,8 +385,8 @@
     display: grid;
     grid-template-columns: var(--table-columns);
     gap: 16px;
-    padding: 9px 16px;
-    min-height: 37px;
+    padding: 4px 16px;
+    min-height: 27px;
     cursor: pointer;
     border-bottom: 1px solid var(--border-subtle);
     align-items: center;

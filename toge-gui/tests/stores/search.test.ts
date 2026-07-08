@@ -238,8 +238,7 @@ describe('searchStore', () => {
     await vi.advanceTimersByTimeAsync(1)
     expect(invoke).toHaveBeenCalledTimes(1)
     expect(invoke).toHaveBeenCalledWith('search_query', {
-      query: 'foo sort:name',
-      maxResults: 50
+      query: 'foo sort:name'
     })
 
     vi.useRealTimers()
@@ -424,7 +423,7 @@ describe('searchStore', () => {
       ['get_status'],
       ['search_query', {
         query: '.mkv sort:name',
-        maxResults: 50
+        
       }]
     ])
     expect(get(s.results)).toEqual([{
@@ -524,7 +523,7 @@ describe('searchStore', () => {
       ['get_status'],
       ['search_query', {
         query: `${query} sort:name`,
-        maxResults: 50
+        
       }]
     ])
     expect(get(s.results)).toEqual([row])

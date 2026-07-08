@@ -1,12 +1,14 @@
 <script lang="ts">
   import { copyFeedback } from '$lib/searchStore'
 
-  let { x, y, onopen, onreveal, oncopypath, onclose }: {
+  let { x, y, onopen, onreveal, oncopypath, ontrash, ondelete, onclose }: {
     x: number
     y: number
     onopen: () => void
     onreveal: () => void
     oncopypath: () => void
+    ontrash: () => void
+    ondelete: () => void
     onclose: () => void
   } = $props()
 
@@ -29,6 +31,9 @@
     <button class="menu-item" onclick={oncopypath}>
       {$copyFeedback ? 'Copied!' : 'Copy Path'}
     </button>
+    <div class="menu-separator"></div>
+    <button class="menu-item" onclick={ontrash}>Move to Trash</button>
+    <button class="menu-item menu-item-danger" onclick={ondelete}>Delete Permanently</button>
   </div>
 </div>
 
@@ -64,5 +69,24 @@
 
   .menu-item:hover {
     background: var(--bg-hover);
+  }
+
+  .menu-separator {
+    height: 1px;
+    background: var(--border);
+    margin: 4px 8px;
+  }
+
+  .menu-item-danger {
+    color: #dc2626;
+  }
+
+  .menu-item-danger:hover {
+    background: #fef2f2;
+    color: #b91c1c;
+  }
+
+  :global(.dark) .menu-item-danger:hover {
+    background: #450a0a;
   }
 </style>

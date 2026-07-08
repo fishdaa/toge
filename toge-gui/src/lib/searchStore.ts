@@ -114,7 +114,6 @@ export const indexStatusText = derived(daemonStatus, ($daemonStatus) => {
 })
 
 const SEARCH_DEBOUNCE_MS = 300
-const GUI_MAX_RESULTS = 50
 
 let searchTimeout: ReturnType<typeof setTimeout> | null = null
 let latestSearchRequestId = 0
@@ -186,14 +185,19 @@ async function runSearch(nextQuery?: string) {
     if (requestId !== latestSearchRequestId) return
 
     const result = await invoke<SearchResult>('search_query', {
-      query: searchQuery,
-      maxResults: GUI_MAX_RESULTS
+      query: searchQuery
     })
 
     if (requestId !== latestSearchRequestId) return
 
+    const prevIdx = get(selectedIndex)
+    const prevRows = get(results)
+    const prevPath = prevIdx >= 0 && prevIdx < prevRows.length ? prevRows[prevIdx]?.path : null
+
     results.set(result.rows)
-    selectedIndex.set(result.rows.length > 0 ? 0 : -1)
+
+    const newIdx = prevPath ? result.rows.findIndex((r) => r.path === prevPath) : -1
+    selectedIndex.set(newIdx >= 0 ? newIdx : result.rows.length > 0 ? 0 : -1)
     sizeIndexed.set(result.size_indexed)
     totalCount.set(result.total_count)
     totalSize.set(result.total_size)
@@ -309,6 +313,46 @@ export async function copySelectedPath() {
     appendDiagnostics(`Copied path ${rows[idx].path}`)
     copyFeedback.set(true)
     setTimeout(() => copyFeedback.set(false), 1500)
+  }
+}
+
+export async function trashSelected(): Promise<boolean> {
+  const idx = get(selectedIndex)
+  const rows = get(results)
+  if (idx < 0) return false
+
+  const row = rows[idx]
+  try {
+    await invoke('trash_path', { path: row.path })
+    appendDiagnostics(`Trashed ${row.path}`)
+    results.update((r) => r.filter((_, i) => i !== idx))
+    totalCount.update((c) => Math.max(0, c - 1))
+    const newRows = get(results)
+    selectedIndex.set(newRows.length > 0 ? Math.min(idx, newRows.length - 1) : -1)
+    return true
+  } catch (e) {
+    appendDiagnostics(`Trash failed: ${String(e)}`)
+    return false
+  }
+}
+
+export async function deleteSelected(): Promise<boolean> {
+  const idx = get(selectedIndex)
+  const rows = get(results)
+  if (idx < 0) return false
+
+  const row = rows[idx]
+  try {
+    await invoke('delete_path', { path: row.path })
+    appendDiagnostics(`Deleted ${row.path}`)
+    results.update((r) => r.filter((_, i) => i !== idx))
+    totalCount.update((c) => Math.max(0, c - 1))
+    const newRows = get(results)
+    selectedIndex.set(newRows.length > 0 ? Math.min(idx, newRows.length - 1) : -1)
+    return true
+  } catch (e) {
+    appendDiagnostics(`Delete failed: ${String(e)}`)
+    return false
   }
 }
 

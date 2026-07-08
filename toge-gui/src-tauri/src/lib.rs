@@ -15,6 +15,8 @@ pub fn run() {
             commands::open_path,
             commands::reveal_in_folder,
             commands::copy_to_clipboard,
+            commands::trash_path,
+            commands::delete_path,
             commands::reindex_index,
             commands::run_watcher_self_test,
             commands::open_debug_window,

@@ -27,6 +27,32 @@ pub fn copy_to_clipboard(text: &str) {
         .or_else(|_| try_copy(text, "xsel", &["--clipboard", "--input"]));
 }
 
+pub fn trash_path(path: &str) -> Result<(), String> {
+    let output = Command::new("gio")
+        .args(["trash", path])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .map_err(|e| format!("failed to run gio trash: {}", e))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("trash failed: {}", stderr.trim()))
+    }
+}
+
+pub fn delete_path(path: &str) -> Result<(), String> {
+    let p = std::path::Path::new(path);
+    let result = if p.is_dir() {
+        std::fs::remove_dir_all(p)
+    } else {
+        std::fs::remove_file(p)
+    };
+    result.map_err(|e| format!("delete failed: {}", e))
+}
+
 fn try_copy(text: &str, program: &str, args: &[&str]) -> std::io::Result<()> {
     let mut child = Command::new(program)
         .args(args)

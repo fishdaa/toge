@@ -2,6 +2,7 @@
   import { onMount } from 'svelte'
   import { query } from '$lib/searchStore'
   import { clearSearch, search, debouncedSearch, selectNext, selectPrevious, openDiagnosticsWindow } from '$lib/searchStore'
+  import { openSelected, copySelectedPath, trashSelected, deleteSelected } from '$lib/searchStore'
 
   const menuItems = ['File', 'Edit', 'View', 'Search', 'Bookmarks', 'Tools', 'Help']
 
@@ -29,6 +30,18 @@
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
       selectPrevious()
+    } else if (e.key === 'Delete' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
+      e.preventDefault()
+      trashSelected()
+    } else if (e.key === 'Delete' && e.shiftKey) {
+      e.preventDefault()
+      deleteSelected()
+    } else if (e.key === 'c' && (e.ctrlKey || e.metaKey) && !window.getSelection()?.toString()) {
+      e.preventDefault()
+      copySelectedPath()
+    } else if (e.key === 'o' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      openSelected()
     }
   }
 </script>
