@@ -14,7 +14,8 @@ use std::time::{Instant, SystemTime};
 use toge_core::config::Config;
 use toge_core::index::Index;
 use toge_core::ipc::{
-    QueryRequest, Request, Response, ResultsResponse, StatusResponse, MAX_IPC_MESSAGE_SIZE,
+    DaemonStatus, QueryRequest, Request, Response, ResultRow, ResultsResponse, StatusResponse,
+    MAX_IPC_MESSAGE_SIZE,
 };
 use toge_core::matcher::match_query;
 use toge_core::query::Query;
@@ -25,7 +26,8 @@ use toge_core::walker::{walk, Excludes};
 
 struct DaemonState {
     index: Index,
-    is_ready: bool,
+    status: DaemonStatus,
+    status_message: String,
     build_duration_ms: u64,
     watcher: WatcherStatus,
 }
@@ -150,7 +152,7 @@ fn discover_roots(config: &Config) -> Vec<PathBuf> {
     roots
 }
 
-fn build_index(state_dir: &Path, config: &Config) -> (Index, u64) {
+fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>>) -> (Index, u64) {
     let index_path = state_dir.join("index.bin");
     if let Ok(idx) = Index::load(&index_path) {
         eprintln!(
@@ -158,6 +160,11 @@ fn build_index(state_dir: &Path, config: &Config) -> (Index, u64) {
             idx.count(),
             index_path.display()
         );
+        {
+            let mut st = state.lock().unwrap();
+            st.status = DaemonStatus::LoadingIndex;
+            st.status_message = format!("Loaded {} entries from cache", idx.count());
+        }
         return (idx, 0);
     }
 
@@ -177,9 +184,15 @@ fn build_index(state_dir: &Path, config: &Config) -> (Index, u64) {
         || config.index_date_created
         || config.index_date_accessed;
     eprintln!("Indexing roots: {:?}", roots);
-    for root in roots {
+    let total_roots = roots.len();
+    for (i, root) in roots.iter().enumerate() {
+        {
+            let mut st = state.lock().unwrap();
+            st.status = DaemonStatus::Indexing;
+            st.status_message = format!("Indexing {}/{}: {}", i + 1, total_roots, root.display());
+        }
         let count_before = index.count();
-        walk(&root, &mut index, &excludes, fetch_metadata);
+        walk(root, &mut index, &excludes, fetch_metadata);
         eprintln!(
             "Indexed {} entries from {}",
             index.count() - count_before,
@@ -209,7 +222,8 @@ fn current_unix_time() -> i64 {
 fn status_response(st: &DaemonState) -> StatusResponse {
     StatusResponse {
         indexed_count: st.index.count(),
-        is_ready: st.is_ready,
+        status: st.status.clone(),
+        status_message: st.status_message.clone(),
         watcher_healthy: st.watcher.is_healthy,
         watched_dir_count: st.watcher.watched_dir_count,
         watch_failure_count: st.watcher.watch_failure_count,
@@ -283,14 +297,19 @@ fn handle_request(
         }
         Request::Reindex => {
             let _ = fs::remove_file(state_dir.join("index.bin"));
-            let (new_index, duration) = build_index(state_dir, config);
+            let mut st = state.lock().unwrap();
+            st.status = DaemonStatus::Indexing;
+            st.status_message = "Reindexing".to_string();
+            drop(st);
+            let (new_index, duration) = build_index(state_dir, config, state);
             if let Err(e) = save_index(&new_index, state_dir) {
                 return Response::Error(e.to_string());
             }
             let mut st = state.lock().unwrap();
             st.index = new_index;
             st.build_duration_ms = duration;
-            st.is_ready = true;
+            st.status = DaemonStatus::Ready;
+            st.status_message = format!("Indexed {} entries", st.index.count());
             Response::Ok
         }
         Request::Status => {
@@ -298,17 +317,17 @@ fn handle_request(
             Response::Status(status_response(&st))
         }
         Request::Query(q) => {
-            let st = state.lock().unwrap();
-            if !st.is_ready {
+            let mut st = state.lock().unwrap();
+            if st.status != DaemonStatus::Ready {
                 return Response::Error("daemon not ready".into());
             }
-            handle_query(&st.index, &q)
+            handle_query(&mut st.index, &q, config.index_size)
         }
         Request::Quit => unreachable!(),
     }
 }
 
-fn handle_query(index: &Index, q: &QueryRequest) -> Response {
+fn handle_query(index: &mut Index, q: &QueryRequest, index_size: bool) -> Response {
     let query = match Query::parse(&q.raw) {
         Ok(query) => query,
         Err(e) => return Response::Error(e.to_string()),
@@ -318,6 +337,17 @@ fn handle_query(index: &Index, q: &QueryRequest) -> Response {
     let (sort_key, ascending) = sort_params(query.sort);
     sort_ids(index, &mut ids, sort_key, ascending);
 
+    if index_size {
+        for id in &ids {
+            let entry = &index.entries[*id as usize];
+            if entry.is_dir || entry.size != 0 {
+                continue;
+            }
+            let path = entry.path.clone();
+            index.update_metadata(&path);
+        }
+    }
+
     let total = ids.len();
     let total_size: u64 = ids.iter().map(|id| index.entries[*id as usize].size).sum();
 
@@ -325,14 +355,33 @@ fn handle_query(index: &Index, q: &QueryRequest) -> Response {
     let end = (offset + q.max_results).min(total);
     let page = &ids[offset..end];
 
-    let paths: Vec<String> = page
+    let rows: Vec<ResultRow> = page
         .iter()
         .map(|id| {
-            let path = index.get_path(*id).unwrap_or("").to_string();
-            if q.highlight && !query.terms.is_empty() {
+            let entry = &index.entries[*id as usize];
+            let path = entry.path.clone();
+            let display_path = if q.highlight && !query.terms.is_empty() {
                 highlight_path(&path, &query)
             } else {
-                path
+                path.clone()
+            };
+            let name = entry.name().to_string();
+            let parent_end = entry.name_off as usize;
+            let parent = if parent_end > 0 {
+                path[..parent_end.saturating_sub(1)].to_string()
+            } else {
+                String::new()
+            };
+            ResultRow {
+                path: display_path,
+                name,
+                parent,
+                extension: entry.extension().to_string(),
+                is_dir: entry.is_dir,
+                size: entry.size,
+                modified_unix: entry.modified,
+                created_unix: entry.created,
+                accessed_unix: entry.accessed,
             }
         })
         .collect();
@@ -341,7 +390,7 @@ fn handle_query(index: &Index, q: &QueryRequest) -> Response {
         id: q.id,
         total_count: total,
         total_size,
-        paths,
+        rows,
     })
 }
 
@@ -564,41 +613,64 @@ fn main() {
         let _ = fs::remove_file(state_dir.join("index.bin"));
     }
 
+    let state = Arc::new(Mutex::new(DaemonState {
+        index: Index::new(),
+        status: DaemonStatus::Starting,
+        status_message: "Initializing daemon".to_string(),
+        build_duration_ms: 0,
+        watcher: WatcherStatus::default(),
+    }));
+
+    {
+        let mut st = state.lock().unwrap();
+        st.status = DaemonStatus::LoadingConfig;
+        st.status_message = "Loading configuration".to_string();
+    }
+
     let config = config_path
         .as_deref()
         .map(Config::load)
         .unwrap_or_else(|| Config::load(&config_dir.join("config.toml")))
         .unwrap_or_else(|_| Config::default_config());
 
-    let socket = socket_path.unwrap_or_else(|| state_dir.join("toged.sock"));
+    {
+        let mut st = state.lock().unwrap();
+        st.status = DaemonStatus::LoadingIndex;
+        st.status_message = "Checking for cached index".to_string();
+    }
 
-    let state = Arc::new(Mutex::new(DaemonState {
-        index: Index::new(),
-        is_ready: false,
-        build_duration_ms: 0,
-        watcher: WatcherStatus::default(),
-    }));
+    let socket = socket_path.unwrap_or_else(|| state_dir.join("toged.sock"));
 
     let index_state_dir = state_dir.clone();
     let index_config = config.clone();
     let index_state = Arc::clone(&state);
     let spawn_result = thread::Builder::new().spawn(move || {
-        let (index, duration) = build_index(&index_state_dir, &index_config);
+        let (index, duration) = build_index(&index_state_dir, &index_config, &index_state);
         let _ = save_index(&index, &index_state_dir);
         let mut st = index_state.lock().unwrap();
         st.index = index;
         st.build_duration_ms = duration;
-        st.is_ready = true;
+        st.status = DaemonStatus::StartingWatcher;
+        st.status_message = "Setting up file watcher".to_string();
+        st.status = DaemonStatus::Ready;
+        st.status_message = format!("Indexed {} entries in {}ms", st.index.count(), duration);
     });
 
     if let Err(err) = spawn_result {
         eprintln!("background indexing unavailable: {}", err);
-        let (index, duration) = build_index(&state_dir, &config);
+        let mut st = state.lock().unwrap();
+        st.status = DaemonStatus::Indexing;
+        st.status_message = "Scanning filesystem (foreground)".to_string();
+        drop(st);
+        let (index, duration) = build_index(&state_dir, &config, &state);
         let _ = save_index(&index, &state_dir);
         let mut st = state.lock().unwrap();
         st.index = index;
         st.build_duration_ms = duration;
-        st.is_ready = true;
+        st.status = DaemonStatus::StartingWatcher;
+        st.status_message = "Setting up file watcher".to_string();
+        st.status = DaemonStatus::Ready;
+        st.status_message = format!("Indexed {} entries in {}ms", st.index.count(), duration);
     }
 
     let watcher_state = Arc::clone(&state);
@@ -627,7 +699,7 @@ fn start_watcher(
             loop {
                 {
                     let st = state.lock().unwrap();
-                    if st.is_ready {
+                    if st.status == DaemonStatus::Ready {
                         break;
                     }
                 }
@@ -745,7 +817,7 @@ fn start_watcher(
 
                 if needs_reindex {
                     let _ = fs::remove_file(state_dir.join("index.bin"));
-                    let (new_index, duration) = build_index(&state_dir, &config);
+                    let (new_index, duration) = build_index(&state_dir, &config, &state);
                     let _ = save_index(&new_index, &state_dir);
                     let dirs = watched_dirs(&new_index);
                     let watcher_status = install_watches(&mut watcher, &dirs);
@@ -753,7 +825,8 @@ fn start_watcher(
                         let mut st = state.lock().unwrap();
                         st.index = new_index;
                         st.build_duration_ms = duration;
-                        st.is_ready = true;
+                        st.status = DaemonStatus::Ready;
+                        st.status_message = format!("Reindexed {} entries", st.index.count());
                         st.watcher = watcher_status;
                     }
                 }

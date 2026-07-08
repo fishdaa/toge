@@ -40,17 +40,76 @@ pub enum Response {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DaemonStatus {
+    Starting,
+    LoadingConfig,
+    LoadingIndex,
+    Indexing,
+    StartingWatcher,
+    Ready,
+    Error,
+}
+
+impl DaemonStatus {
+    pub fn to_u8(&self) -> u8 {
+        match self {
+            DaemonStatus::Starting => 0,
+            DaemonStatus::LoadingConfig => 1,
+            DaemonStatus::LoadingIndex => 2,
+            DaemonStatus::Indexing => 3,
+            DaemonStatus::StartingWatcher => 4,
+            DaemonStatus::Ready => 5,
+            DaemonStatus::Error => 6,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(DaemonStatus::Starting),
+            1 => Some(DaemonStatus::LoadingConfig),
+            2 => Some(DaemonStatus::LoadingIndex),
+            3 => Some(DaemonStatus::Indexing),
+            4 => Some(DaemonStatus::StartingWatcher),
+            5 => Some(DaemonStatus::Ready),
+            6 => Some(DaemonStatus::Error),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResultRow {
+    pub path: String,
+    pub name: String,
+    pub parent: String,
+    pub extension: String,
+    pub is_dir: bool,
+    pub size: u64,
+    pub modified_unix: i64,
+    pub created_unix: i64,
+    pub accessed_unix: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResultsResponse {
     pub id: u64,
     pub total_count: usize,
     pub total_size: u64,
-    pub paths: Vec<String>,
+    pub rows: Vec<ResultRow>,
+}
+
+impl ResultsResponse {
+    /// Return the full paths of the result rows, matching the legacy payload shape.
+    pub fn paths(&self) -> Vec<String> {
+        self.rows.iter().map(|r| r.path.clone()).collect()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatusResponse {
     pub indexed_count: usize,
-    pub is_ready: bool,
+    pub status: DaemonStatus,
+    pub status_message: String,
     pub watcher_healthy: bool,
     pub watched_dir_count: usize,
     pub watch_failure_count: usize,
@@ -199,15 +258,24 @@ impl Response {
                 push_u64(&mut buf, r.id);
                 push_usize(&mut buf, r.total_count);
                 push_u64(&mut buf, r.total_size);
-                push_usize(&mut buf, r.paths.len());
-                for p in &r.paths {
-                    push_string(&mut buf, p);
+                push_usize(&mut buf, r.rows.len());
+                for row in &r.rows {
+                    push_string(&mut buf, &row.path);
+                    push_string(&mut buf, &row.name);
+                    push_string(&mut buf, &row.parent);
+                    push_string(&mut buf, &row.extension);
+                    buf.push(if row.is_dir { 1 } else { 0 });
+                    push_u64(&mut buf, row.size);
+                    push_u64(&mut buf, row.modified_unix as u64);
+                    push_u64(&mut buf, row.created_unix as u64);
+                    push_u64(&mut buf, row.accessed_unix as u64);
                 }
             }
             Response::Status(s) => {
                 buf.push(2);
                 push_usize(&mut buf, s.indexed_count);
-                buf.push(if s.is_ready { 1 } else { 0 });
+                buf.push(s.status.to_u8());
+                push_string(&mut buf, &s.status_message);
                 buf.push(if s.watcher_healthy { 1 } else { 0 });
                 push_usize(&mut buf, s.watched_dir_count);
                 push_usize(&mut buf, s.watch_failure_count);
@@ -234,25 +302,51 @@ impl Response {
                 let id = take_u64(bytes, &mut off).ok_or("missing id")?;
                 let total_count = take_usize(bytes, &mut off).ok_or("missing total_count")?;
                 let total_size = take_u64(bytes, &mut off).unwrap_or(0);
-                let path_count = take_usize(bytes, &mut off).ok_or("missing path_count")?;
-                if path_count > MAX_RESPONSE_PATHS {
-                    return Err("too many paths".into());
+                let row_count = take_usize(bytes, &mut off).ok_or("missing row_count")?;
+                if row_count > MAX_RESPONSE_PATHS {
+                    return Err("too many rows".into());
                 }
-                let mut paths = Vec::with_capacity(path_count);
-                for _ in 0..path_count {
-                    paths.push(take_string(bytes, &mut off).ok_or("missing path")?);
+                let mut rows = Vec::with_capacity(row_count);
+                for _ in 0..row_count {
+                    let path = take_string(bytes, &mut off).ok_or("missing row path")?;
+                    let name = take_string(bytes, &mut off).ok_or("missing row name")?;
+                    let parent = take_string(bytes, &mut off).ok_or("missing row parent")?;
+                    let extension = take_string(bytes, &mut off).ok_or("missing row extension")?;
+                    let is_dir = bytes.get(off).copied() == Some(1);
+                    off += 1;
+                    let size = take_u64(bytes, &mut off).ok_or("missing row size")?;
+                    let modified_unix =
+                        take_u64(bytes, &mut off).ok_or("missing row modified")? as i64;
+                    let created_unix =
+                        take_u64(bytes, &mut off).ok_or("missing row created")? as i64;
+                    let accessed_unix =
+                        take_u64(bytes, &mut off).ok_or("missing row accessed")? as i64;
+                    rows.push(ResultRow {
+                        path,
+                        name,
+                        parent,
+                        extension,
+                        is_dir,
+                        size,
+                        modified_unix,
+                        created_unix,
+                        accessed_unix,
+                    });
                 }
                 Ok(Response::Results(ResultsResponse {
                     id,
                     total_count,
                     total_size,
-                    paths,
+                    rows,
                 }))
             }
             2 => {
                 let indexed_count = take_usize(bytes, &mut off).ok_or("missing indexed_count")?;
-                let is_ready = bytes.get(off).copied() == Some(1);
+                let status_u8 = bytes.get(off).copied().ok_or("missing status")?;
                 off += 1;
+                let status = DaemonStatus::from_u8(status_u8).ok_or("invalid status")?;
+                let status_message =
+                    take_string(bytes, &mut off).ok_or("missing status_message")?;
                 let watcher_healthy = bytes.get(off).copied() == Some(1);
                 off += 1;
                 let watched_dir_count =
@@ -267,7 +361,8 @@ impl Response {
                     take_u64(bytes, &mut off).ok_or("missing build_duration")?;
                 Ok(Response::Status(StatusResponse {
                     indexed_count,
-                    is_ready,
+                    status,
+                    status_message,
                     watcher_healthy,
                     watched_dir_count,
                     watch_failure_count,

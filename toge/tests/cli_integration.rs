@@ -69,7 +69,9 @@ fn wait_for_ready(sock: &Path, timeout_ms: u64) -> bool {
         if let Ok(mut s) = UnixStream::connect(sock) {
             send_request(&mut s, &Request::Status);
             match read_response(&mut s) {
-                Response::Status(st) if st.is_ready => return true,
+                Response::Status(st) if st.status == toge_core::ipc::DaemonStatus::Ready => {
+                    return true
+                }
                 _ => {}
             }
         }
@@ -138,6 +140,44 @@ fn uds_available(name: &str) -> bool {
     let available = UnixListener::bind(&sock).is_ok();
     let _ = fs::remove_dir_all(&dir);
     available
+}
+
+#[test]
+fn ndl_status_recovers_from_stale_socket_by_starting_daemon() {
+    if !uds_available("stale-socket") {
+        return;
+    }
+
+    let dir = test_dir("stale-socket");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let sock = dir.join("toged.sock");
+
+    let listener = UnixListener::bind(&sock).unwrap();
+    drop(listener);
+    assert!(sock.exists(), "expected stale socket file");
+
+    let output = Command::new(ndl_binary())
+        .env("HOME", &dir)
+        .env("TOGE_SOCKET", &sock)
+        .args(["-status"])
+        .output()
+        .expect("failed to run toge");
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("status:"), "unexpected stdout: {}", stdout);
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    send_request(&mut stream, &Request::Quit);
+    let _ = read_response(&mut stream);
+
+    let _ = fs::remove_dir_all(&dir);
 }
 
 #[test]

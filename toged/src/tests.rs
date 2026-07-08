@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use toge_core::config::Config;
 use toge_core::index::Index;
-use toge_core::ipc::{OutputFormat, QueryRequest, Request, Response};
+use toge_core::ipc::{DaemonStatus, OutputFormat, QueryRequest, Request, Response};
 use toge_core::query::{Query, SearchMode, Sort, TextTerm};
 
 /// Helper to build and run the daemon binary with given args.
@@ -42,7 +42,8 @@ fn query_before_ready_returns_not_ready_error() {
     let temp = std::env::temp_dir().join(format!("toged-unit-{}", std::process::id()));
     let state = Arc::new(Mutex::new(DaemonState {
         index: Index::new(),
-        is_ready: false,
+        status: DaemonStatus::Starting,
+        status_message: String::new(),
         build_duration_ms: 0,
         watcher: WatcherStatus::default(),
     }));

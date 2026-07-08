@@ -47,7 +47,9 @@ fn wait_for_ready(sock: &Path, timeout_ms: u64) -> bool {
         if let Ok(mut s) = UnixStream::connect(sock) {
             send_request(&mut s, &Request::Status);
             match read_response(&mut s) {
-                Response::Status(st) if st.is_ready => return true,
+                Response::Status(st) if st.status == toge_core::ipc::DaemonStatus::Ready => {
+                    return true
+                }
                 _ => {}
             }
         }
@@ -161,7 +163,7 @@ fn daemon_status_returns_entry_count() {
     send_request(&mut stream, &Request::Status);
     match read_response(&mut stream) {
         Response::Status(s) => {
-            assert!(s.is_ready);
+            assert_eq!(s.status, toge_core::ipc::DaemonStatus::Ready);
             assert!(
                 s.indexed_count >= 1,
                 "expected at least foo.txt, got {}",
@@ -169,6 +171,53 @@ fn daemon_status_returns_entry_count() {
             );
         }
         other => panic!("expected status, got {:?}", other),
+    }
+
+    cleanup(&dir, &mut child);
+}
+
+#[test]
+fn daemon_query_returns_real_file_size() {
+    if !uds_available("size") {
+        return;
+    }
+    let (dir, state, cfg) = setup("size");
+    let sock = socket_path("size");
+
+    let mut child = spawn_needled(&[
+        "--socket",
+        sock.to_str().unwrap(),
+        "--config",
+        cfg.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--clean",
+    ]);
+
+    assert!(wait_for_ready(&sock, 10_000), "daemon not ready");
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    send_request(
+        &mut stream,
+        &Request::Query(toge_core::ipc::QueryRequest {
+            id: 1,
+            raw: "foo".to_string(),
+            max_results: 10,
+            offset: 0,
+            format: toge_core::ipc::OutputFormat::Default,
+            highlight: false,
+        }),
+    );
+
+    match read_response(&mut stream) {
+        Response::Results(results) => {
+            assert_eq!(results.total_count, 1);
+            assert_eq!(results.rows.len(), 1);
+            assert_eq!(results.rows[0].name, "foo.txt");
+            assert_eq!(results.rows[0].size, 5);
+            assert_eq!(results.total_size, 5);
+        }
+        other => panic!("expected results, got {:?}", other),
     }
 
     cleanup(&dir, &mut child);

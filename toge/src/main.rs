@@ -10,7 +10,7 @@ use std::thread;
 use std::time::Duration;
 use toge_core::highlight::render_ansi;
 use toge_core::ipc::{
-    OutputFormat as IpcFormat, QueryRequest, Request, Response, MAX_IPC_MESSAGE_SIZE,
+    DaemonStatus, OutputFormat as IpcFormat, QueryRequest, Request, Response, MAX_IPC_MESSAGE_SIZE,
 };
 use toge_core::opts::{NdlOptions, OutputFormat};
 
@@ -53,25 +53,29 @@ fn socket_path() -> PathBuf {
         .unwrap_or_else(|| default_state_dir().join("toged.sock"))
 }
 
-fn ensure_daemon_running(sock: &Path) {
-    if sock.exists() {
-        return;
+fn ensure_daemon_running(sock: &Path) -> io::Result<()> {
+    if daemon_responding(sock) {
+        return Ok(());
     }
     eprintln!("toged is not running. Starting it...");
-    let _ = daemon_command().spawn();
-    for _ in 0..10 {
+    daemon_command(sock).spawn()?;
+    for _ in 0..100 {
         thread::sleep(Duration::from_millis(50));
-        if sock.exists() {
-            return;
+        if daemon_responding(sock) {
+            return Ok(());
         }
     }
+    Err(io::Error::new(
+        io::ErrorKind::NotFound,
+        "daemon did not start",
+    ))
 }
 
 fn wait_for_ready(sock: &Path, timeout: Duration) -> io::Result<()> {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         match send_simple(sock, Request::Status) {
-            Ok(Response::Status(status)) if status.is_ready => return Ok(()),
+            Ok(Response::Status(status)) if status.status == DaemonStatus::Ready => return Ok(()),
             Ok(Response::Status(_)) => {}
             Ok(Response::Error(e)) => return Err(io::Error::other(e)),
             Ok(_) => {}
@@ -123,16 +127,24 @@ fn read_response_from<R: Read>(reader: &mut R) -> io::Result<Response> {
     Response::decode(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-fn daemon_command() -> Command {
+fn daemon_responding(sock: &Path) -> bool {
+    matches!(send_simple(sock, Request::Status), Ok(Response::Status(_)))
+}
+
+fn daemon_command(sock: &Path) -> Command {
     if let Ok(current) = env::current_exe() {
         if let Some(bin_dir) = current.parent() {
             let sibling = bin_dir.join("toged");
             if sibling.exists() {
-                return Command::new(sibling);
+                let mut cmd = Command::new(sibling);
+                cmd.arg("--socket").arg(sock);
+                return cmd;
             }
         }
     }
-    Command::new("toged")
+    let mut cmd = Command::new("toged");
+    cmd.arg("--socket").arg(sock);
+    cmd
 }
 
 fn run_query(
@@ -236,7 +248,10 @@ fn main() {
     }
 
     let sock = socket_path();
-    ensure_daemon_running(&sock);
+    if let Err(e) = ensure_daemon_running(&sock) {
+        eprintln!("failed to start daemon: {}", e);
+        process::exit(1);
+    }
 
     if !sock.exists() {
         eprintln!("toged is not running. Start it with: toged &");
@@ -247,9 +262,10 @@ fn main() {
         match send_simple(&sock, Request::Status) {
             Ok(Response::Status(s)) => {
                 println!(
-                    "Index: {} files | ready: {} | watcher healthy: {} | watched dirs: {} | watch failures: {} | overflows: {} | build time: {} ms",
+                    "Index: {} files | status: {:?} | {} | watcher healthy: {} | watched dirs: {} | watch failures: {} | overflows: {} | build time: {} ms",
                     s.indexed_count,
-                    s.is_ready,
+                    s.status,
+                    s.status_message,
                     s.watcher_healthy,
                     s.watched_dir_count,
                     s.watch_failure_count,
@@ -360,7 +376,7 @@ fn main() {
         }
     };
 
-    let mut paths = results.paths;
+    let mut paths = results.paths();
     if opts.highlight {
         let color = opts.highlight_color;
         paths = paths.into_iter().map(|p| render_ansi(&p, color)).collect();

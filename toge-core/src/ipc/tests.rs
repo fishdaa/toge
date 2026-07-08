@@ -29,7 +29,30 @@ fn test_response_results_roundtrip() {
         id: 1,
         total_count: 42,
         total_size: 0,
-        paths: vec!["/a.txt".into(), "/b.txt".into()],
+        rows: vec![
+            ResultRow {
+                path: "/a.txt".into(),
+                name: "a.txt".into(),
+                parent: "/".into(),
+                extension: "txt".into(),
+                is_dir: false,
+                size: 12,
+                modified_unix: 1700000000,
+                created_unix: 1700000000,
+                accessed_unix: 1700000000,
+            },
+            ResultRow {
+                path: "/b.txt".into(),
+                name: "b.txt".into(),
+                parent: "/".into(),
+                extension: "txt".into(),
+                is_dir: false,
+                size: 34,
+                modified_unix: 1700000001,
+                created_unix: 1700000001,
+                accessed_unix: 1700000001,
+            },
+        ],
     });
     let bytes = resp.encode();
     let decoded = Response::decode(&bytes).unwrap();
@@ -40,7 +63,8 @@ fn test_response_results_roundtrip() {
 fn test_response_status_roundtrip() {
     let resp = Response::Status(StatusResponse {
         indexed_count: 1234,
-        is_ready: true,
+        status: DaemonStatus::Ready,
+        status_message: "Indexed 1234 entries in 567ms".to_string(),
         watcher_healthy: true,
         watched_dir_count: 12,
         watch_failure_count: 1,
@@ -74,7 +98,7 @@ fn test_request_decode_rejects_invalid_format_byte() {
 }
 
 #[test]
-fn test_response_decode_rejects_excessive_path_count() {
+fn test_response_decode_rejects_excessive_row_count() {
     let mut bytes = vec![1];
     bytes.extend_from_slice(&1u64.to_le_bytes());
     bytes.extend_from_slice(&0u64.to_le_bytes());
@@ -82,11 +106,11 @@ fn test_response_decode_rejects_excessive_path_count() {
     bytes.extend_from_slice(&((MAX_RESPONSE_PATHS + 1) as u64).to_le_bytes());
 
     let err = Response::decode(&bytes).unwrap_err();
-    assert!(err.contains("too many paths"));
+    assert!(err.contains("too many rows"));
 }
 
 #[test]
-fn test_response_decode_rejects_truncated_path_payload() {
+fn test_response_decode_rejects_truncated_row_payload() {
     let mut bytes = vec![1];
     bytes.extend_from_slice(&1u64.to_le_bytes());
     bytes.extend_from_slice(&1u64.to_le_bytes());
@@ -96,5 +120,5 @@ fn test_response_decode_rejects_truncated_path_payload() {
     bytes.extend_from_slice(b"abc");
 
     let err = Response::decode(&bytes).unwrap_err();
-    assert_eq!(err, "missing path");
+    assert_eq!(err, "missing row path");
 }

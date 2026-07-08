@@ -8,7 +8,7 @@ fn test_default_config_values() {
     assert!(cfg.roots.is_empty()); // auto-detect if empty
     assert_eq!(cfg.poll_interval_secs, 300);
     assert_eq!(cfg.operator_precedence, OperatorOrder::OrAnd);
-    assert!(!cfg.index_size);
+    assert!(cfg.index_size);
     assert!(!cfg.index_date_created);
     assert!(!cfg.exclude_hidden);
 }

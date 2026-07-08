@@ -37,7 +37,7 @@ impl Config {
             exclude_patterns: Vec::new(),
             exclude_folders: Vec::new(),
             include_only: Vec::new(),
-            index_size: false,
+            index_size: true,
             index_date_modified: false,
             index_date_created: false,
             index_date_accessed: false,
