@@ -177,3 +177,33 @@ fn test_insert_directory_sets_is_dir() {
     idx.insert("/home/user/projects", true);
     assert!(idx.entries[0].is_dir);
 }
+
+#[test]
+fn test_duplicate_insert_updates_existing_entry_in_place() {
+    let mut idx = Index::new();
+
+    let first = idx.insert_with_metadata("/tmp/video.mkv", false, 10, 100, 100, 100);
+    let second = idx.insert_with_metadata("/tmp/video.mkv", false, 20, 200, 300, 400);
+
+    assert_eq!(first, second);
+    assert_eq!(idx.count(), 1);
+    let entry = &idx.entries[first as usize];
+    assert_eq!(entry.size, 20);
+    assert_eq!(entry.modified, 200);
+    assert_eq!(entry.created, 300);
+    assert_eq!(entry.accessed, 400);
+    assert_eq!(idx.by_extension("mkv").unwrap(), &[0]);
+}
+
+#[test]
+fn test_remove_after_duplicate_insert_clears_search_results() {
+    let mut idx = Index::new();
+
+    idx.insert_with_metadata("/tmp/video.mkv", false, 10, 100, 100, 100);
+    idx.insert_with_metadata("/tmp/video.mkv", false, 20, 200, 200, 200);
+
+    assert!(idx.remove("/tmp/video.mkv"));
+    assert_eq!(idx.count(), 0);
+    assert!(idx.search_substring("video").is_empty());
+    assert!(idx.by_extension("mkv").map_or(true, |ids| ids.is_empty()));
+}

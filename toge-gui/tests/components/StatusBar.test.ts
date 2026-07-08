@@ -19,6 +19,7 @@ describe('StatusBar', () => {
       watched_dir_count: 4,
       watch_failure_count: 0,
       watch_overflow_count: 0,
+      watcher_log: [],
       last_updated_unix: 1700000000,
       build_duration_ms: 12
     })

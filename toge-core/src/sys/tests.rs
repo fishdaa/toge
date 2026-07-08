@@ -1,9 +1,13 @@
 use super::*;
 #[cfg(target_os = "linux")]
-use crate::sys::linux::ParsedWatchEvent;
-use std::collections::HashMap;
-use std::os::fd::OwnedFd;
+use notify::event::{EventAttributes, ModifyKind, RenameMode};
+#[cfg(target_os = "linux")]
+use notify::{Event, EventKind};
+#[cfg(target_os = "linux")]
+use std::fs;
 use std::path::Path;
+#[cfg(target_os = "linux")]
+use std::time::{Duration, Instant};
 
 /// A fake watcher for testing higher-level code without touching inotify.
 pub struct FakeWatcher {
@@ -79,67 +83,87 @@ fn inotify_watcher_trait_object() {
 
 #[test]
 #[cfg(target_os = "linux")]
-fn inotify_parse_create_event() {
-    // Synthetic IN_CREATE event for "foo.txt" with a 4-byte aligned name.
-    let name = b"foo.txt\0\0";
-    let len = 16 + name.len();
-    let mut buf = Vec::with_capacity(len);
-    buf.extend_from_slice(&0u32.to_le_bytes()); // wd
-    buf.extend_from_slice(&0x00000100u32.to_le_bytes()); // mask = IN_CREATE
-    buf.extend_from_slice(&0u32.to_le_bytes()); // cookie
-    buf.extend_from_slice(&(name.len() as u32).to_le_bytes()); // len
-    buf.extend_from_slice(name);
+fn notify_maps_rename_from_to_delete() {
+    let events = InotifyWatcher::map_event(Event {
+        kind: EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+        paths: vec!["/tmp/movie.mkv".into()],
+        attrs: EventAttributes::new(),
+    });
 
-    let events = InotifyWatcher::parse_buffer(&buf);
-    assert_eq!(events.len(), 1);
     assert_eq!(
-        events[0],
-        ParsedWatchEvent::Create {
-            wd: 0,
-            name: "foo.txt".into(),
-            is_dir: false,
-        }
+        events,
+        vec![WatchEvent::Delete {
+            path: "/tmp/movie.mkv".into()
+        }]
     );
 }
 
 #[test]
 #[cfg(target_os = "linux")]
-fn inotify_parse_delete_event() {
-    let name = b"old.rs\0\0";
-    let len = 16 + name.len();
-    let mut buf = Vec::with_capacity(len);
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&0x00000200u32.to_le_bytes()); // mask = IN_DELETE
-    buf.extend_from_slice(&0u32.to_le_bytes());
-    buf.extend_from_slice(&(name.len() as u32).to_le_bytes());
-    buf.extend_from_slice(name);
+fn notify_maps_rename_both_to_move() {
+    let events = InotifyWatcher::map_event(Event {
+        kind: EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        paths: vec!["/tmp/movie.part".into(), "/tmp/movie.mkv".into()],
+        attrs: EventAttributes::new(),
+    });
 
-    let events = InotifyWatcher::parse_buffer(&buf);
-    assert_eq!(events.len(), 1);
     assert_eq!(
-        events[0],
-        ParsedWatchEvent::Delete {
-            wd: 0,
-            name: "old.rs".into()
-        }
+        events,
+        vec![WatchEvent::Move {
+            from: "/tmp/movie.part".into(),
+            to: "/tmp/movie.mkv".into()
+        }]
     );
 }
 
 #[test]
 #[cfg(target_os = "linux")]
-fn inotify_resolves_duplicate_basenames_by_watch_descriptor() {
-    let fd = OwnedFd::from(std::fs::File::open("/dev/null").unwrap());
-    let watcher = InotifyWatcher::from_watch_map(
-        fd,
-        HashMap::from([(7, "/tmp/a".to_string()), (9, "/tmp/b".to_string())]),
-    );
+fn inotify_watcher_observes_real_create_and_delete_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("live-watch.mkv");
 
-    assert_eq!(
-        watcher.resolve_full_path(9, "shared.txt"),
-        "/tmp/b/shared.txt"
-    );
-    assert_eq!(
-        watcher.resolve_full_path(7, "shared.txt"),
-        "/tmp/a/shared.txt"
-    );
+    let Ok(mut watcher) = InotifyWatcher::new() else {
+        return;
+    };
+    watcher.watch(dir.path()).expect("watch temp dir");
+
+    fs::write(&path, b"hello").unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_create = false;
+    while Instant::now() < deadline {
+        let events = watcher.poll_events().unwrap();
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                WatchEvent::Create { path: event_path, is_dir: false }
+                    if event_path == path.to_string_lossy().as_ref()
+            )
+        }) {
+            saw_create = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(saw_create, "expected create event for {}", path.display());
+
+    fs::remove_file(&path).unwrap();
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_delete = false;
+    while Instant::now() < deadline {
+        let events = watcher.poll_events().unwrap();
+        if events.iter().any(|event| {
+            matches!(
+                event,
+                WatchEvent::Delete { path: event_path }
+                    if event_path == path.to_string_lossy().as_ref()
+            )
+        }) {
+            saw_delete = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    assert!(saw_delete, "expected delete event for {}", path.display());
 }

@@ -7,6 +7,7 @@ vi.mock('@tauri-apps/api/core', () => ({
 
 beforeEach(() => {
   vi.resetModules()
+  vi.clearAllMocks()
 })
 
 describe('searchStore', () => {
@@ -119,6 +120,7 @@ describe('searchStore', () => {
       watched_dir_count: 3,
       watch_failure_count: 0,
       watch_overflow_count: 0,
+      watcher_log: [],
       last_updated_unix: 1700000000,
       build_duration_ms: 15
     })
@@ -137,6 +139,43 @@ describe('searchStore', () => {
     expect(invoke).toHaveBeenCalledWith('copy_to_clipboard', {
       text: '[10:00:00] first\n[10:00:01] second'
     })
+  })
+
+  it('runs watcher self-test and appends returned watcher events to diagnostics log', async () => {
+    const s = await loadStore()
+    const { invoke } = await import('@tauri-apps/api/core')
+
+    vi.mocked(invoke).mockResolvedValue({
+      passed: true,
+      summary: 'Watcher self-test passed',
+      events: [
+        'create /tmp/toge-watcher-self-test/watcher-self-test.mkv',
+        'delete /tmp/toge-watcher-self-test/watcher-self-test.mkv'
+      ]
+    })
+
+    const result = await s.runWatcherSelfTest()
+    const log = get(s.diagnosticsLog)
+
+    expect(invoke).toHaveBeenCalledWith('run_watcher_self_test')
+    expect(result).toEqual({
+      passed: true,
+      summary: 'Watcher self-test passed',
+      events: [
+        'create /tmp/toge-watcher-self-test/watcher-self-test.mkv',
+        'delete /tmp/toge-watcher-self-test/watcher-self-test.mkv'
+      ]
+    })
+    expect(log.some((entry) => entry.endsWith('Watcher self-test started'))).toBe(true)
+    expect(log.some((entry) => entry.endsWith('Watcher self-test passed'))).toBe(true)
+    expect(
+      log.some((entry) =>
+        entry.endsWith('watcher-self-test: create /tmp/toge-watcher-self-test/watcher-self-test.mkv'))
+    ).toBe(true)
+    expect(
+      log.some((entry) =>
+        entry.endsWith('watcher-self-test: delete /tmp/toge-watcher-self-test/watcher-self-test.mkv'))
+    ).toBe(true)
   })
 
   it('debounces search calls while typing', async () => {
@@ -259,6 +298,7 @@ describe('searchStore', () => {
         watched_dir_count: 5,
         watch_failure_count: 0,
         watch_overflow_count: 0,
+        watcher_log: [],
         last_updated_unix: 1700000000,
         build_duration_ms: 32
       })
@@ -270,5 +310,211 @@ describe('searchStore', () => {
     expect(vi.mocked(invoke).mock.calls[1]).toEqual(['get_status'])
     expect(get(s.reindexing)).toBe(false)
     expect(get(s.daemonStatus)?.status_message).toBe('Reindexed 50 entries')
+  })
+
+  it('refreshes an active extension-filtered search when daemon status reports index changes', async () => {
+    const s = await loadStore()
+    const { invoke } = await import('@tauri-apps/api/core')
+
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({
+        status: 'Ready',
+        status_message: 'Indexed 1 entries',
+        indexed_count: 1,
+        size_indexed: true,
+        watcher_healthy: true,
+        watched_dir_count: 5,
+        watch_failure_count: 0,
+        watch_overflow_count: 0,
+        watcher_log: ['[1700000000] create /downloads/movie.mkv'],
+        last_updated_unix: 1700000000,
+        build_duration_ms: 10
+      })
+      .mockResolvedValueOnce({
+        status: 'Ready',
+        status_message: 'Indexed 2 entries',
+        indexed_count: 2,
+        size_indexed: true,
+        watcher_healthy: true,
+        watched_dir_count: 5,
+        watch_failure_count: 0,
+        watch_overflow_count: 0,
+        watcher_log: ['[1700000001] move /downloads/movie.part -> /downloads/movie.mkv'],
+        last_updated_unix: 1700000001,
+        build_duration_ms: 12
+      })
+      .mockResolvedValueOnce({
+        rows: [{
+          path: '/downloads/movie.mkv',
+          name: 'movie.mkv',
+          parent: '/downloads',
+          extension: 'mkv',
+          is_dir: false,
+          size: '1.0 GB',
+          modified: ''
+        }],
+        total_count: 1,
+        total_size: 1024,
+        size_indexed: true
+      })
+
+    s.query.set('.mkv')
+
+    await s.fetchStatus()
+    await s.fetchStatus()
+    await Promise.resolve()
+
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ['get_status'],
+      ['get_status'],
+      ['search_query', {
+        query: '.mkv sort:name',
+        maxResults: 10000
+      }]
+    ])
+    expect(get(s.results)).toEqual([{
+      path: '/downloads/movie.mkv',
+      name: 'movie.mkv',
+      parent: '/downloads',
+      extension: 'mkv',
+      is_dir: false,
+      size: '1.0 GB',
+      modified: ''
+    }])
+  })
+
+  it.each([
+    {
+      query: '.mp4',
+      row: {
+        path: '/downloads/clip.mp4',
+        name: 'clip.mp4',
+        parent: '/downloads',
+        extension: 'mp4',
+        is_dir: false,
+        size: '512.0 MB',
+        modified: ''
+      }
+    },
+    {
+      query: '.txt',
+      row: {
+        path: '/downloads/notes.txt',
+        name: 'notes.txt',
+        parent: '/downloads',
+        extension: 'txt',
+        is_dir: false,
+        size: '4.0 KB',
+        modified: ''
+      }
+    },
+    {
+      query: '.zip',
+      row: {
+        path: '/downloads/archive.zip',
+        name: 'archive.zip',
+        parent: '/downloads',
+        extension: 'zip',
+        is_dir: false,
+        size: '128.0 MB',
+        modified: ''
+      }
+    }
+  ])('refreshes active search for $query when daemon status changes', async ({ query, row }) => {
+    const s = await loadStore()
+    const { invoke } = await import('@tauri-apps/api/core')
+
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({
+        status: 'Ready',
+        status_message: 'Indexed 10 entries',
+        indexed_count: 10,
+        size_indexed: true,
+        watcher_healthy: true,
+        watched_dir_count: 5,
+        watch_failure_count: 0,
+        watch_overflow_count: 0,
+        watcher_log: [],
+        last_updated_unix: 1700000100,
+        build_duration_ms: 10
+      })
+      .mockResolvedValueOnce({
+        status: 'Ready',
+        status_message: 'Indexed 11 entries',
+        indexed_count: 11,
+        size_indexed: true,
+        watcher_healthy: true,
+        watched_dir_count: 5,
+        watch_failure_count: 0,
+        watch_overflow_count: 0,
+        watcher_log: [],
+        last_updated_unix: 1700000101,
+        build_duration_ms: 12
+      })
+      .mockResolvedValueOnce({
+        rows: [row],
+        total_count: 1,
+        total_size: 1024,
+        size_indexed: true
+      })
+
+    s.query.set(query)
+
+    await s.fetchStatus()
+    await s.fetchStatus()
+    await Promise.resolve()
+
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ['get_status'],
+      ['get_status'],
+      ['search_query', {
+        query: `${query} sort:name`,
+        maxResults: 10000
+      }]
+    ])
+    expect(get(s.results)).toEqual([row])
+  })
+
+  it('does not refresh search when daemon status is unchanged', async () => {
+    const s = await loadStore()
+    const { invoke } = await import('@tauri-apps/api/core')
+
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({
+        status: 'Ready',
+        status_message: 'Indexed 1 entries',
+        indexed_count: 1,
+        size_indexed: true,
+        watcher_healthy: true,
+        watched_dir_count: 5,
+        watch_failure_count: 0,
+        watch_overflow_count: 0,
+        watcher_log: [],
+        last_updated_unix: 1700000000,
+        build_duration_ms: 10
+      })
+      .mockResolvedValueOnce({
+        status: 'Ready',
+        status_message: 'Indexed 1 entries',
+        indexed_count: 1,
+        size_indexed: true,
+        watcher_healthy: true,
+        watched_dir_count: 5,
+        watch_failure_count: 0,
+        watch_overflow_count: 0,
+        watcher_log: [],
+        last_updated_unix: 1700000000,
+        build_duration_ms: 10
+      })
+
+    s.query.set('.mkv')
+
+    await s.fetchStatus()
+    await s.fetchStatus()
+
+    expect(vi.mocked(invoke).mock.calls).toEqual([
+      ['get_status'],
+      ['get_status']
+    ])
   })
 })

@@ -24,6 +24,7 @@ export interface StatusResponse {
   watched_dir_count: number
   watch_failure_count: number
   watch_overflow_count: number
+  watcher_log: string[]
   last_updated_unix: number
   build_duration_ms: number
 }
@@ -31,6 +32,12 @@ export interface StatusResponse {
 export interface DiagnosticEntry {
   time: string
   message: string
+}
+
+export interface WatcherSelfTestResult {
+  passed: boolean
+  summary: string
+  events: string[]
 }
 
 export type SortColumn = 'name' | 'path' | 'size' | 'modified'

@@ -1,4 +1,4 @@
-.PHONY: help build build-release test test-coverage clippy fmt \
+.PHONY: help build build-release test test-coverage watcher-test clippy fmt \
        gui gui-release \
        bench bench-compare perf perf-compare \
        set-version publish package verify-tag next-beta changelog
@@ -18,6 +18,10 @@ build-release: ## Build all crates (release)
 
 test: ## Run all Rust tests
 	cargo test
+
+watcher-test: ## Run watcher self-test coverage (Rust + GUI store test)
+	cargo test -p toge-gui-lib
+	cd toge-gui && npm test -- --run tests/stores/search.test.ts
 
 test-coverage: ## Run Rust tests with coverage
 	cargo llvm-cov --html

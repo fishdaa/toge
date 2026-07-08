@@ -30,6 +30,7 @@ struct DaemonState {
     status_message: String,
     build_duration_ms: u64,
     watcher: WatcherStatus,
+    watcher_log: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -38,6 +39,18 @@ struct WatcherStatus {
     watched_dir_count: usize,
     watch_failure_count: usize,
     watch_overflow_count: u64,
+}
+
+const WATCHER_LOG_LIMIT: usize = 50;
+
+fn append_watcher_log(st: &mut DaemonState, message: impl Into<String>) {
+    let timestamp = current_unix_time();
+    st.watcher_log
+        .push(format!("[{}] {}", timestamp, message.into()));
+    if st.watcher_log.len() > WATCHER_LOG_LIMIT {
+        let excess = st.watcher_log.len() - WATCHER_LOG_LIMIT;
+        st.watcher_log.drain(0..excess);
+    }
 }
 
 fn ensure_private_dir(path: &Path) -> io::Result<()> {
@@ -219,6 +232,28 @@ fn current_unix_time() -> i64 {
         .as_secs() as i64
 }
 
+fn metadata_snapshot(path: &str) -> (u64, i64, i64, i64) {
+    let now = current_unix_time();
+    let Ok(metadata) = fs::metadata(path) else {
+        return (0, now, now, now);
+    };
+
+    let read_time = |value: io::Result<SystemTime>| {
+        value
+            .ok()
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(now)
+    };
+
+    (
+        metadata.len(),
+        read_time(metadata.modified()),
+        read_time(metadata.created()),
+        read_time(metadata.accessed()),
+    )
+}
+
 fn status_response(st: &DaemonState) -> StatusResponse {
     StatusResponse {
         indexed_count: st.index.count(),
@@ -228,6 +263,7 @@ fn status_response(st: &DaemonState) -> StatusResponse {
         watched_dir_count: st.watcher.watched_dir_count,
         watch_failure_count: st.watcher.watch_failure_count,
         watch_overflow_count: st.watcher.watch_overflow_count,
+        watcher_log: st.watcher_log.clone(),
         last_updated_unix: current_unix_time(),
         build_duration_ms: st.build_duration_ms,
     }
@@ -619,6 +655,7 @@ fn main() {
         status_message: "Initializing daemon".to_string(),
         build_duration_ms: 0,
         watcher: WatcherStatus::default(),
+        watcher_log: Vec::new(),
     }));
 
     {
@@ -755,7 +792,10 @@ fn start_watcher(
                                 }
                                 if *is_dir {
                                     match watcher.watch(&PathBuf::from(path)) {
-                                        Ok(()) => st.watcher.watched_dir_count += 1,
+                                        Ok(()) => {
+                                            st.watcher.watched_dir_count += 1;
+                                            append_watcher_log(&mut st, format!("watch dir {}", path));
+                                        }
                                         Err(e)
                                             if e.kind() == io::ErrorKind::PermissionDenied
                                                 || e.kind() == io::ErrorKind::NotFound
@@ -763,30 +803,48 @@ fn start_watcher(
                                         {
                                             st.watcher.watch_failure_count += 1;
                                             st.watcher.is_healthy = false;
+                                            append_watcher_log(
+                                                &mut st,
+                                                format!("watch failed {}: {}", path, e),
+                                            );
                                         }
                                         Err(e) => {
                                             st.watcher.watch_failure_count += 1;
                                             st.watcher.is_healthy = false;
                                             eprintln!("Failed to watch {}: {}", path, e);
+                                            append_watcher_log(
+                                                &mut st,
+                                                format!("watch failed {}: {}", path, e),
+                                            );
                                         }
                                     }
                                 }
-                                let md = std::fs::metadata(path).ok();
-                                let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
-                                let now = current_unix_time();
-                                st.index
-                                    .insert_with_metadata(path, *is_dir, size, now, now, now);
+                                append_watcher_log(
+                                    &mut st,
+                                    format!("create {}{}", path, if *is_dir { " (dir)" } else { "" }),
+                                );
+                                let (size, modified, created, accessed) = metadata_snapshot(path);
+                                st.index.insert_with_metadata(
+                                    path,
+                                    *is_dir,
+                                    size,
+                                    modified,
+                                    created,
+                                    accessed,
+                                );
                             }
                             WatchEvent::Delete { path } => {
                                 if is_own_path(path, &state_dir, &config_dir) {
                                     continue;
                                 }
+                                append_watcher_log(&mut st, format!("delete {}", path));
                                 st.index.remove(path);
                             }
                             WatchEvent::Modify { path } => {
                                 if is_own_path(path, &state_dir, &config_dir) {
                                     continue;
                                 }
+                                append_watcher_log(&mut st, format!("modify {}", path));
                                 st.index.update_metadata(path);
                             }
                             WatchEvent::Move { from, to } => {
@@ -795,12 +853,18 @@ fn start_watcher(
                                 {
                                     continue;
                                 }
+                                append_watcher_log(&mut st, format!("move {} -> {}", from, to));
                                 st.index.remove(from);
                                 let is_dir = std::path::Path::new(to).is_dir();
-                                let size = std::fs::metadata(to).ok().map(|m| m.len()).unwrap_or(0);
-                                let now = current_unix_time();
-                                st.index
-                                    .insert_with_metadata(to, is_dir, size, now, now, now);
+                                let (size, modified, created, accessed) = metadata_snapshot(to);
+                                st.index.insert_with_metadata(
+                                    to,
+                                    is_dir,
+                                    size,
+                                    modified,
+                                    created,
+                                    accessed,
+                                );
                             }
                             WatchEvent::Overflow { .. } => {
                                 eprintln!(
@@ -808,6 +872,10 @@ fn start_watcher(
                                 );
                                 st.watcher.watch_overflow_count += 1;
                                 st.watcher.is_healthy = false;
+                                append_watcher_log(
+                                    &mut st,
+                                    "overflow: inotify queue overflow — some events may have been lost",
+                                );
                                 needs_reindex = true;
                             }
                         }
@@ -828,6 +896,7 @@ fn start_watcher(
                         st.status = DaemonStatus::Ready;
                         st.status_message = format!("Reindexed {} entries", st.index.count());
                         st.watcher = watcher_status;
+                        append_watcher_log(&mut st, "reindex completed after watcher overflow");
                     }
                 }
             }

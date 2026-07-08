@@ -195,6 +195,21 @@ impl Index {
         created: i64,
         accessed: i64,
     ) -> u32 {
+        let path_hash = fnv1a_64(path.as_bytes());
+        if let Some(&id) = self.path_to_id.get(&path_hash) {
+            let entry = &mut self.entries[id as usize];
+            if entry.path == path && entry.is_dir == is_dir {
+                entry.size = size;
+                entry.modified = modified;
+                entry.created = created;
+                entry.accessed = accessed;
+                return id;
+            }
+            if entry.path == path {
+                self.remove(path);
+            }
+        }
+
         let id = self.entries.len() as u32;
         let name_off = path.rfind('/').map(|i| i + 1).unwrap_or(0) as u16;
         let name = &path[name_off as usize..];
@@ -216,9 +231,6 @@ impl Index {
             created,
             accessed,
         };
-
-        let path_hash = fnv1a_64(path.as_bytes());
-
         self.entries.push(entry);
 
         self.path_to_id.insert(path_hash, id);

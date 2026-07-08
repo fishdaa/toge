@@ -7,11 +7,15 @@
     diagnosticsLog,
     fetchStatus,
     reindexing,
-    requestReindex
+    requestReindex,
+    runWatcherSelfTest
   } from '$lib/searchStore'
+  import type { WatcherSelfTestResult } from '$lib/types'
 
   let copyLabel = $state('Copy log')
   let reindexError = $state<string | null>(null)
+  let watcherTestRunning = $state(false)
+  let watcherTestResult = $state<WatcherSelfTestResult | null>(null)
   let refreshTimer: ReturnType<typeof setInterval> | null = null
 
   function formatTimestamp(unix: number): string {
@@ -48,6 +52,23 @@
     }
   }
 
+  async function runSelfTest() {
+    watcherTestRunning = true
+    watcherTestResult = null
+
+    try {
+      watcherTestResult = await runWatcherSelfTest()
+    } catch (e) {
+      watcherTestResult = {
+        passed: false,
+        summary: String(e),
+        events: []
+      }
+    } finally {
+      watcherTestRunning = false
+    }
+  }
+
   onMount(() => {
     fetchStatus()
     refreshTimer = setInterval(() => {
@@ -70,6 +91,9 @@
       <div class="actions">
         <button class="action-btn action-btn-primary" onclick={reindex} disabled={$reindexing}>
           {$reindexing ? 'Reindexing…' : 'Reindex'}
+        </button>
+        <button class="action-btn" onclick={runSelfTest} disabled={watcherTestRunning}>
+          {watcherTestRunning ? 'Testing…' : 'Watcher Self-Test'}
         </button>
         <button class="action-btn" onclick={() => fetchStatus()}>Refresh</button>
         <button class="action-btn" onclick={copyLog}>{copyLabel}</button>
@@ -107,6 +131,12 @@
 
       {#if reindexError}
         <div class="error-banner">{reindexError}</div>
+      {/if}
+
+      {#if watcherTestResult}
+        <div class="error-banner" class:success-banner={watcherTestResult.passed}>
+          {watcherTestResult.summary}
+        </div>
       {/if}
 
       <section class="section">
@@ -164,6 +194,19 @@
         {:else}
           <div class="loading">Loading daemon status...</div>
         {/if}
+      </section>
+
+      <section class="section">
+        <div class="section-title">Watcher Log</div>
+        <div class="log-panel">
+          {#if $daemonStatus?.watcher_log?.length}
+            {#each $daemonStatus.watcher_log as entry}
+              <div class="log-entry">{entry}</div>
+            {/each}
+          {:else}
+            <div class="loading">No watcher events yet.</div>
+          {/if}
+        </div>
       </section>
 
       <section class="section">
@@ -373,6 +416,12 @@
     border-radius: var(--radius-md);
     padding: 12px 14px;
     font-size: 12px;
+  }
+
+  .success-banner {
+    border-color: rgba(74, 222, 128, 0.28);
+    background: rgba(74, 222, 128, 0.12);
+    color: #86efac;
   }
 
   .section {

@@ -1,9 +1,13 @@
 use crate::format;
 use crate::ipc_client;
 use crate::state::AppState;
+use std::fs;
+use std::path::PathBuf;
 use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 use tauri::{Manager, State, WebviewUrl, WebviewWindowBuilder};
+use toge_core::sys::{FsWatcher, InotifyWatcher, WatchEvent};
 
 #[derive(serde::Serialize)]
 pub struct SearchResult {
@@ -34,8 +38,16 @@ pub struct StatusResult {
     pub watched_dir_count: u64,
     pub watch_failure_count: u64,
     pub watch_overflow_count: u64,
+    pub watcher_log: Vec<String>,
     pub last_updated_unix: i64,
     pub build_duration_ms: u64,
+}
+
+#[derive(serde::Serialize)]
+pub struct WatcherSelfTestResult {
+    pub passed: bool,
+    pub summary: String,
+    pub events: Vec<String>,
 }
 
 #[tauri::command]
@@ -99,6 +111,7 @@ pub fn get_status(state: State<'_, AppState>) -> Result<StatusResult, String> {
         watched_dir_count: status.watched_dir_count as u64,
         watch_failure_count: status.watch_failure_count as u64,
         watch_overflow_count: status.watch_overflow_count,
+        watcher_log: status.watcher_log,
         last_updated_unix: status.last_updated_unix,
         build_duration_ms: status.build_duration_ms,
     })
@@ -124,6 +137,128 @@ pub fn reindex_index(state: State<'_, AppState>) -> Result<(), String> {
     let socket = state.socket_path();
     ipc_client::ensure_daemon_running(&socket).map_err(|e| e.to_string())?;
     ipc_client::reindex(&socket).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn run_watcher_self_test() -> Result<WatcherSelfTestResult, String> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return Ok(WatcherSelfTestResult {
+            passed: false,
+            summary: "Watcher self-test is only available on Linux".to_string(),
+            events: vec![],
+        });
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let mut watcher = InotifyWatcher::new().map_err(|e| format!("watcher init failed: {}", e))?;
+
+        let test_dir = make_watcher_test_dir().map_err(|e| format!("temp dir failed: {}", e))?;
+        let test_file = test_dir.join("watcher-self-test.mkv");
+        let test_file_str = test_file.to_string_lossy().to_string();
+
+        let outcome = (|| -> Result<WatcherSelfTestResult, String> {
+            watcher
+                .watch(&test_dir)
+                .map_err(|e| format!("watch failed: {}", e))?;
+
+            fs::write(&test_file, b"self-test").map_err(|e| format!("create failed: {}", e))?;
+            let create_events = wait_for_events(&mut watcher, Duration::from_secs(2))
+                .map_err(|e| format!("create poll failed: {}", e))?;
+
+            fs::remove_file(&test_file).map_err(|e| format!("delete failed: {}", e))?;
+            let delete_events = wait_for_events(&mut watcher, Duration::from_secs(2))
+                .map_err(|e| format!("delete poll failed: {}", e))?;
+
+            let mut event_lines = Vec::new();
+            let mut saw_create = false;
+            let mut saw_delete = false;
+
+            for event in create_events.into_iter().chain(delete_events) {
+                event_lines.push(format_watch_event(&event));
+                match event {
+                    WatchEvent::Create { path, is_dir: false } if path == test_file_str => {
+                        saw_create = true;
+                    }
+                    WatchEvent::Delete { path } if path == test_file_str => {
+                        saw_delete = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            let passed = saw_create && saw_delete;
+            let summary = if passed {
+                "Watcher self-test passed: create and delete events observed".to_string()
+            } else {
+                format!(
+                    "Watcher self-test failed: create seen = {}, delete seen = {}",
+                    saw_create, saw_delete
+                )
+            };
+
+            Ok(WatcherSelfTestResult {
+                passed,
+                summary,
+                events: event_lines,
+            })
+        })();
+
+        let _ = fs::remove_file(&test_file);
+        let _ = fs::remove_dir_all(&test_dir);
+
+        outcome
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn make_watcher_test_dir() -> std::io::Result<PathBuf> {
+    let base = std::env::temp_dir();
+    let unique = format!(
+        "toge-watcher-self-test-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let dir = base.join(unique);
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_for_events(
+    watcher: &mut InotifyWatcher,
+    timeout: Duration,
+) -> std::io::Result<Vec<WatchEvent>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let mut all = Vec::new();
+
+    while std::time::Instant::now() < deadline {
+        let events = watcher.poll_events()?;
+        if !events.is_empty() {
+            all.extend(events);
+            return Ok(all);
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+
+    Ok(all)
+}
+
+#[cfg(target_os = "linux")]
+fn format_watch_event(event: &WatchEvent) -> String {
+    match event {
+        WatchEvent::Create { path, is_dir } => {
+            format!("create {}{}", path, if *is_dir { " (dir)" } else { "" })
+        }
+        WatchEvent::Delete { path } => format!("delete {}", path),
+        WatchEvent::Modify { path } => format!("modify {}", path),
+        WatchEvent::Move { from, to } => format!("move {} -> {}", from, to),
+        WatchEvent::Overflow { path } => format!("overflow {}", path),
+    }
 }
 
 #[tauri::command]

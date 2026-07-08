@@ -19,6 +19,7 @@ use_libc = ["libc"]
 [dependencies]
 # 0-1 external dependency rule. libc is optional; raw FFI is preferred.
 libc = { version = "0.2", optional = true }
+notify = "6"
 # Regex engine for the regex: modifier and -r flag (single approved external dep)
 regex = "1"
 

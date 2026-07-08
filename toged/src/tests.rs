@@ -46,6 +46,7 @@ fn query_before_ready_returns_not_ready_error() {
         status_message: String::new(),
         build_duration_ms: 0,
         watcher: WatcherStatus::default(),
+        watcher_log: Vec::new(),
     }));
 
     let resp = handle_request(

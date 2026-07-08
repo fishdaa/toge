@@ -16,6 +16,7 @@ pub fn run() {
             commands::reveal_in_folder,
             commands::copy_to_clipboard,
             commands::reindex_index,
+            commands::run_watcher_self_test,
             commands::open_debug_window,
         ])
         .run(tauri::generate_context!())

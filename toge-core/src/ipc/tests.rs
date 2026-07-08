@@ -69,6 +69,10 @@ fn test_response_status_roundtrip() {
         watched_dir_count: 12,
         watch_failure_count: 1,
         watch_overflow_count: 2,
+        watcher_log: vec![
+            "12:00:00 create /downloads/movie.mkv".to_string(),
+            "12:00:01 modify /downloads/movie.mkv".to_string(),
+        ],
         last_updated_unix: 1700000000,
         build_duration_ms: 567,
     });
@@ -121,4 +125,37 @@ fn test_response_decode_rejects_truncated_row_payload() {
 
     let err = Response::decode(&bytes).unwrap_err();
     assert_eq!(err, "missing row path");
+}
+
+#[test]
+fn test_response_status_decode_supports_legacy_payload_without_watcher_log() {
+    let message = "Indexed 1234 entries in 567ms";
+    let mut bytes = vec![2];
+    bytes.extend_from_slice(&1234u64.to_le_bytes()); // indexed_count
+    bytes.push(DaemonStatus::Ready.to_u8()); // status
+    bytes.extend_from_slice(&(message.len() as u64).to_le_bytes()); // status_message len
+    bytes.extend_from_slice(message.as_bytes());
+    bytes.push(1); // watcher_healthy
+    bytes.extend_from_slice(&12u64.to_le_bytes()); // watched_dir_count
+    bytes.extend_from_slice(&1u64.to_le_bytes()); // watch_failure_count
+    bytes.extend_from_slice(&2u64.to_le_bytes()); // watch_overflow_count
+    bytes.extend_from_slice(&1700000000u64.to_le_bytes()); // last_updated_unix
+    bytes.extend_from_slice(&567u64.to_le_bytes()); // build_duration_ms
+
+    let decoded = Response::decode(&bytes).unwrap();
+    assert_eq!(
+        decoded,
+        Response::Status(StatusResponse {
+            indexed_count: 1234,
+            status: DaemonStatus::Ready,
+            status_message: "Indexed 1234 entries in 567ms".to_string(),
+            watcher_healthy: true,
+            watched_dir_count: 12,
+            watch_failure_count: 1,
+            watch_overflow_count: 2,
+            watcher_log: vec![],
+            last_updated_unix: 1700000000,
+            build_duration_ms: 567,
+        })
+    );
 }

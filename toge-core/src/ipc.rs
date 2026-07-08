@@ -2,6 +2,7 @@
 
 pub const MAX_IPC_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
 pub const MAX_RESPONSE_PATHS: usize = 1_000_000;
+pub const MAX_STATUS_LOG_ENTRIES: usize = 10_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
@@ -114,6 +115,7 @@ pub struct StatusResponse {
     pub watched_dir_count: usize,
     pub watch_failure_count: usize,
     pub watch_overflow_count: u64,
+    pub watcher_log: Vec<String>,
     pub last_updated_unix: i64,
     pub build_duration_ms: u64,
 }
@@ -280,6 +282,10 @@ impl Response {
                 push_usize(&mut buf, s.watched_dir_count);
                 push_usize(&mut buf, s.watch_failure_count);
                 push_u64(&mut buf, s.watch_overflow_count);
+                push_usize(&mut buf, s.watcher_log.len());
+                for entry in &s.watcher_log {
+                    push_string(&mut buf, entry);
+                }
                 push_u64(&mut buf, s.last_updated_unix as u64);
                 push_u64(&mut buf, s.build_duration_ms);
             }
@@ -355,6 +361,20 @@ impl Response {
                     take_usize(bytes, &mut off).ok_or("missing watch_failure_count")?;
                 let watch_overflow_count =
                     take_u64(bytes, &mut off).ok_or("missing watch_overflow_count")?;
+                let remaining = bytes.len().saturating_sub(off);
+                let mut watcher_log = Vec::new();
+                if remaining != 16 {
+                    let watcher_log_count =
+                        take_usize(bytes, &mut off).ok_or("missing watcher_log_count")?;
+                    if watcher_log_count > MAX_STATUS_LOG_ENTRIES {
+                        return Err("too many watcher log entries".into());
+                    }
+                    watcher_log = Vec::with_capacity(watcher_log_count);
+                    for _ in 0..watcher_log_count {
+                        watcher_log
+                            .push(take_string(bytes, &mut off).ok_or("missing watcher_log entry")?);
+                    }
+                }
                 let last_updated_unix =
                     take_u64(bytes, &mut off).ok_or("missing last_updated")? as i64;
                 let build_duration_ms =
@@ -367,6 +387,7 @@ impl Response {
                     watched_dir_count,
                     watch_failure_count,
                     watch_overflow_count,
+                    watcher_log,
                     last_updated_unix,
                     build_duration_ms,
                 }))

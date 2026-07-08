@@ -1,6 +1,13 @@
 import { writable, derived, get } from 'svelte/store'
 import { invoke } from '@tauri-apps/api/core'
-import type { ResultRow, SearchResult, StatusResponse, SortColumn, SortDirection } from './types'
+import type {
+  ResultRow,
+  SearchResult,
+  StatusResponse,
+  SortColumn,
+  SortDirection,
+  WatcherSelfTestResult
+} from './types'
 
 export const query = writable('')
 export const results = writable<ResultRow[]>([])
@@ -36,6 +43,18 @@ const SEARCH_DEBOUNCE_MS = 250
 
 let searchTimeout: ReturnType<typeof setTimeout> | null = null
 let latestSearchRequestId = 0
+
+function shouldRefreshActiveSearch(
+  previous: StatusResponse | null,
+  next: StatusResponse
+): boolean {
+  if (!previous) return false
+
+  return (
+    previous.last_updated_unix !== next.last_updated_unix ||
+    previous.indexed_count !== next.indexed_count
+  )
+}
 
 function appendDiagnostics(message: string) {
   diagnosticsLog.update((entries) => {
@@ -189,9 +208,14 @@ export async function copySelectedPath() {
 
 export async function fetchStatus() {
   try {
+    const previousStatus = get(daemonStatus)
     const status = await invoke<StatusResponse>('get_status')
     daemonStatus.set(status)
     appendDiagnostics(`Status refreshed: ${status.status}`)
+
+    if (get(query).trim() && shouldRefreshActiveSearch(previousStatus, status)) {
+      search()
+    }
   } catch (e) {
     daemonStatus.set(null)
     appendDiagnostics(`Status refresh failed: ${String(e)}`)
@@ -223,6 +247,16 @@ export async function copyDiagnosticsLog() {
   const text = get(diagnosticsLog).join('\n')
   await invoke('copy_to_clipboard', { text })
   appendDiagnostics('Copied diagnostics log')
+}
+
+export async function runWatcherSelfTest() {
+  appendDiagnostics('Watcher self-test started')
+  const result = await invoke<WatcherSelfTestResult>('run_watcher_self_test')
+  appendDiagnostics(result.summary)
+  for (const entry of result.events) {
+    appendDiagnostics(`watcher-self-test: ${entry}`)
+  }
+  return result
 }
 
 export function formatSize(bytes: number): string {
