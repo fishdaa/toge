@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/svelte'
 import StatusBar from '@/components/StatusBar.svelte'
 import { invoke } from '@tauri-apps/api/core'
-import { results, selectedIndex, totalCount, sizeIndexed } from '$lib/searchStore'
+import { setResults, setSelectedIndex, setTotalCount, setSizeIndexed } from '$lib/searchStore'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn()
@@ -11,10 +11,10 @@ vi.mock('@tauri-apps/api/core', () => ({
 describe('StatusBar', () => {
   beforeEach(() => {
     vi.resetModules()
-    results.set([])
-    selectedIndex.set(-1)
-    totalCount.set(0)
-    sizeIndexed.set(false)
+    setResults([])
+    setSelectedIndex(-1)
+    setTotalCount(0)
+    setSizeIndexed(false)
     vi.mocked(invoke).mockResolvedValue({
       status: 'Ready',
       status_message: 'Indexed 123 entries',
@@ -41,10 +41,10 @@ describe('StatusBar', () => {
   })
 
   it('shows selected row details instead of generic status text', async () => {
-    sizeIndexed.set(true)
-    totalCount.set(24)
-    selectedIndex.set(3)
-    results.set([
+    setSizeIndexed(true)
+    setTotalCount(24)
+    setSelectedIndex(3)
+    setResults([
       { path: '/tmp/a.txt', name: 'a.txt', parent: '/tmp', extension: 'txt', is_dir: false, size_bytes: 1, modified_unix: 0 },
       { path: '/tmp/b.txt', name: 'b.txt', parent: '/tmp', extension: 'txt', is_dir: false, size_bytes: 2, modified_unix: 0 },
       { path: '/tmp/c.txt', name: 'c.txt', parent: '/tmp', extension: 'txt', is_dir: false, size_bytes: 3, modified_unix: 0 },

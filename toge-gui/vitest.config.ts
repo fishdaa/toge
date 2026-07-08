@@ -9,6 +9,7 @@ export default defineConfig({
       '@': resolve(__dirname, 'src'),
       '$lib': resolve(__dirname, 'src/lib')
     },
+    extensions: ['.svelte.ts', '.svelte.js', '.ts', '.js', '.svelte', '.json'],
     conditions: ['browser']
   },
   test: {

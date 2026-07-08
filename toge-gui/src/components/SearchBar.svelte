@@ -1,8 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { query } from '$lib/searchStore'
-  import { clearSearch, search, debouncedSearch, selectNext, selectPrevious, openDiagnosticsWindow } from '$lib/searchStore'
-  import { openSelected, copySelectedPath, trashSelected, deleteSelected } from '$lib/searchStore'
+  import { state as searchState, clearSearch, search, debouncedSearch, selectNext, selectPrevious, openDiagnosticsWindow, openSelected, copySelectedPath, trashSelected, deleteSelected } from '$lib/searchStore'
 
   const menuItems = ['File', 'Edit', 'View', 'Search', 'Bookmarks', 'Tools', 'Help']
 
@@ -10,7 +8,7 @@
   let queryText = $state('')
 
   onMount(() => {
-    queryText = $query
+    queryText = searchState.query
     inputEl?.focus()
   })
 

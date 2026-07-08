@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { copyFeedback } from '$lib/searchStore'
+  import { state as searchState } from '$lib/searchStore'
 
   let { x, y, onopen, onreveal, oncopypath, ontrash, ondelete, onclose }: {
     x: number
@@ -29,7 +29,7 @@
     <button class="menu-item" onclick={onopen}>Open</button>
     <button class="menu-item" onclick={onreveal}>Reveal in Folder</button>
     <button class="menu-item" onclick={oncopypath}>
-      {$copyFeedback ? 'Copied!' : 'Copy Path'}
+      {searchState.copyFeedback ? 'Copied!' : 'Copy Path'}
     </button>
     <div class="menu-separator"></div>
     <button class="menu-item" onclick={ontrash}>Move to Trash</button>

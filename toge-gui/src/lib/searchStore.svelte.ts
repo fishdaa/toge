@@ -1,4 +1,3 @@
-import { writable, derived, get } from 'svelte/store'
 import { invoke } from '@tauri-apps/api/core'
 import type {
   ResultRow,
@@ -69,49 +68,88 @@ function loadColumnWidths(): number[] {
   return [...DEFAULT_COLUMN_WIDTHS]
 }
 
-export const query = writable('')
-export const results = writable<ResultRow[]>([])
-export const totalCount = writable(0)
-export const totalSize = writable(0)
-export const isLoading = writable(false)
-export const statusText = writable('Ready')
-export const selectedIndex = writable(-1)
-export const sortColumn = writable<SortColumn>(loadSortColumn())
-export const sortDirection = writable<SortDirection>(loadSortDirection())
-export const tableColumnWidths = writable<number[]>(loadColumnWidths())
-export const error = writable<string | null>(null)
-export const daemonStatus = writable<StatusResponse | null>(null)
-export const copyFeedback = writable(false)
-export const diagnosticsLog = writable<string[]>([])
-export const reindexing = writable(false)
-export const sizeIndexed = writable(false)
-
-sortColumn.subscribe((value) => {
-  writeStorage(STORAGE_KEYS.sortColumn, value)
+export const state = $state({
+  query: '',
+  results: [] as ResultRow[],
+  totalCount: 0,
+  totalSize: 0,
+  isLoading: false,
+  statusText: 'Ready',
+  selectedIndex: -1,
+  sortColumn: loadSortColumn() as SortColumn,
+  sortDirection: loadSortDirection() as SortDirection,
+  tableColumnWidths: loadColumnWidths() as number[],
+  error: null as string | null,
+  daemonStatus: null as StatusResponse | null,
+  copyFeedback: false,
+  diagnosticsLog: [] as string[],
+  reindexing: false,
+  sizeIndexed: false
 })
 
-sortDirection.subscribe((value) => {
-  writeStorage(STORAGE_KEYS.sortDirection, value)
-})
+export function hasResults() {
+  return state.results.length > 0
+}
 
-tableColumnWidths.subscribe((value) => {
-  writeStorage(STORAGE_KEYS.columnWidths, JSON.stringify(value))
-})
+export function indexStatusText() {
+  if (!state.daemonStatus) return 'Index unavailable'
 
-export const hasResults = derived(results, ($results) => $results.length > 0)
-export const indexStatusText = derived(daemonStatus, ($daemonStatus) => {
-  if (!$daemonStatus) return 'Index unavailable'
-
-  const count = `${$daemonStatus.indexed_count.toLocaleString()} indexed`
-  const status = $daemonStatus.status
-  const message = $daemonStatus.status_message?.trim()
+  const count = `${state.daemonStatus.indexed_count.toLocaleString()} indexed`
+  const status = state.daemonStatus.status
+  const message = state.daemonStatus.status_message?.trim()
 
   if (!message || message === status) {
     return `${status} | ${count}`
   }
 
   return `${status} | ${message} | ${count}`
-})
+}
+
+export function setQuery(value: string) {
+  state.query = value
+}
+
+export function setResults(value: ResultRow[]) {
+  state.results = value
+}
+
+export function setSelectedIndex(value: number) {
+  state.selectedIndex = value
+}
+
+export function setTotalCount(value: number) {
+  state.totalCount = value
+}
+
+export function setSizeIndexed(value: boolean) {
+  state.sizeIndexed = value
+}
+
+export function setDaemonStatus(value: StatusResponse | null) {
+  state.daemonStatus = value
+}
+
+export function setDiagnosticsLog(value: string[]) {
+  state.diagnosticsLog = value
+}
+
+export function setCopyFeedback(value: boolean) {
+  state.copyFeedback = value
+}
+
+export function setReindexing(value: boolean) {
+  state.reindexing = value
+}
+
+export function setSortColumn(value: SortColumn) {
+  state.sortColumn = value
+  writeStorage(STORAGE_KEYS.sortColumn, value)
+}
+
+export function setSortDirection(value: SortDirection) {
+  state.sortDirection = value
+  writeStorage(STORAGE_KEYS.sortDirection, value)
+}
 
 const SEARCH_DEBOUNCE_MS = 300
 
@@ -145,36 +183,34 @@ function shouldRefreshActiveSearch(
 }
 
 function appendDiagnostics(message: string) {
-  diagnosticsLog.update((entries) => {
-    const timestamp = new Date().toLocaleTimeString()
-    const next = [`[${timestamp}] ${message}`, ...entries]
-    return next.slice(0, 200)
-  })
+  const timestamp = new Date().toLocaleTimeString()
+  const next = [`[${timestamp}] ${message}`, ...state.diagnosticsLog]
+  state.diagnosticsLog = next.slice(0, 200)
 }
 
 async function runSearch(nextQuery?: string) {
   const requestId = ++latestSearchRequestId
-  const q = (nextQuery ?? get(query)).trim()
+  const q = (nextQuery ?? state.query).trim()
 
   if (!q) {
-    query.set('')
-    results.set([])
-    totalCount.set(0)
-    totalSize.set(0)
-    sizeIndexed.set(false)
-    statusText.set('Ready')
-    isLoading.set(false)
+    state.query = ''
+    state.results = []
+    state.totalCount = 0
+    state.totalSize = 0
+    state.sizeIndexed = false
+    state.statusText = 'Ready'
+    state.isLoading = false
     return
   }
 
-  query.set(q)
+  state.query = q
 
-  const col = get(sortColumn)
-  const dir = get(sortDirection)
+  const col = state.sortColumn
+  const dir = state.sortDirection
   const searchQuery = `${q} sort:${col}${dir === 'desc' ? '-desc' : ''}`
 
-  isLoading.set(true)
-  error.set(null)
+  state.isLoading = true
+  state.error = null
   appendDiagnostics(`Search started for "${q}"`)
 
   try {
@@ -190,32 +226,30 @@ async function runSearch(nextQuery?: string) {
 
     if (requestId !== latestSearchRequestId) return
 
-    const prevIdx = get(selectedIndex)
-    const prevRows = get(results)
+    const prevIdx = state.selectedIndex
+    const prevRows = state.results
     const prevPath = prevIdx >= 0 && prevIdx < prevRows.length ? prevRows[prevIdx]?.path : null
 
-    results.set(result.rows)
+    state.results = result.rows
 
     const newIdx = prevPath ? result.rows.findIndex((r) => r.path === prevPath) : -1
-    selectedIndex.set(newIdx >= 0 ? newIdx : result.rows.length > 0 ? 0 : -1)
-    sizeIndexed.set(result.size_indexed)
-    totalCount.set(result.total_count)
-    totalSize.set(result.total_size)
-    statusText.set(
-      result.size_indexed
-        ? `${result.total_count} results | ${formatSize(result.total_size)}`
-        : `${result.total_count} results | size unavailable`
-    )
+    state.selectedIndex = newIdx >= 0 ? newIdx : result.rows.length > 0 ? 0 : -1
+    state.sizeIndexed = result.size_indexed
+    state.totalCount = result.total_count
+    state.totalSize = result.total_size
+    state.statusText = result.size_indexed
+      ? `${result.total_count} results | ${formatSize(result.total_size)}`
+      : `${result.total_count} results | size unavailable`
     appendDiagnostics(`Search returned ${result.total_count} results`)
   } catch (e) {
     if (requestId !== latestSearchRequestId) return
 
-    error.set(String(e))
-    statusText.set(`Error: ${e}`)
+    state.error = String(e)
+    state.statusText = `Error: ${e}`
     appendDiagnostics(`Search failed: ${String(e)}`)
   } finally {
     if (requestId === latestSearchRequestId) {
-      isLoading.set(false)
+      state.isLoading = false
     }
   }
 }
@@ -242,93 +276,84 @@ export function clearSearch() {
     searchTimeout = null
   }
   latestSearchRequestId += 1
-  query.set('')
-  results.set([])
-  sizeIndexed.set(false)
-  totalCount.set(0)
-  totalSize.set(0)
-  statusText.set('Ready')
-  selectedIndex.set(-1)
-  error.set(null)
-  isLoading.set(false)
+  state.query = ''
+  state.results = []
+  state.sizeIndexed = false
+  state.totalCount = 0
+  state.totalSize = 0
+  state.statusText = 'Ready'
+  state.selectedIndex = -1
+  state.error = null
+  state.isLoading = false
 }
 
 export function setSort(column: SortColumn) {
-  const currentCol = get(sortColumn)
-  if (currentCol === column) {
-    sortDirection.update(d => d === 'asc' ? 'desc' : 'asc')
+  if (state.sortColumn === column) {
+    setSortDirection(state.sortDirection === 'asc' ? 'desc' : 'asc')
   } else {
-    sortColumn.set(column)
-    sortDirection.set('asc')
+    setSortColumn(column)
+    setSortDirection('asc')
   }
   search()
 }
 
 export function setTableColumnWidths(widths: number[]) {
-  tableColumnWidths.set([...widths])
+  state.tableColumnWidths = [...widths]
+  writeStorage(STORAGE_KEYS.columnWidths, JSON.stringify(state.tableColumnWidths))
 }
 
 export function selectRow(index: number) {
-  selectedIndex.set(index)
+  state.selectedIndex = index
 }
 
 export function selectNext() {
-  const idx = get(selectedIndex)
-  const rows = get(results)
-  if (idx < rows.length - 1) {
-    selectedIndex.set(idx + 1)
+  if (state.selectedIndex < state.results.length - 1) {
+    state.selectedIndex += 1
   }
 }
 
 export function selectPrevious() {
-  const idx = get(selectedIndex)
-  if (idx > 0) {
-    selectedIndex.set(idx - 1)
+  if (state.selectedIndex > 0) {
+    state.selectedIndex -= 1
   }
 }
 
 export async function openSelected() {
-  const idx = get(selectedIndex)
-  const rows = get(results)
-  if (idx >= 0) {
-    appendDiagnostics(`Opened ${rows[idx].path}`)
-    await invoke('open_path', { path: rows[idx].path })
+  if (state.selectedIndex >= 0) {
+    appendDiagnostics(`Opened ${state.results[state.selectedIndex].path}`)
+    await invoke('open_path', { path: state.results[state.selectedIndex].path })
   }
 }
 
 export async function revealSelected() {
-  const idx = get(selectedIndex)
-  const rows = get(results)
-  if (idx >= 0) {
-    appendDiagnostics(`Revealed ${rows[idx].path}`)
-    await invoke('reveal_in_folder', { path: rows[idx].path })
+  if (state.selectedIndex >= 0) {
+    appendDiagnostics(`Revealed ${state.results[state.selectedIndex].path}`)
+    await invoke('reveal_in_folder', { path: state.results[state.selectedIndex].path })
   }
 }
 
 export async function copySelectedPath() {
-  const idx = get(selectedIndex)
-  const rows = get(results)
-  if (idx >= 0) {
-    await invoke('copy_to_clipboard', { text: rows[idx].path })
-    appendDiagnostics(`Copied path ${rows[idx].path}`)
-    copyFeedback.set(true)
-    setTimeout(() => copyFeedback.set(false), 1500)
+  if (state.selectedIndex >= 0) {
+    await invoke('copy_to_clipboard', { text: state.results[state.selectedIndex].path })
+    appendDiagnostics(`Copied path ${state.results[state.selectedIndex].path}`)
+    state.copyFeedback = true
+    setTimeout(() => {
+      state.copyFeedback = false
+    }, 1500)
   }
 }
 
 export async function trashSelected(): Promise<boolean> {
-  const idx = get(selectedIndex)
-  const rows = get(results)
+  const idx = state.selectedIndex
   if (idx < 0) return false
 
-  const row = rows[idx]
+  const row = state.results[idx]
   try {
     await invoke('trash_path', { path: row.path })
     appendDiagnostics(`Trashed ${row.path}`)
-    results.update((r) => r.filter((_, i) => i !== idx))
-    totalCount.update((c) => Math.max(0, c - 1))
-    const newRows = get(results)
-    selectedIndex.set(newRows.length > 0 ? Math.min(idx, newRows.length - 1) : -1)
+    state.results = state.results.filter((_, i) => i !== idx)
+    state.totalCount = Math.max(0, state.totalCount - 1)
+    state.selectedIndex = state.results.length > 0 ? Math.min(idx, state.results.length - 1) : -1
     return true
   } catch (e) {
     appendDiagnostics(`Trash failed: ${String(e)}`)
@@ -337,18 +362,16 @@ export async function trashSelected(): Promise<boolean> {
 }
 
 export async function deleteSelected(): Promise<boolean> {
-  const idx = get(selectedIndex)
-  const rows = get(results)
+  const idx = state.selectedIndex
   if (idx < 0) return false
 
-  const row = rows[idx]
+  const row = state.results[idx]
   try {
     await invoke('delete_path', { path: row.path })
     appendDiagnostics(`Deleted ${row.path}`)
-    results.update((r) => r.filter((_, i) => i !== idx))
-    totalCount.update((c) => Math.max(0, c - 1))
-    const newRows = get(results)
-    selectedIndex.set(newRows.length > 0 ? Math.min(idx, newRows.length - 1) : -1)
+    state.results = state.results.filter((_, i) => i !== idx)
+    state.totalCount = Math.max(0, state.totalCount - 1)
+    state.selectedIndex = state.results.length > 0 ? Math.min(idx, state.results.length - 1) : -1
     return true
   } catch (e) {
     appendDiagnostics(`Delete failed: ${String(e)}`)
@@ -357,21 +380,21 @@ export async function deleteSelected(): Promise<boolean> {
 }
 
 export async function fetchStatus() {
-  if (get(isLoading)) return
+  if (state.isLoading) return
 
   try {
-    const previousStatus = get(daemonStatus)
+    const previousStatus = state.daemonStatus
     const status = await invoke<StatusResponse>('get_status')
-    daemonStatus.set(status)
+    state.daemonStatus = status
     if (shouldRefreshActiveSearch(previousStatus, status) || !previousStatus) {
       appendDiagnostics(`Status refreshed: ${status.status}`)
     }
 
-    if (get(query).trim() && shouldRefreshActiveSearch(previousStatus, status)) {
+    if (state.query.trim() && shouldRefreshActiveSearch(previousStatus, status)) {
       search()
     }
   } catch (e) {
-    daemonStatus.set(null)
+    state.daemonStatus = null
     appendDiagnostics(`Status refresh failed: ${String(e)}`)
   }
 }
@@ -382,7 +405,7 @@ export async function openDiagnosticsWindow() {
 }
 
 export async function requestReindex() {
-  reindexing.set(true)
+  state.reindexing = true
   appendDiagnostics('Reindex requested')
 
   try {
@@ -393,12 +416,12 @@ export async function requestReindex() {
     appendDiagnostics(`Reindex failed: ${String(e)}`)
     throw e
   } finally {
-    reindexing.set(false)
+    state.reindexing = false
   }
 }
 
 export async function copyDiagnosticsLog() {
-  const text = get(diagnosticsLog).join('\n')
+  const text = state.diagnosticsLog.join('\n')
   await invoke('copy_to_clipboard', { text })
   appendDiagnostics('Copied diagnostics log')
 }

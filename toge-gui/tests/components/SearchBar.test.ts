@@ -2,8 +2,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/svelte'
 import SearchBar from '@/components/SearchBar.svelte'
 import { invoke } from '@tauri-apps/api/core'
-import { get } from 'svelte/store'
-import { query } from '$lib/searchStore'
+import { state, setQuery, clearSearch } from '$lib/searchStore'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn()
@@ -12,7 +11,8 @@ vi.mock('@tauri-apps/api/core', () => ({
 describe('SearchBar', () => {
   beforeEach(() => {
     vi.resetModules()
-    query.set('')
+    clearSearch()
+    setQuery('')
   })
 
   it('renders input element', async () => {
@@ -55,7 +55,7 @@ describe('SearchBar', () => {
     await fireEvent.input(input, { target: { value: 'needle' } })
     await fireEvent.keyDown(input, { key: 'Enter' })
 
-    expect(get(query)).toBe('needle')
+    expect(state.query).toBe('needle')
     expect(invoke).toHaveBeenCalledWith('search_query', {
       query: 'needle sort:name'
     })
@@ -67,7 +67,7 @@ describe('SearchBar', () => {
     await fireEvent.input(input, { target: { value: 'needle' } })
 
     expect((input as HTMLInputElement).value).toBe('needle')
-    expect(get(query)).toBe('')
+    expect(state.query).toBe('')
   })
 
   it('clears the current query on Escape', async () => {
@@ -78,6 +78,6 @@ describe('SearchBar', () => {
     await fireEvent.keyDown(input, { key: 'Escape' })
 
     expect((input as HTMLInputElement).value).toBe('')
-    expect(get(query)).toBe('')
+    expect(state.query).toBe('')
   })
 })

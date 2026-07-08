@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte'
-  import { statusText, isLoading, indexStatusText, fetchStatus, results, selectedIndex, totalCount, sizeIndexed, formatSize, formatTimestamp } from '$lib/searchStore'
+  import { state as searchState, indexStatusText, fetchStatus, formatSize, formatTimestamp } from '$lib/searchStore'
 
   let refreshTimer: ReturnType<typeof setInterval> | null = null
 
@@ -15,11 +15,11 @@
     }
   })
 
-  const selectedRow = $derived(($selectedIndex >= 0 && $selectedIndex < $results.length) ? $results[$selectedIndex] : null)
+  const selectedRow = $derived((searchState.selectedIndex >= 0 && searchState.selectedIndex < searchState.results.length) ? searchState.results[searchState.selectedIndex] : null)
   const selectedDetails = $derived.by(() => {
     if (!selectedRow) return ''
 
-    const sizeLabel = $sizeIndexed ? formatSize(selectedRow.size_bytes) : 'size unavailable'
+    const sizeLabel = searchState.sizeIndexed ? formatSize(selectedRow.size_bytes) : 'size unavailable'
     const modifiedLabel = formatTimestamp(selectedRow.modified_unix) || 'unknown'
     return `Size: ${sizeLabel}, Date Modified: ${modifiedLabel}, Path: ${selectedRow.parent}`
   })
@@ -31,17 +31,17 @@
       <span class="status-text">{selectedDetails}</span>
     </div>
     <div class="status-group status-group-right">
-      <span class="status-text">{Math.max(0, $selectedIndex + 1)} of {$totalCount}</span>
+      <span class="status-text">{Math.max(0, searchState.selectedIndex + 1)} of {searchState.totalCount}</span>
     </div>
   {:else}
     <div class="status-group">
       <span class="status-label">Search</span>
-      <span class="status-text">{$statusText}</span>
-      <span class="loading-indicator" class:visible={$isLoading} aria-hidden={!$isLoading}>⟳</span>
+      <span class="status-text">{searchState.statusText}</span>
+      <span class="loading-indicator" class:visible={searchState.isLoading} aria-hidden={!searchState.isLoading}>⟳</span>
     </div>
     <div class="status-group status-group-right">
       <span class="status-label">Index</span>
-      <span class="status-text">{$indexStatusText}</span>
+      <span class="status-text">{indexStatusText()}</span>
     </div>
   {/if}
 </div>

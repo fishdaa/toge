@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { get } from 'svelte/store'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn()
@@ -12,12 +11,12 @@ beforeEach(async () => {
 
   const s = await import('$lib/searchStore')
   s.clearSearch()
-  s.daemonStatus.set(null)
-  s.diagnosticsLog.set([])
-  s.copyFeedback.set(false)
-  s.reindexing.set(false)
-  s.sortColumn.set('name')
-  s.sortDirection.set('asc')
+  s.setDaemonStatus(null)
+  s.setDiagnosticsLog([])
+  s.setCopyFeedback(false)
+  s.setReindexing(false)
+  s.setSortColumn('name')
+  s.setSortDirection('asc')
   s.setTableColumnWidths([220, 320, 88, 140])
 })
 
@@ -37,98 +36,98 @@ describe('searchStore', () => {
 
   it('initializes with default state', async () => {
     const s = await loadStore()
-    expect(get(s.query)).toBe('')
-    expect(get(s.results)).toEqual([])
-    expect(get(s.isLoading)).toBe(false)
-    expect(get(s.statusText)).toBe('Ready')
-    expect(get(s.selectedIndex)).toBe(-1)
-    expect(get(s.sortColumn)).toBe('name')
-    expect(get(s.sortDirection)).toBe('asc')
-    expect(get(s.tableColumnWidths)).toEqual([220, 320, 88, 140])
+    expect(s.state.query).toBe('')
+    expect(s.state.results).toEqual([])
+    expect(s.state.isLoading).toBe(false)
+    expect(s.state.statusText).toBe('Ready')
+    expect(s.state.selectedIndex).toBe(-1)
+    expect(s.state.sortColumn).toBe('name')
+    expect(s.state.sortDirection).toBe('asc')
+    expect(s.state.tableColumnWidths).toEqual([220, 320, 88, 140])
   })
 
   it('persists table UI state without persisting data', async () => {
     const s = await loadStore()
-    s.sortColumn.set('size')
-    s.sortDirection.set('desc')
+    s.setSortColumn('size')
+    s.setSortDirection('desc')
     s.setTableColumnWidths([240, 280, 100, 160])
-    s.results.set([
+    s.setResults([
       { path: '/a', name: 'a.txt', parent: '/', extension: 'txt', is_dir: false, size_bytes: 10, modified_unix: 0 }
     ])
 
     vi.resetModules()
     const reloaded = await import('$lib/searchStore')
 
-    expect(get(reloaded.sortColumn)).toBe('size')
-    expect(get(reloaded.sortDirection)).toBe('desc')
-    expect(get(reloaded.tableColumnWidths)).toEqual([240, 280, 100, 160])
-    expect(get(reloaded.results)).toEqual([])
+    expect(reloaded.state.sortColumn).toBe('size')
+    expect(reloaded.state.sortDirection).toBe('desc')
+    expect(reloaded.state.tableColumnWidths).toEqual([240, 280, 100, 160])
+    expect(reloaded.state.results).toEqual([])
   })
 
   it('clears search state', async () => {
     const s = await loadStore()
-    s.query.set('test')
-    s.results.set([{
+    s.setQuery('test')
+    s.setResults([{
       path: '/test', name: 'test.txt', parent: '/', extension: 'txt',
       is_dir: false, size_bytes: 10, modified_unix: 1704067200
     }])
-    s.selectedIndex.set(0)
+    s.setSelectedIndex(0)
 
     s.clearSearch()
 
-    expect(get(s.query)).toBe('')
-    expect(get(s.results)).toEqual([])
-    expect(get(s.selectedIndex)).toBe(-1)
+    expect(s.state.query).toBe('')
+    expect(s.state.results).toEqual([])
+    expect(s.state.selectedIndex).toBe(-1)
   })
 
   it('selects next row', async () => {
     const s = await loadStore()
-    s.results.set([
+    s.setResults([
       { path: '/a', name: 'a.txt', parent: '/', extension: 'txt', is_dir: false, size_bytes: 10, modified_unix: 0 },
       { path: '/b', name: 'b.txt', parent: '/', extension: 'txt', is_dir: false, size_bytes: 20, modified_unix: 0 }
     ])
-    s.selectedIndex.set(0)
+    s.setSelectedIndex(0)
 
     s.selectNext()
 
-    expect(get(s.selectedIndex)).toBe(1)
+    expect(s.state.selectedIndex).toBe(1)
   })
 
   it('does not select past last row', async () => {
     const s = await loadStore()
-    s.results.set([
+    s.setResults([
       { path: '/a', name: 'a.txt', parent: '/', extension: 'txt', is_dir: false, size_bytes: 10, modified_unix: 0 }
     ])
-    s.selectedIndex.set(0)
+    s.setSelectedIndex(0)
 
     s.selectNext()
 
-    expect(get(s.selectedIndex)).toBe(0)
+    expect(s.state.selectedIndex).toBe(0)
   })
 
   it('selects previous row', async () => {
     const s = await loadStore()
-    s.results.set([
+    s.setResults([
       { path: '/a', name: 'a.txt', parent: '/', extension: 'txt', is_dir: false, size_bytes: 10, modified_unix: 0 },
       { path: '/b', name: 'b.txt', parent: '/', extension: 'txt', is_dir: false, size_bytes: 20, modified_unix: 0 }
     ])
-    s.selectedIndex.set(1)
+    s.setSelectedIndex(1)
 
     s.selectPrevious()
 
-    expect(get(s.selectedIndex)).toBe(0)
+    expect(s.state.selectedIndex).toBe(0)
   })
 
   it('does not select before first row', async () => {
     const s = await loadStore()
-    s.results.set([
+    s.setResults([
       { path: '/a', name: 'a.txt', parent: '/', extension: 'txt', is_dir: false, size_bytes: 10, modified_unix: 0 }
     ])
-    s.selectedIndex.set(0)
+    s.setSelectedIndex(0)
 
     s.selectPrevious()
 
-    expect(get(s.selectedIndex)).toBe(0)
+    expect(s.state.selectedIndex).toBe(0)
   })
 
   it('formats size correctly', async () => {
@@ -141,9 +140,9 @@ describe('searchStore', () => {
   it('derives index status text from daemon status', async () => {
     const s = await loadStore()
 
-    expect(get(s.indexStatusText)).toBe('Index unavailable')
+    expect(s.indexStatusText()).toBe('Index unavailable')
 
-    s.daemonStatus.set({
+    s.setDaemonStatus({
       status: 'Ready',
       status_message: 'Indexed 42 entries',
       indexed_count: 42,
@@ -157,7 +156,7 @@ describe('searchStore', () => {
       build_duration_ms: 15
     })
 
-    expect(get(s.indexStatusText)).toBe('Ready | Indexed 42 entries | 42 indexed')
+    expect(s.indexStatusText()).toBe('Ready | Indexed 42 entries | 42 indexed')
   })
 
   it('copies the diagnostics log as a single payload', async () => {
@@ -165,7 +164,7 @@ describe('searchStore', () => {
     const { invoke } = await import('@tauri-apps/api/core')
     vi.mocked(invoke).mockResolvedValue(undefined)
 
-    s.diagnosticsLog.set(['[10:00:00] first', '[10:00:01] second'])
+    s.setDiagnosticsLog(['[10:00:00] first', '[10:00:01] second'])
     await s.copyDiagnosticsLog()
 
     expect(invoke).toHaveBeenCalledWith('copy_to_clipboard', {
@@ -187,7 +186,7 @@ describe('searchStore', () => {
     })
 
     const result = await s.runWatcherSelfTest()
-    const log = get(s.diagnosticsLog)
+    const log = s.state.diagnosticsLog
 
     expect(invoke).toHaveBeenCalledWith('run_watcher_self_test')
     expect(result).toEqual({
@@ -223,11 +222,11 @@ describe('searchStore', () => {
     })
     vi.mocked(invoke).mockClear()
 
-    s.query.set('f')
+    s.setQuery('f')
     s.debouncedSearch()
-    s.query.set('fo')
+    s.setQuery('fo')
     s.debouncedSearch()
-    s.query.set('foo')
+    s.setQuery('foo')
     s.debouncedSearch()
 
     expect(invoke).not.toHaveBeenCalled()
@@ -254,9 +253,9 @@ describe('searchStore', () => {
       .mockReturnValueOnce(first.promise as ReturnType<typeof invoke>)
       .mockReturnValueOnce(second.promise as ReturnType<typeof invoke>)
 
-    s.query.set('old')
+    s.setQuery('old')
     s.search()
-    s.query.set('new')
+    s.setQuery('new')
     s.search()
 
     second.resolve({
@@ -284,7 +283,7 @@ describe('searchStore', () => {
     await Promise.resolve()
     await Promise.resolve()
 
-    expect(get(s.results)).toEqual([{
+    expect(s.state.results).toEqual([{
       path: '/new',
       name: 'new.txt',
       parent: '/',
@@ -293,8 +292,8 @@ describe('searchStore', () => {
       size_bytes: 1,
       modified_unix: 0
     }])
-    expect(get(s.totalCount)).toBe(1)
-    expect(get(s.statusText)).toBe('1 results | 1.0 B')
+    expect(s.state.totalCount).toBe(1)
+    expect(s.state.statusText).toBe('1 results | 1.0 B')
   })
 
   it('shows size unavailable when file sizes are not indexed', async () => {
@@ -308,10 +307,10 @@ describe('searchStore', () => {
       size_indexed: false
     })
 
-    s.query.set('needle')
+    s.setQuery('needle')
     await s.search()
 
-    expect(get(s.statusText)).toBe('7 results | size unavailable')
+    expect(s.state.statusText).toBe('7 results | size unavailable')
   })
 
   it('clears the committed query when a debounced search becomes empty', async () => {
@@ -328,13 +327,13 @@ describe('searchStore', () => {
     })
 
     await s.search('.mkv')
-    expect(get(s.query)).toBe('.mkv')
-    expect(get(s.results)).toHaveLength(1)
+    expect(s.state.query).toBe('.mkv')
+    expect(s.state.results).toHaveLength(1)
 
     await s.search('')
-    expect(get(s.query)).toBe('')
-    expect(get(s.results)).toEqual([])
-    expect(get(s.statusText)).toBe('Ready')
+    expect(s.state.query).toBe('')
+    expect(s.state.results).toEqual([])
+    expect(s.state.statusText).toBe('Ready')
   })
 
   it('requests reindex and refreshes daemon status', async () => {
@@ -362,8 +361,8 @@ describe('searchStore', () => {
 
     expect(vi.mocked(invoke).mock.calls[0]).toEqual(['reindex_index'])
     expect(vi.mocked(invoke).mock.calls[1]).toEqual(['get_status'])
-    expect(get(s.reindexing)).toBe(false)
-    expect(get(s.daemonStatus)?.status_message).toBe('Reindexed 50 entries')
+    expect(s.state.reindexing).toBe(false)
+    expect(s.state.daemonStatus?.status_message).toBe('Reindexed 50 entries')
   })
 
   it('refreshes an active extension-filtered search when daemon status reports index changes', async () => {
@@ -412,7 +411,7 @@ describe('searchStore', () => {
         size_indexed: true
       })
 
-    s.query.set('.mkv')
+    s.setQuery('.mkv')
 
     await s.fetchStatus()
     await s.fetchStatus()
@@ -423,10 +422,10 @@ describe('searchStore', () => {
       ['get_status'],
       ['search_query', {
         query: '.mkv sort:name',
-        
+
       }]
     ])
-    expect(get(s.results)).toEqual([{
+    expect(s.state.results).toEqual([{
       path: '/downloads/movie.mkv',
       name: 'movie.mkv',
       parent: '/downloads',
@@ -512,7 +511,7 @@ describe('searchStore', () => {
         size_indexed: true
       })
 
-    s.query.set(query)
+    s.setQuery(query)
 
     await s.fetchStatus()
     await s.fetchStatus()
@@ -523,10 +522,10 @@ describe('searchStore', () => {
       ['get_status'],
       ['search_query', {
         query: `${query} sort:name`,
-        
+
       }]
     ])
-    expect(get(s.results)).toEqual([row])
+    expect(s.state.results).toEqual([row])
   })
 
   it('does not refresh search when daemon status is unchanged', async () => {
@@ -561,7 +560,7 @@ describe('searchStore', () => {
         build_duration_ms: 10
       })
 
-    s.query.set('.mkv')
+    s.setQuery('.mkv')
 
     await s.fetchStatus()
     await s.fetchStatus()

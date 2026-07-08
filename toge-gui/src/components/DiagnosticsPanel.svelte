@@ -1,15 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte'
   import { getCurrentWindow } from '@tauri-apps/api/window'
-  import {
-    copyDiagnosticsLog,
-    daemonStatus,
-    diagnosticsLog,
-    fetchStatus,
-    reindexing,
-    requestReindex,
-    runWatcherSelfTest
-  } from '$lib/searchStore'
+  import { copyDiagnosticsLog, state as searchState, fetchStatus, requestReindex, runWatcherSelfTest } from '$lib/searchStore'
   import type { WatcherSelfTestResult } from '$lib/types'
 
   let copyLabel = $state('Copy log')
@@ -89,8 +81,8 @@
         <p class="subtitle">Live daemon status, index state, and recent GUI activity.</p>
       </div>
       <div class="actions">
-        <button class="action-btn action-btn-primary" onclick={reindex} disabled={$reindexing}>
-          {$reindexing ? 'Reindexing…' : 'Reindex'}
+        <button class="action-btn action-btn-primary" onclick={reindex} disabled={searchState.reindexing}>
+          {searchState.reindexing ? 'Reindexing…' : 'Reindex'}
         </button>
         <button class="action-btn" onclick={runSelfTest} disabled={watcherTestRunning}>
           {watcherTestRunning ? 'Testing…' : 'Watcher Self-Test'}
@@ -102,8 +94,8 @@
     </div>
 
     <div class="panel-body">
-      {#if $daemonStatus}
-        {@const s = $daemonStatus}
+      {#if searchState.daemonStatus}
+        {@const s = searchState.daemonStatus}
         <section class="hero">
           <div class="hero-main">
             <div class="section-title">Index Status</div>
@@ -112,7 +104,7 @@
               <span class="hero-message">{s.status_message || 'No daemon message'}</span>
             </div>
             <div class="hero-meta">
-              <span>{$reindexing ? 'Reindex running from debug window' : `${s.indexed_count.toLocaleString()} files indexed`}</span>
+              <span>{searchState.reindexing ? 'Reindex running from debug window' : `${s.indexed_count.toLocaleString()} files indexed`}</span>
               <span>Updated {formatTimestamp(s.last_updated_unix)}</span>
             </div>
           </div>
@@ -141,8 +133,8 @@
 
       <section class="section">
         <div class="section-title">Daemon</div>
-        {#if $daemonStatus}
-          {@const s = $daemonStatus}
+        {#if searchState.daemonStatus}
+          {@const s = searchState.daemonStatus}
           <div class="status-grid">
             <div class="status-item">
               <span class="label">Status</span>
@@ -199,8 +191,8 @@
       <section class="section">
         <div class="section-title">Watcher Log</div>
         <div class="log-panel">
-          {#if $daemonStatus?.watcher_log?.length}
-            {#each $daemonStatus.watcher_log as entry}
+          {#if searchState.daemonStatus?.watcher_log?.length}
+            {#each searchState.daemonStatus.watcher_log as entry}
               <div class="log-entry">{entry}</div>
             {/each}
           {:else}
@@ -212,8 +204,8 @@
       <section class="section">
         <div class="section-title">Recent Log</div>
         <div class="log-panel">
-          {#if $diagnosticsLog.length > 0}
-            {#each $diagnosticsLog as entry}
+          {#if searchState.diagnosticsLog.length > 0}
+            {#each searchState.diagnosticsLog as entry}
               <div class="log-entry">{entry}</div>
             {/each}
           {:else}

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { results, sortColumn, sortDirection, selectedIndex, hasResults, isLoading, sizeIndexed, tableColumnWidths } from '$lib/searchStore'
+  import { state as searchState, hasResults } from '$lib/searchStore'
   import { setSort, selectRow, selectNext, selectPrevious, openSelected, revealSelected, copySelectedPath, trashSelected, deleteSelected, formatSize, formatTimestamp, setTableColumnWidths } from '$lib/searchStore'
   import ContextMenu from './ContextMenu.svelte'
   import type { SortColumn } from '$lib/types'
@@ -24,8 +24,8 @@
   let removeViewportListeners: (() => void) | null = null
 
   function currentColumnWidths() {
-    return $tableColumnWidths.length === columns.length
-      ? $tableColumnWidths
+    return searchState.tableColumnWidths.length === columns.length
+      ? searchState.tableColumnWidths
       : columns.map((col) => col.width)
   }
 
@@ -134,15 +134,15 @@
     }
   })
 
-  const totalRows = $derived($results.length)
+  const totalRows = $derived(searchState.results.length)
   const visibleRowCount = $derived(Math.ceil(viewportHeight / ROW_HEIGHT) + OVERSCAN_ROWS * 2)
   const startIndex = $derived(Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN_ROWS))
   const endIndex = $derived(Math.min(totalRows, startIndex + visibleRowCount))
   const topSpacerHeight = $derived(startIndex * ROW_HEIGHT)
   const bottomSpacerHeight = $derived(Math.max(0, (totalRows - endIndex) * ROW_HEIGHT))
   const visibleRows = $derived.by(() => {
-    const rows = $results.slice(startIndex, endIndex)
-    const sizesEnabled = $sizeIndexed
+    const rows = searchState.results.slice(startIndex, endIndex)
+    const sizesEnabled = searchState.sizeIndexed
 
     return rows.map((row) => ({
       ...row,
@@ -152,13 +152,13 @@
   })
 
   const selectedPath = $derived(
-    $selectedIndex >= 0 && $selectedIndex < $results.length
-      ? $results[$selectedIndex].path
+    searchState.selectedIndex >= 0 && searchState.selectedIndex < searchState.results.length
+      ? searchState.results[searchState.selectedIndex].path
       : null
   )
 
   $effect(() => {
-    const idx = $selectedIndex
+    const idx = searchState.selectedIndex
     if (idx < 0 || !scrollEl) return
 
     const rowTop = idx * ROW_HEIGHT
@@ -203,14 +203,14 @@
       <!-- svelte-ignore a11y_no_static_element_interactions -->
         <div
           class="header-cell"
-          class:active={$sortColumn === col.key}
+          class:active={searchState.sortColumn === col.key}
           onclick={() => setSort(col.key)}
         >
           <span class="header-label">
             {col.label}
-            {#if $sortColumn === col.key}
+            {#if searchState.sortColumn === col.key}
               <span class="sort-indicator">
-                {$sortDirection === 'asc' ? '↑' : '↓'}
+                {searchState.sortDirection === 'asc' ? '↑' : '↓'}
               </span>
             {/if}
           </span>
@@ -258,8 +258,8 @@
         <div class="row-spacer" style={`height: ${bottomSpacerHeight}px;`}></div>
       {/if}
 
-      {#if !$hasResults && !$isLoading}
-        <div class="empty-state">
+      {#if !hasResults() && !searchState.isLoading}
+        <div class="empty-searchState">
           No results found
         </div>
       {/if}
@@ -453,7 +453,7 @@
     color: inherit;
   }
 
-  .empty-state {
+  .empty-searchState {
     display: flex;
     align-items: center;
     justify-content: center;

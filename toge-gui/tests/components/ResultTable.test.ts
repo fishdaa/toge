@@ -1,8 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/svelte'
-import { get } from 'svelte/store'
 import ResultTable from '@/components/ResultTable.svelte'
-import { results, selectedIndex } from '$lib/searchStore'
+import { setResults, setTableColumnWidths, state, setSelectedIndex } from '$lib/searchStore'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn()
@@ -11,6 +10,9 @@ vi.mock('@tauri-apps/api/core', () => ({
 describe('ResultTable', () => {
   beforeEach(() => {
     vi.resetModules()
+    setResults([])
+    setSelectedIndex(-1)
+    setTableColumnWidths([220, 320, 88, 140])
   })
 
   it('renders empty state when no results', async () => {
@@ -26,7 +28,7 @@ describe('ResultTable', () => {
   })
 
   it('prevents the native context menu when opening the custom row menu', async () => {
-    results.set([
+    setResults([
       {
         path: '/tmp/demo.mkv',
         name: 'demo.mkv',
@@ -54,6 +56,6 @@ describe('ResultTable', () => {
 
     expect(prevented).toBe(true)
     expect(event.defaultPrevented).toBe(true)
-    expect(get(selectedIndex)).toBe(0)
+    expect(state.selectedIndex).toBe(0)
   })
 })

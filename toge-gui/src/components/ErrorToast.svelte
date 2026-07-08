@@ -1,24 +1,17 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte'
-  import { error } from '$lib/searchStore'
+  import { state as searchState } from '$lib/searchStore'
 
   let visible = $state(false)
   let message = $state('')
+  let hideTimer: ReturnType<typeof setTimeout> | undefined
 
-  let unsub: (() => void) | undefined
-
-  onMount(() => {
-    unsub = error.subscribe((val) => {
-      if (val) {
-        message = val
-        visible = true
-        setTimeout(() => { visible = false }, 4000)
-      }
-    })
-  })
-
-  onDestroy(() => {
-    unsub?.()
+  $effect(() => {
+    if (searchState.error) {
+      message = searchState.error
+      visible = true
+      if (hideTimer) clearTimeout(hideTimer)
+      hideTimer = setTimeout(() => { visible = false }, 4000)
+    }
   })
 </script>
 
