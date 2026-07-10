@@ -147,6 +147,12 @@ pub fn normalize_and_validate(
         if accelerator.is_empty() {
             continue;
         }
+        if accelerator_has_modifier_key(accelerator) {
+            return Err(format!(
+                "{} cannot use a modifier as its primary key: {} (global hotkeys require a non-modifier key)",
+                name, accelerator
+            ));
+        }
         if let Some(existing) = hotkeys.insert(accelerator.clone(), name) {
             return Err(format!(
                 "window hotkey conflict: {} is already used by {}",
@@ -169,6 +175,7 @@ pub fn normalize_accelerator(value: &str) -> Result<String, String> {
     let mut shift = false;
     let mut meta = false;
     let mut key: Option<String> = None;
+    let mut modifiers = Vec::new();
 
     for raw_part in trimmed.split('+') {
         let part = raw_part.trim();
@@ -178,10 +185,22 @@ pub fn normalize_accelerator(value: &str) -> Result<String, String> {
 
         let lower = part.to_ascii_lowercase();
         match lower.as_str() {
-            "ctrl" | "control" => ctrl = true,
-            "alt" | "option" => alt = true,
-            "shift" => shift = true,
-            "meta" | "cmd" | "command" | "super" => meta = true,
+            "ctrl" | "control" => {
+                ctrl = true;
+                modifiers.push("Ctrl");
+            }
+            "alt" | "option" => {
+                alt = true;
+                modifiers.push("Alt");
+            }
+            "shift" => {
+                shift = true;
+                modifiers.push("Shift");
+            }
+            "meta" | "cmd" | "command" | "super" => {
+                meta = true;
+                modifiers.push("Super");
+            }
             _ => {
                 if key.is_some() {
                     return Err(format!(
@@ -194,7 +213,24 @@ pub fn normalize_accelerator(value: &str) -> Result<String, String> {
         }
     }
 
-    let key = key.ok_or_else(|| format!("accelerator is missing a key: {}", value))?;
+    // A modifier may itself be the primary key for an in-window command. Treat
+    // the last modifier as the key, matching the order produced by keydown.
+    let key = match key {
+        Some(key) => key,
+        None => {
+            let primary = modifiers
+                .pop()
+                .ok_or_else(|| format!("accelerator is missing a key: {}", value))?;
+            match primary {
+                "Ctrl" => ctrl = modifiers.contains(&"Ctrl"),
+                "Alt" => alt = modifiers.contains(&"Alt"),
+                "Shift" => shift = modifiers.contains(&"Shift"),
+                "Super" => meta = modifiers.contains(&"Super"),
+                _ => unreachable!(),
+            }
+            primary.to_string()
+        }
+    };
     let mut parts = Vec::new();
     if ctrl {
         parts.push("Ctrl".to_string());
@@ -232,9 +268,15 @@ fn normalize_key(value: &str) -> Result<String, String> {
         other if other.starts_with('f') && other[1..].chars().all(|c| c.is_ascii_digit()) => {
             format!("F{}", &other[1..])
         }
+        "ctrl" | "control" => "Ctrl".to_string(),
+        "alt" | "option" => "Alt".to_string(),
+        "shift" => "Shift".to_string(),
+        "meta" | "cmd" | "command" | "super" => "Super".to_string(),
         "mediatrackprevious" => "MediaTrackPrevious".to_string(),
         "mediatracknext" => "MediaTrackNext".to_string(),
-        "mediaplaypause" => "MediaPlayPause".to_string(),
+        "mediaplay" => "MediaPlay".to_string(),
+        "mediapause" => "MediaPause".to_string(),
+        "mediaplaypause" => normalize_media_play_pause().to_string(),
         "mediastop" => "MediaStop".to_string(),
         "audiovolumedown" => "AudioVolumeDown".to_string(),
         "audiovolumeup" => "AudioVolumeUp".to_string(),
@@ -242,8 +284,25 @@ fn normalize_key(value: &str) -> Result<String, String> {
         _ => return Err(format!("unsupported key in accelerator: {}", value)),
     };
 
-    reject_runtime_unsupported_key(&normalized)?;
     Ok(normalized)
+}
+
+#[cfg(target_os = "linux")]
+fn normalize_media_play_pause() -> &'static str {
+    // X11 exposes the physical play/pause key as XF86AudioPlay.
+    "MediaPlay"
+}
+
+#[cfg(not(target_os = "linux"))]
+fn normalize_media_play_pause() -> &'static str {
+    "MediaPlayPause"
+}
+
+fn accelerator_has_modifier_key(accelerator: &str) -> bool {
+    matches!(
+        accelerator.rsplit('+').next(),
+        Some("Ctrl" | "Alt" | "Shift" | "Super")
+    )
 }
 
 #[derive(Clone)]
@@ -268,32 +327,6 @@ fn parse_scope(scope: &str) -> Result<KeyboardScope, String> {
         "result_list" => Ok(KeyboardScope::ResultList),
         _ => Err(format!("unknown keyboard scope: {}", scope)),
     }
-}
-
-#[cfg(target_os = "linux")]
-fn reject_runtime_unsupported_key(key: &str) -> Result<(), String> {
-    if matches!(
-        key,
-        "MediaTrackPrevious"
-            | "MediaTrackNext"
-            | "MediaPlayPause"
-            | "MediaStop"
-            | "AudioVolumeDown"
-            | "AudioVolumeUp"
-            | "AudioVolumeMute"
-    ) {
-        return Err(format!(
-            "unsupported key in accelerator: {} (not currently supported by Tauri hotkey handling on Linux)",
-            key
-        ));
-    }
-
-    Ok(())
-}
-
-#[cfg(not(target_os = "linux"))]
-fn reject_runtime_unsupported_key(_key: &str) -> Result<(), String> {
-    Ok(())
 }
 
 fn keyboard_scope_name(scope: KeyboardScope) -> &'static str {
@@ -327,23 +360,28 @@ mod tests {
             "Ctrl+Shift+N"
         );
         assert_eq!(normalize_accelerator("period").unwrap(), "Period");
+        assert_eq!(
+            normalize_accelerator("ctrl+shift+super").unwrap(),
+            "Ctrl+Shift+Super"
+        );
         assert_eq!(normalize_accelerator(" ").unwrap(), "");
     }
 
-    #[cfg(not(target_os = "linux"))]
     #[test]
-    fn accepts_media_keys_on_supported_platforms() {
+    fn accepts_media_keys() {
         assert_eq!(
             normalize_accelerator("MediaTrackPrevious").unwrap(),
             "MediaTrackPrevious"
         );
     }
 
-    #[cfg(target_os = "linux")]
     #[test]
-    fn rejects_media_keys_on_linux() {
-        let error = normalize_accelerator("MediaTrackPrevious").unwrap_err();
-        assert!(error.contains("not currently supported by Tauri hotkey handling on Linux"));
+    fn rejects_modifier_only_global_hotkeys_with_a_specific_error() {
+        let mut payload = default_keyboard_settings();
+        payload.new_window_hotkey = "Ctrl+Shift+Super".to_string();
+
+        let error = normalize_and_validate(payload).unwrap_err();
+        assert!(error.contains("global hotkeys require a non-modifier key"));
     }
 
     #[test]
