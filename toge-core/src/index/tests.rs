@@ -213,5 +213,5 @@ fn test_remove_after_duplicate_insert_clears_search_results() {
     assert!(idx.remove("/tmp/video.mkv"));
     assert_eq!(idx.count(), 0);
     assert!(idx.search_substring("video").is_empty());
-    assert!(idx.by_extension("mkv").map_or(true, |ids| ids.is_empty()));
+    assert!(idx.by_extension("mkv").is_none_or(|ids| ids.is_empty()));
 }

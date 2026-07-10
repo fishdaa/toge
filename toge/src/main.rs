@@ -58,7 +58,11 @@ fn ensure_daemon_running(sock: &Path) -> io::Result<()> {
         return Ok(());
     }
     eprintln!("toged is not running. Starting it...");
-    daemon_command(sock).spawn()?;
+    daemon_command(sock)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
     for _ in 0..100 {
         thread::sleep(Duration::from_millis(50));
         if daemon_responding(sock) {

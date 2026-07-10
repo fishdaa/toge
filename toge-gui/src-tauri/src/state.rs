@@ -76,6 +76,17 @@ impl AppState {
     }
 }
 
+fn default_config_path() -> PathBuf {
+    env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let home = env::var_os("HOME").expect("HOME not set");
+            PathBuf::from(home).join(".config")
+        })
+        .join("toge")
+        .join("config.toml")
+}
+
 #[cfg(test)]
 mod tests {
     use super::AppState;
@@ -93,15 +104,4 @@ mod tests {
         state.reset_window_hotkeys();
         assert!(state.press_window_hotkey(0b001));
     }
-}
-
-fn default_config_path() -> PathBuf {
-    env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = env::var_os("HOME").expect("HOME not set");
-            PathBuf::from(home).join(".config")
-        })
-        .join("toge")
-        .join("config.toml")
 }

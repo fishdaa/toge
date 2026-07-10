@@ -96,12 +96,9 @@ fn simulate_delete_event_unwatches_directory() {
         path: "/project/src".into(),
     };
 
-    match &event {
-        WatchEvent::Delete { path } => {
-            watched.retain(|w| w != path);
-            let _ = watcher.unwatch(&Path::new(path));
-        }
-        _ => {}
+    if let WatchEvent::Delete { path } = &event {
+        watched.retain(|w| w != path);
+        let _ = watcher.unwatch(Path::new(path));
     }
 
     assert_eq!(watcher.watches, vec!["/project/lib"]);
@@ -122,12 +119,9 @@ fn simulate_move_event_unwatches_source() {
         to: "/project/new_dir".into(),
     };
 
-    match &event {
-        WatchEvent::Move { from, .. } => {
-            watched.retain(|w| w != from);
-            let _ = watcher.unwatch(&Path::new(from));
-        }
-        _ => {}
+    if let WatchEvent::Move { from, .. } = &event {
+        watched.retain(|w| w != from);
+        let _ = watcher.unwatch(Path::new(from));
     }
 
     assert_eq!(watcher.watches, Vec::<String>::new());
@@ -153,17 +147,14 @@ fn simulate_move_event_watches_destination_if_exists() {
         to: new_path.to_string_lossy().to_string(),
     };
 
-    match &event {
-        WatchEvent::Move { from, to } => {
-            watched.retain(|w| w != from);
-            let _ = watcher.unwatch(&Path::new(from));
+    if let WatchEvent::Move { from, to } = &event {
+        watched.retain(|w| w != from);
+        let _ = watcher.unwatch(Path::new(from));
 
-            if Path::new(to).is_dir() {
-                let _ = watcher.watch(&Path::new(to));
-                watched.push(to.clone());
-            }
+        if Path::new(to).is_dir() {
+            let _ = watcher.watch(Path::new(to));
+            watched.push(to.clone());
         }
-        _ => {}
     }
 
     assert_eq!(watcher.watches.len(), 1);
@@ -199,7 +190,7 @@ fn simulate_overflow_reindex_does_not_accumulate_watches() {
     ];
 
     for dir in &dirs {
-        let _ = watcher.unwatch(&Path::new(dir));
+        let _ = watcher.unwatch(Path::new(dir));
     }
     assert_eq!(watcher.watches.len(), 0);
 
@@ -225,14 +216,9 @@ fn simulate_creating_nested_directory_watches_it() {
         is_dir: true,
     };
 
-    match &event {
-        WatchEvent::Create { path, is_dir } => {
-            if *is_dir {
-                let _ = watcher.watch(&Path::new(path));
-                watched.push(path.clone());
-            }
-        }
-        _ => {}
+    if let WatchEvent::Create { path, is_dir: true } = &event {
+        let _ = watcher.watch(Path::new(path));
+        watched.push(path.clone());
     }
 
     assert_eq!(watcher.watches.len(), 2);
@@ -253,14 +239,9 @@ fn simulate_file_create_does_not_add_watch() {
         is_dir: false,
     };
 
-    match &event {
-        WatchEvent::Create { path, is_dir } => {
-            if *is_dir {
-                let _ = watcher.watch(&Path::new(path));
-                watched.push(path.clone());
-            }
-        }
-        _ => {}
+    if let WatchEvent::Create { path, is_dir: true } = &event {
+        let _ = watcher.watch(Path::new(path));
+        watched.push(path.clone());
     }
 
     assert_eq!(watcher.watches.len(), 1);

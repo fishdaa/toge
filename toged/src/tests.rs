@@ -212,7 +212,7 @@ fn is_own_path_uses_canonical_paths() {
 
 #[test]
 fn is_own_path_fails_closed_for_nonexistent_path() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = visible_tempdir();
     let state = dir.path().join("state");
     let config = dir.path().join("config");
     fs::create_dir_all(&state).unwrap();
