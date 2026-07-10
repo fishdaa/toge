@@ -19,12 +19,6 @@ pub fn register_window_hotkeys(
     app: &AppHandle,
     settings: &KeyboardSettingsPayload,
 ) -> Result<(), String> {
-    eprintln!(
-        "[hotkeys] register new={} show={} toggle={}",
-        settings.new_window_hotkey,
-        settings.show_window_hotkey,
-        settings.toggle_window_hotkey
-    );
     let manager = app.global_shortcut();
     app.state::<AppState>().reset_window_hotkeys();
     manager.unregister_all().map_err(|e| e.to_string())?;
@@ -63,7 +57,6 @@ fn handle_shortcut_event(app: &AppHandle, action: WindowHotkeyAction, event: Sho
         return;
     }
 
-    eprintln!("[hotkeys] global event {:?}", action);
     let _ = match action {
         WindowHotkeyAction::NewWindow => commands::create_new_main_window_internal(app, &state),
         WindowHotkeyAction::ShowWindow => commands::show_main_window_internal(app, &state),

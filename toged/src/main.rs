@@ -152,11 +152,6 @@ fn discover_roots(config: &Config) -> Vec<PathBuf> {
 fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>>) -> (Index, u64) {
     let index_path = state_dir.join("index.bin");
     if let Ok(idx) = Index::load(&index_path) {
-        eprintln!(
-            "Loaded {} entries from {}",
-            idx.count(),
-            index_path.display()
-        );
         {
             let mut st = state.lock().unwrap();
             st.status = DaemonStatus::LoadingIndex;
@@ -181,7 +176,6 @@ fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>
         || config.index_date_modified
         || config.index_date_created
         || config.index_date_accessed;
-    eprintln!("Indexing roots: {:?}", roots);
     let total_roots = roots.len();
     for (i, root) in roots.iter().enumerate() {
         {
@@ -189,17 +183,10 @@ fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>
             st.status = DaemonStatus::Indexing;
             st.status_message = format!("Indexing {}/{}: {}", i + 1, total_roots, root.display());
         }
-        let count_before = index.count();
         walk(root, &mut index, &excludes, fetch_metadata);
-        eprintln!(
-            "Indexed {} entries from {}",
-            index.count() - count_before,
-            root.display()
-        );
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    eprintln!("Indexed {} entries in {} ms", index.count(), duration_ms);
     (index, duration_ms)
 }
 
@@ -299,9 +286,8 @@ fn install_watches(watcher: &mut FanotifyWatcher, dirs: &[PathBuf]) -> WatcherSt
             {
                 watcher_status.watch_failure_count += 1;
             }
-            Err(e) => {
+            Err(_) => {
                 watcher_status.watch_failure_count += 1;
-                eprintln!("Failed to watch {}: {}", dir.display(), e);
             }
         }
     }
@@ -567,7 +553,6 @@ fn serve(
     let _ = fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)?;
     set_owner_only(&socket_path)?;
-    eprintln!("Listening on {}", socket_path.display());
 
     for stream in listener.incoming() {
         match stream {
@@ -594,7 +579,7 @@ fn serve(
 
                 let _ = write_response(&mut s, &resp);
             }
-            Err(e) => eprintln!("Connection error: {}", e),
+            Err(_) => {}
         }
     }
 
@@ -630,7 +615,7 @@ fn main() {
                 state_dir = Some(PathBuf::from(iter.next().expect("missing state dir")));
             }
             "--clean" => clean = true,
-            _ => eprintln!("Unknown argument: {}", arg),
+            _ => {}
         }
     }
 

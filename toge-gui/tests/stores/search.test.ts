@@ -231,7 +231,7 @@ describe('searchStore', () => {
 
     expect(invoke).not.toHaveBeenCalled()
 
-    await vi.advanceTimersByTimeAsync(299)
+    await vi.advanceTimersByTimeAsync(119)
     expect(invoke).not.toHaveBeenCalled()
 
     await vi.advanceTimersByTimeAsync(1)
@@ -253,10 +253,21 @@ describe('searchStore', () => {
       .mockReturnValueOnce(first.promise as ReturnType<typeof invoke>)
       .mockReturnValueOnce(second.promise as ReturnType<typeof invoke>)
 
-    s.setQuery('old')
-    s.search()
-    s.setQuery('new')
-    s.search()
+    void s.search('old')
+    const newSearch = s.search('new')
+
+    expect(invoke).toHaveBeenCalledTimes(1)
+
+    first.resolve({
+      rows: [],
+      total_count: 99,
+      total_size: 999,
+      size_indexed: true
+    })
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2))
+    expect(invoke).toHaveBeenLastCalledWith('search_query', {
+      query: 'new sort:name'
+    })
 
     second.resolve({
       rows: [{
@@ -272,16 +283,7 @@ describe('searchStore', () => {
       total_size: 1,
       size_indexed: true
     })
-    await Promise.resolve()
-
-    first.resolve({
-      rows: [],
-      total_count: 99,
-      total_size: 999,
-      size_indexed: true
-    })
-    await Promise.resolve()
-    await Promise.resolve()
+    await newSearch
 
     expect(s.state.results).toEqual([{
       path: '/new',
@@ -294,6 +296,32 @@ describe('searchStore', () => {
     }])
     expect(s.state.totalCount).toBe(1)
     expect(s.state.statusText).toBe('1 results | 1.0 B')
+  })
+
+  it('keeps only the latest search queued behind an active request', async () => {
+    const s = await loadStore()
+    const { invoke } = await import('@tauri-apps/api/core')
+    const active = deferred<{ rows: never[]; total_count: number; total_size: number; size_indexed: boolean }>()
+    const latest = deferred<{ rows: never[]; total_count: number; total_size: number; size_indexed: boolean }>()
+
+    vi.mocked(invoke)
+      .mockReturnValueOnce(active.promise as ReturnType<typeof invoke>)
+      .mockReturnValueOnce(latest.promise as ReturnType<typeof invoke>)
+
+    void s.search('n')
+    void s.search('ne')
+    const latestSearch = s.search('needle')
+
+    expect(invoke).toHaveBeenCalledTimes(1)
+
+    active.resolve({ rows: [], total_count: 0, total_size: 0, size_indexed: true })
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(2))
+    expect(invoke).toHaveBeenLastCalledWith('search_query', {
+      query: 'needle sort:name'
+    })
+
+    latest.resolve({ rows: [], total_count: 0, total_size: 0, size_indexed: true })
+    await latestSearch
   })
 
   it('shows size unavailable when file sizes are not indexed', async () => {

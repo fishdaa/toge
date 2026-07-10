@@ -151,23 +151,19 @@ export function setSortDirection(value: SortDirection) {
   writeStorage(STORAGE_KEYS.sortDirection, value)
 }
 
-const SEARCH_DEBOUNCE_MS = 300
+const SEARCH_DEBOUNCE_MS = 120
 
 let searchTimeout: ReturnType<typeof setTimeout> | null = null
 let latestSearchRequestId = 0
+// The daemon serves queries serially, so keep one IPC request active and
+// replace any queued request with the newest input.
+let pendingSearch: PendingSearch | null = null
+let searchDrain: Promise<void> | null = null
 
-function isJsdomRuntime(): boolean {
-  return typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent)
-}
-
-async function yieldForPaint() {
-  await new Promise<void>((resolve) => {
-    if (typeof window.requestAnimationFrame === 'function') {
-      window.requestAnimationFrame(() => resolve())
-      return
-    }
-    window.setTimeout(resolve, 0)
-  })
+interface PendingSearch {
+  requestId: number
+  query: string
+  searchQuery: string
 }
 
 function shouldRefreshActiveSearch(
@@ -188,11 +184,12 @@ function appendDiagnostics(message: string) {
   state.diagnosticsLog = next.slice(0, 200)
 }
 
-async function runSearch(nextQuery?: string) {
+function runSearch(nextQuery?: string): Promise<void> {
   const requestId = ++latestSearchRequestId
   const q = (nextQuery ?? state.query).trim()
 
   if (!q) {
+    pendingSearch = null
     state.query = ''
     state.results = []
     state.totalCount = 0
@@ -200,7 +197,7 @@ async function runSearch(nextQuery?: string) {
     state.sizeIndexed = false
     state.statusText = 'Ready'
     state.isLoading = false
-    return
+    return Promise.resolve()
   }
 
   state.query = q
@@ -211,20 +208,35 @@ async function runSearch(nextQuery?: string) {
 
   state.isLoading = true
   state.error = null
-  appendDiagnostics(`Search started for "${q}"`)
+  pendingSearch = { requestId, query: q, searchQuery }
+
+  if (!searchDrain) {
+    searchDrain = drainSearches()
+  }
+  return searchDrain
+}
+
+async function drainSearches() {
+  try {
+    while (pendingSearch) {
+      const request = pendingSearch
+      pendingSearch = null
+      await executeSearch(request)
+    }
+  } finally {
+    searchDrain = null
+  }
+}
+
+async function executeSearch(request: PendingSearch) {
+  appendDiagnostics(`Search started for "${request.query}"`)
 
   try {
-    if (typeof window !== 'undefined' && !isJsdomRuntime()) {
-      await yieldForPaint()
-    }
-
-    if (requestId !== latestSearchRequestId) return
-
     const result = await invoke<SearchResult>('search_query', {
-      query: searchQuery
+      query: request.searchQuery
     })
 
-    if (requestId !== latestSearchRequestId) return
+    if (request.requestId !== latestSearchRequestId) return
 
     const prevIdx = state.selectedIndex
     const prevRows = state.results
@@ -242,13 +254,13 @@ async function runSearch(nextQuery?: string) {
       : `${result.total_count} results | size unavailable`
     appendDiagnostics(`Search returned ${result.total_count} results`)
   } catch (e) {
-    if (requestId !== latestSearchRequestId) return
+    if (request.requestId !== latestSearchRequestId) return
 
     state.error = String(e)
     state.statusText = `Error: ${e}`
     appendDiagnostics(`Search failed: ${String(e)}`)
   } finally {
-    if (requestId === latestSearchRequestId) {
+    if (request.requestId === latestSearchRequestId) {
       state.isLoading = false
     }
   }
@@ -263,6 +275,8 @@ export function search(nextQuery?: string) {
 }
 
 export function debouncedSearch(nextQuery?: string) {
+  latestSearchRequestId += 1
+  pendingSearch = null
   if (searchTimeout) clearTimeout(searchTimeout)
   searchTimeout = setTimeout(() => {
     searchTimeout = null
@@ -276,6 +290,7 @@ export function clearSearch() {
     searchTimeout = null
   }
   latestSearchRequestId += 1
+  pendingSearch = null
   state.query = ''
   state.results = []
   state.sizeIndexed = false

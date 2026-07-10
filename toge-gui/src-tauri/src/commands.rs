@@ -10,6 +10,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use toge_core::config::Config;
 use toge_core::sys::{FanotifyWatcher, FsWatcher, WatchEvent};
 
 #[derive(serde::Serialize)]
@@ -54,43 +55,51 @@ pub struct WatcherSelfTestResult {
 }
 
 #[tauri::command]
-pub fn search_query(
+pub async fn search_query(
     state: State<'_, AppState>,
     query: String,
     max_results: Option<usize>,
 ) -> Result<SearchResult, String> {
     let socket = state.socket_path();
-    let config = state.load_config();
+    let config_path = state.config_path();
     let id = state.next_query_id();
     let max = max_results.unwrap_or(10_000);
-    let (event_tx, _event_rx) = mpsc::channel();
 
-    ipc_client::ensure_daemon_running(&socket).map_err(|e| e.to_string())?;
-    ipc_client::wait_for_ready(&socket, Duration::from_secs(30), &event_tx)
-        .map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let size_indexed =
+            Config::load(&config_path).unwrap_or_else(|_| Config::default_config()).index_size;
+        let (event_tx, _event_rx) = mpsc::channel();
 
-    let response = ipc_client::query(&socket, id, &query, max, 0).map_err(|e| e.to_string())?;
+        ipc_client::ensure_daemon_running(&socket).map_err(|e| e.to_string())?;
+        ipc_client::wait_for_ready(&socket, Duration::from_secs(30), &event_tx)
+            .map_err(|e| e.to_string())?;
 
-    let rows: Vec<ResultRow> = response
-        .rows
-        .iter()
-        .map(|row| ResultRow {
-            path: row.path.clone(),
-            name: row.name.clone(),
-            parent: row.parent.clone(),
-            extension: row.extension.clone(),
-            is_dir: row.is_dir,
-            size_bytes: row.size,
-            modified_unix: row.modified_unix,
+        let response =
+            ipc_client::query(&socket, id, &query, max, 0).map_err(|e| e.to_string())?;
+
+        let rows: Vec<ResultRow> = response
+            .rows
+            .iter()
+            .map(|row| ResultRow {
+                path: row.path.clone(),
+                name: row.name.clone(),
+                parent: row.parent.clone(),
+                extension: row.extension.clone(),
+                is_dir: row.is_dir,
+                size_bytes: row.size,
+                modified_unix: row.modified_unix,
+            })
+            .collect();
+
+        Ok(SearchResult {
+            rows,
+            total_count: response.total_count as u64,
+            total_size: response.total_size,
+            size_indexed,
         })
-        .collect();
-
-    Ok(SearchResult {
-        rows,
-        total_count: response.total_count as u64,
-        total_size: response.total_size,
-        size_indexed: config.index_size,
     })
+    .await
+    .map_err(|e| format!("search worker failed: {e}"))?
 }
 
 #[tauri::command]
@@ -359,8 +368,6 @@ pub(crate) fn create_new_main_window_internal(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<String, String> {
-    eprintln!("[cmd] create_new RUN");
-
     let label = if app.get_webview_window("main").is_none() {
         "main".to_string()
     } else {
@@ -383,8 +390,6 @@ pub(crate) fn show_main_window_internal(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<String, String> {
-    eprintln!("[cmd] show RUN");
-
     if let Some(window) = first_main_window(app) {
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
@@ -413,18 +418,10 @@ pub(crate) fn toggle_main_window_internal(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<String, String> {
-    let visible_count = app
-        .webview_windows()
-        .values()
-        .filter(|w| is_main_window_label(w.label()) && w.is_visible().unwrap_or(false))
-        .count();
-    eprintln!("[cmd] toggle RUN visible={}", visible_count);
-
     for window in app.webview_windows().values() {
         if is_main_window_label(window.label()) {
             let is_visible = window.is_visible().map_err(|e| e.to_string())?;
             if is_visible {
-                eprintln!("[cmd] toggle -> hide {}", window.label());
                 window.hide().map_err(|e| e.to_string())?;
                 return Ok(window.label().to_string());
             }
@@ -432,14 +429,12 @@ pub(crate) fn toggle_main_window_internal(
     }
 
     if let Some(window) = first_main_window(&app) {
-        eprintln!("[cmd] toggle -> show {}", window.label());
         window.show().map_err(|e| e.to_string())?;
         window.unminimize().map_err(|e| e.to_string())?;
         window.set_focus().map_err(|e| e.to_string())?;
         return Ok(window.label().to_string());
     }
 
-    eprintln!("[cmd] toggle -> build new");
     let label = if app.get_webview_window("main").is_none() {
         "main".to_string()
     } else {

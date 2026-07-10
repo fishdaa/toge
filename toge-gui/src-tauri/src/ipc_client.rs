@@ -51,7 +51,6 @@ pub fn ensure_daemon_running(sock: &Path) -> io::Result<()> {
     if daemon_responding(sock) {
         return Ok(());
     }
-    eprintln!("toged is not running. Starting it...");
     daemon_command(sock)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
