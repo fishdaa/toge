@@ -226,3 +226,29 @@ fn test_all_terms_must_match_for_and_query() {
     let ids = match_query(&idx, &q);
     assert!(ids.is_empty());
 }
+
+#[test]
+fn test_long_substring_uses_selective_trigram_candidates() {
+    let mut idx = Index::new();
+    for i in 0..2_000 {
+        idx.insert(&format!("/tmp/document-{i:04}.txt"), false);
+    }
+    let first = idx.insert("/videos/movie-one.mkv", false);
+    let second = idx.insert("/videos/movie-two.MKV", false);
+    let query = substring_query(".mkv");
+
+    let candidates = idx.search_substring(".mkv");
+    assert_eq!(candidates, vec![first, second]);
+    assert_eq!(match_query(&idx, &query), vec![first, second]);
+}
+
+#[test]
+fn test_trigram_seed_preserves_case_sensitive_semantics() {
+    let mut idx = Index::new();
+    idx.insert("/videos/lower.mkv", false);
+    let upper = idx.insert("/videos/upper.MKV", false);
+    let mut query = substring_query(".MKV");
+    query.match_case = true;
+
+    assert_eq!(match_query(&idx, &query), vec![upper]);
+}

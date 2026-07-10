@@ -39,9 +39,7 @@ fn compile_terms(terms: &[TextTerm]) -> CompiledTerms {
 }
 
 pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
-    let mut ids: Vec<u32> = (0..index.count() as u32).collect();
-
-    if let Some(exts) = &query.ext {
+    let mut ids = if let Some(exts) = &query.ext {
         let mut ext_ids: Vec<u32> = Vec::new();
         for ext in exts {
             if let Some(ids_for_ext) = index.by_extension(ext) {
@@ -50,7 +48,28 @@ pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
         }
         ext_ids.sort_unstable();
         ext_ids.dedup();
-        ids = ext_ids;
+        ext_ids
+    } else {
+        (0..index.count() as u32).collect()
+    };
+
+    // Filename substring queries of three or more bytes can use the trigram
+    // postings already maintained by Index. The full matcher still runs below,
+    // so case-sensitive, whole-word, and additional filters keep their exact
+    // semantics; this only removes entries that cannot possibly match.
+    if !query.match_path {
+        if let Some(seed) = query
+            .terms
+            .iter()
+            .filter_map(|term| match term {
+                TextTerm::Substring(value) if value.len() >= 3 => Some(value.as_str()),
+                _ => None,
+            })
+            .max_by_key(|value| value.len())
+        {
+            let substring_ids = index.search_substring(seed);
+            ids = intersect_sorted_ids(&ids, &substring_ids);
+        }
     }
 
     let compiled = compile_terms(&query.terms);
@@ -61,6 +80,25 @@ pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
             entry_matches(entry, query, &compiled)
         })
         .collect()
+}
+
+fn intersect_sorted_ids(left: &[u32], right: &[u32]) -> Vec<u32> {
+    let mut result = Vec::with_capacity(left.len().min(right.len()));
+    let (mut left_idx, mut right_idx) = (0, 0);
+
+    while left_idx < left.len() && right_idx < right.len() {
+        match left[left_idx].cmp(&right[right_idx]) {
+            std::cmp::Ordering::Less => left_idx += 1,
+            std::cmp::Ordering::Greater => right_idx += 1,
+            std::cmp::Ordering::Equal => {
+                result.push(left[left_idx]);
+                left_idx += 1;
+                right_idx += 1;
+            }
+        }
+    }
+
+    result
 }
 
 fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool {

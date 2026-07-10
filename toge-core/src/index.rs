@@ -81,21 +81,21 @@ pub(crate) fn unique_trigrams(name_lower: &[u8]) -> Vec<u32> {
     trigrams
 }
 
-/// Intersect multiple sorted trigram posting lists via galloping merge.
+/// Intersect sorted trigram posting lists, starting with the smallest list.
 /// Returns entries appearing in all lists.
 pub(crate) fn intersect_trigram_lists(trigrams: &HashMap<u32, Vec<u32>>, keys: &[u32]) -> Vec<u32> {
     if keys.is_empty() {
         return Vec::new();
     }
 
-    let lists: Vec<&[u32]> = keys
-        .iter()
-        .filter_map(|k| trigrams.get(k).map(|v| v.as_slice()))
-        .collect();
-
-    if lists.is_empty() {
-        return Vec::new();
+    let mut lists = Vec::<&[u32]>::with_capacity(keys.len());
+    for key in keys {
+        let Some(list) = trigrams.get(key) else {
+            return Vec::new();
+        };
+        lists.push(list);
     }
+    lists.sort_unstable_by_key(|list| list.len());
 
     if lists.len() == 1 {
         return lists[0].to_vec();
@@ -371,7 +371,7 @@ impl Index {
         let needle_bytes = needle.as_bytes();
 
         if needle_bytes.len() >= 3 {
-            let trigrams_keys = extract_trigrams(needle_bytes);
+            let trigrams_keys = unique_trigrams(needle_bytes);
             let candidates = intersect_trigram_lists(&self.trigrams, &trigrams_keys);
             candidates
                 .into_iter()

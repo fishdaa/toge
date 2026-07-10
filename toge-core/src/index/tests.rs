@@ -89,6 +89,14 @@ fn test_search_substring_dedups_repeated_trigram_matches() {
 }
 
 #[test]
+fn test_search_substring_stops_when_a_required_trigram_is_absent() {
+    let mut idx = Index::new();
+    idx.insert("/tmp/common-prefix-document.txt", false);
+
+    assert!(idx.search_substring("common-never-present").is_empty());
+}
+
+#[test]
 fn test_search_substring_case_insensitive_unicode() {
     let mut idx = Index::new();
     idx.insert("/tmp/Äpfel.txt", false);
