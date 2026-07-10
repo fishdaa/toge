@@ -67,6 +67,19 @@ cd needle
 cargo build --workspace
 ```
 
+### Linux GUI Packages
+
+Stable releases include x86_64 DEB, RPM, and AppImage packages. Each package
+includes the desktop application, the `toge` CLI, and the `toged` daemon the GUI
+starts on demand. Release assets also include SHA-256 checksum files.
+
+To build all GUI release formats locally:
+
+```bash
+npm ci --prefix toge-gui
+make gui-package V=0.1.12
+```
+
 ### Development Checks
 
 ```bash

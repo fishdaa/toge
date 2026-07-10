@@ -20,7 +20,7 @@ jobs:
 
   publish-nightly:
     needs: checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
       - name: Check out repository
         uses: actions/checkout@v7
@@ -31,6 +31,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: toge-gui/package-lock.json
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -39,7 +46,8 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            rpm
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -52,11 +60,20 @@ jobs:
           nightly_version="${base_version}-nightly.$(date -u +%Y%m%d)+$(git rev-parse --short HEAD)"
           printf 'version=%s\n' "$nightly_version" >>"$GITHUB_OUTPUT"
 
+      - name: Set nightly workspace version
+        run: scripts/release/set-version.sh "${{ steps.nightly.outputs.version }}"
+
       - name: Build release binaries
         run: cargo build --workspace --release
 
+      - name: Install GUI dependencies
+        run: npm ci --prefix toge-gui
+
       - name: Package nightly artifacts
         run: scripts/release/package-artifacts.sh "${{ steps.nightly.outputs.version }}" nightly
+
+      - name: Package nightly Linux GUI
+        run: scripts/release/package-gui-artifacts.sh "${{ steps.nightly.outputs.version }}"
 
       - name: Move rolling nightly tag
         run: |
@@ -79,3 +96,7 @@ jobs:
           files: |
             dist/toge-*.tar.gz
             dist/toge-*.sha256
+            dist/toge-gui_*.deb
+            dist/toge-gui-*.rpm
+            dist/Toge_*.AppImage
+            dist/Toge_*.sha256

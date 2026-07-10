@@ -1,5 +1,5 @@
 .PHONY: help build build-release test test-coverage watcher-test clippy fmt \
-       gui gui-release \
+       gui gui-release gui-package \
        bench bench-compare perf perf-compare \
        set-version publish package verify-tag next-beta changelog
 
@@ -41,6 +41,9 @@ gui: ## Run GUI in dev mode (Vite + Tauri)
 
 gui-release: ## Build frontend then run GUI (release)
 	./release-gui.sh
+
+gui-package: ## Build DEB, RPM, and AppImage packages (usage: make gui-package V=0.1.12)
+	bash scripts/release/package-gui-artifacts.sh $(V)
 
 # ── Bench / Perf ───────────────────────────────────────
 
