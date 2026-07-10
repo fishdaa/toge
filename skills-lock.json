@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "slint": {
+      "source": "slint-ui/ai-plugins",
+      "sourceType": "github",
+      "skillPath": "skills/slint/SKILL.md",
+      "computedHash": "c50e78e80afdfddacf1f58cb118a78c8ca822032a9b6926fef2991df905cb44f"
+    }
+  }
+}

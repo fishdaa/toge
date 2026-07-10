@@ -19,3 +19,7 @@ Thumbs.db
 # Local profiling artifacts
 /perf-results/
 /bench-results/
+
+# UI
+dist/
+node_modules/

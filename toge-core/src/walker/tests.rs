@@ -1,10 +1,18 @@
 use super::*;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+fn visible_root() -> (tempfile::TempDir, PathBuf) {
+    let dir = tempfile::Builder::new()
+        .prefix("workspace-")
+        .tempdir_in(std::env::temp_dir())
+        .unwrap();
+    let root = dir.path().to_path_buf();
+    (dir, root)
+}
 
 fn temp_dir_with_files() -> (tempfile::TempDir, Vec<String>) {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
+    let (dir, root) = visible_root();
     fs::create_dir(root.join("docs")).unwrap();
     fs::create_dir(root.join("docs").join("sub")).unwrap();
     fs::write(root.join("docs").join("foo.txt"), "hello").unwrap();
@@ -47,36 +55,48 @@ fn test_walk_indexes_all_files_and_dirs() {
 }
 
 #[test]
-fn test_walk_skips_hidden_when_configured() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join(".hidden")).unwrap();
-    fs::write(dir.path().join(".hidden").join("secret.txt"), "x").unwrap();
-    fs::write(dir.path().join("visible.txt"), "x").unwrap();
+fn test_walk_always_skips_hidden_directories() {
+    let (_dir, root) = visible_root();
+    fs::create_dir(root.join(".hidden")).unwrap();
+    fs::write(root.join(".hidden").join("secret.txt"), "x").unwrap();
+    fs::write(root.join("visible.txt"), "x").unwrap();
 
     let mut idx_all = Index::new();
-    walk(dir.path(), &mut idx_all, &Excludes::new(), false);
+    walk(&root, &mut idx_all, &Excludes::new(), false);
+    assert!(idx_all.search_substring("secret.txt").is_empty());
+    assert!(!idx_all.search_substring("visible.txt").is_empty());
+}
+
+#[test]
+fn test_walk_skips_hidden_files_only_when_configured() {
+    let (_dir, root) = visible_root();
+    fs::write(root.join(".secret.txt"), "x").unwrap();
+    fs::write(root.join("visible.txt"), "x").unwrap();
+
+    let mut idx_all = Index::new();
+    walk(&root, &mut idx_all, &Excludes::new(), false);
     assert!(!idx_all.search_substring("secret.txt").is_empty());
 
     let mut idx_hidden = Index::new();
     let mut ex = Excludes::new();
     ex.skip_hidden = true;
-    walk(dir.path(), &mut idx_hidden, &ex, false);
+    walk(&root, &mut idx_hidden, &ex, false);
     assert!(idx_hidden.search_substring("secret.txt").is_empty());
     assert!(!idx_hidden.search_substring("visible.txt").is_empty());
 }
 
 #[test]
 fn test_walk_skips_pattern_matches() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("keep.txt"), "x").unwrap();
-    fs::write(dir.path().join("drop.tmp"), "x").unwrap();
-    fs::write(dir.path().join("drop.swp"), "x").unwrap();
+    let (_dir, root) = visible_root();
+    fs::write(root.join("keep.txt"), "x").unwrap();
+    fs::write(root.join("drop.tmp"), "x").unwrap();
+    fs::write(root.join("drop.swp"), "x").unwrap();
 
     let mut ex = Excludes::new();
     ex.patterns = vec!["*.tmp".into(), "*.swp".into()];
 
     let mut idx = Index::new();
-    walk(dir.path(), &mut idx, &ex, false);
+    walk(&root, &mut idx, &ex, false);
     assert!(!idx.search_substring("keep.txt").is_empty());
     assert!(idx.search_substring("drop.tmp").is_empty());
     assert!(idx.search_substring("drop.swp").is_empty());
@@ -84,42 +104,59 @@ fn test_walk_skips_pattern_matches() {
 
 #[test]
 fn test_walk_skips_folder_patterns() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join("node_modules")).unwrap();
-    fs::write(dir.path().join("node_modules").join("pkg.js"), "x").unwrap();
-    fs::write(dir.path().join("app.js"), "x").unwrap();
+    let (_dir, root) = visible_root();
+    fs::create_dir(root.join("node_modules")).unwrap();
+    fs::write(root.join("node_modules").join("pkg.js"), "x").unwrap();
+    fs::write(root.join("app.js"), "x").unwrap();
 
     let mut ex = Excludes::new();
     ex.folders = vec!["**/node_modules".into()];
 
     let mut idx = Index::new();
-    walk(dir.path(), &mut idx, &ex, false);
+    walk(&root, &mut idx, &ex, false);
     assert!(idx.search_substring("pkg.js").is_empty());
     assert!(!idx.search_substring("app.js").is_empty());
 }
 
 #[test]
+fn test_walk_skips_explicit_paths() {
+    let (_dir, root) = visible_root();
+    let trash = root.join(".local").join("share").join("Trash");
+    fs::create_dir_all(trash.join("files")).unwrap();
+    fs::write(trash.join("files").join("trashed.mkv"), "x").unwrap();
+    fs::write(root.join("kept.mkv"), "x").unwrap();
+
+    let mut ex = Excludes::new();
+    ex.paths = vec![trash];
+
+    let mut idx = Index::new();
+    walk(&root, &mut idx, &ex, false);
+    assert!(idx.search_substring("trashed.mkv").is_empty());
+    assert!(!idx.search_substring("kept.mkv").is_empty());
+}
+
+#[test]
 fn test_walk_include_only_restricts_to_patterns() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("a.txt"), "x").unwrap();
-    fs::write(dir.path().join("b.rs"), "x").unwrap();
+    let (_dir, root) = visible_root();
+    fs::write(root.join("a.txt"), "x").unwrap();
+    fs::write(root.join("b.rs"), "x").unwrap();
 
     let mut ex = Excludes::new();
     ex.include_only = vec!["*.rs".into()];
 
     let mut idx = Index::new();
-    walk(dir.path(), &mut idx, &ex, false);
+    walk(&root, &mut idx, &ex, false);
     assert!(idx.search_substring("a.txt").is_empty());
     assert!(!idx.search_substring("b.rs").is_empty());
 }
 
 #[test]
 fn test_walk_without_metadata_leaves_fields_zeroed() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("file.txt"), "hello").unwrap();
+    let (_dir, root) = visible_root();
+    fs::write(root.join("file.txt"), "hello").unwrap();
 
     let mut idx = Index::new();
-    walk(dir.path(), &mut idx, &Excludes::new(), false);
+    walk(&root, &mut idx, &Excludes::new(), false);
 
     let id = idx.search_substring("file.txt")[0] as usize;
     let entry = &idx.entries[id];
@@ -131,11 +168,11 @@ fn test_walk_without_metadata_leaves_fields_zeroed() {
 
 #[test]
 fn test_walk_with_metadata_populates_file_fields() {
-    let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("file.txt"), "hello").unwrap();
+    let (_dir, root) = visible_root();
+    fs::write(root.join("file.txt"), "hello").unwrap();
 
     let mut idx = Index::new();
-    walk(dir.path(), &mut idx, &Excludes::new(), true);
+    walk(&root, &mut idx, &Excludes::new(), true);
 
     let id = idx.search_substring("file.txt")[0] as usize;
     let entry = &idx.entries[id];
@@ -160,18 +197,18 @@ fn test_excludes_system_paths() {
 fn test_walk_skips_symlink_entries() {
     use std::os::unix::fs::symlink;
 
-    let dir = tempfile::tempdir().unwrap();
-    fs::create_dir(dir.path().join("real")).unwrap();
-    fs::write(dir.path().join("real").join("inside.txt"), "x").unwrap();
-    symlink(dir.path().join("real"), dir.path().join("linked-real")).unwrap();
+    let (_dir, root) = visible_root();
+    fs::create_dir(root.join("real")).unwrap();
+    fs::write(root.join("real").join("inside.txt"), "x").unwrap();
+    symlink(root.join("real"), root.join("linked-real")).unwrap();
     symlink(
-        dir.path().join("real").join("inside.txt"),
-        dir.path().join("linked-file"),
+        root.join("real").join("inside.txt"),
+        root.join("linked-file"),
     )
     .unwrap();
 
     let mut idx = Index::new();
-    walk(dir.path(), &mut idx, &Excludes::new(), true);
+    walk(&root, &mut idx, &Excludes::new(), true);
 
     assert!(idx.search_substring("linked-real").is_empty());
     assert!(idx.search_substring("linked-file").is_empty());

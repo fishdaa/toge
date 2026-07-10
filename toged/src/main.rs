@@ -14,20 +14,24 @@ use std::time::{Instant, SystemTime};
 use toge_core::config::Config;
 use toge_core::index::Index;
 use toge_core::ipc::{
-    QueryRequest, Request, Response, ResultsResponse, StatusResponse, MAX_IPC_MESSAGE_SIZE,
+    DaemonStatus, MAX_IPC_MESSAGE_SIZE, QueryRequest, Request, Response, ResultRow,
+    ResultsResponse, StatusResponse,
 };
 use toge_core::matcher::match_query;
 use toge_core::query::Query;
-use toge_core::sort::{sort_ids, SortKey};
+use toge_core::sort::{SortKey, sort_ids};
 use toge_core::sys::FsWatcher;
-use toge_core::sys::{InotifyWatcher, WatchEvent};
-use toge_core::walker::{walk, Excludes};
+use toge_core::sys::{FanotifyWatcher, WatchEvent};
+use toge_core::walker::{Excludes, has_hidden_ancestor_dir, walk};
 
 struct DaemonState {
     index: Index,
-    is_ready: bool,
+    status: DaemonStatus,
+    status_message: String,
     build_duration_ms: u64,
+    last_updated_unix: i64,
     watcher: WatcherStatus,
+    watcher_log: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -36,6 +40,19 @@ struct WatcherStatus {
     watched_dir_count: usize,
     watch_failure_count: usize,
     watch_overflow_count: u64,
+}
+
+const WATCHER_LOG_LIMIT: usize = 50;
+
+fn append_watcher_log(st: &mut DaemonState, message: impl Into<String>) {
+    let timestamp = current_unix_time();
+    st.last_updated_unix = timestamp;
+    st.watcher_log
+        .push(format!("[{}] {}", timestamp, message.into()));
+    if st.watcher_log.len() > WATCHER_LOG_LIMIT {
+        let excess = st.watcher_log.len() - WATCHER_LOG_LIMIT;
+        st.watcher_log.drain(0..excess);
+    }
 }
 
 fn ensure_private_dir(path: &Path) -> io::Result<()> {
@@ -127,37 +144,21 @@ fn discover_roots(config: &Config) -> Vec<PathBuf> {
     if !config.roots.is_empty() {
         return config.roots.clone();
     }
-    let mut roots = Vec::new();
-    if let Ok(content) = fs::read_to_string("/proc/self/mountinfo") {
-        for line in content.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() < 9 {
-                continue;
-            }
-            let mount_point = parts[4];
-            let fs_type = parts[parts.len() - 3];
-            if config.exclude_fstypes.iter().any(|t| t == fs_type) {
-                continue;
-            }
-            if matches!(fs_type, "ext4" | "btrfs" | "xfs" | "zfs" | "ext3" | "ext2") {
-                roots.push(PathBuf::from(mount_point));
-            }
-        }
-    }
-    if roots.is_empty() {
-        roots.push(PathBuf::from("/"));
-    }
-    roots
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+        .into_iter()
+        .collect()
 }
 
-fn build_index(state_dir: &Path, config: &Config) -> (Index, u64) {
+fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>>) -> (Index, u64) {
     let index_path = state_dir.join("index.bin");
     if let Ok(idx) = Index::load(&index_path) {
-        eprintln!(
-            "Loaded {} entries from {}",
-            idx.count(),
-            index_path.display()
-        );
+        {
+            let mut st = state.lock().unwrap();
+            st.status = DaemonStatus::LoadingIndex;
+            st.status_message = format!("Loaded {} entries from cache", idx.count());
+        }
         return (idx, 0);
     }
 
@@ -168,6 +169,7 @@ fn build_index(state_dir: &Path, config: &Config) -> (Index, u64) {
         skip_system_paths: true,
         patterns: config.exclude_patterns.clone(),
         folders: config.exclude_folders.clone(),
+        paths: Vec::new(),
         include_only: config.include_only.clone(),
     };
 
@@ -176,19 +178,17 @@ fn build_index(state_dir: &Path, config: &Config) -> (Index, u64) {
         || config.index_date_modified
         || config.index_date_created
         || config.index_date_accessed;
-    eprintln!("Indexing roots: {:?}", roots);
-    for root in roots {
-        let count_before = index.count();
-        walk(&root, &mut index, &excludes, fetch_metadata);
-        eprintln!(
-            "Indexed {} entries from {}",
-            index.count() - count_before,
-            root.display()
-        );
+    let total_roots = roots.len();
+    for (i, root) in roots.iter().enumerate() {
+        {
+            let mut st = state.lock().unwrap();
+            st.status = DaemonStatus::Indexing;
+            st.status_message = format!("Indexing {}/{}: {}", i + 1, total_roots, root.display());
+        }
+        walk(root, &mut index, &excludes, fetch_metadata);
     }
 
     let duration_ms = start.elapsed().as_millis() as u64;
-    eprintln!("Indexed {} entries in {} ms", index.count(), duration_ms);
     (index, duration_ms)
 }
 
@@ -206,40 +206,72 @@ fn current_unix_time() -> i64 {
         .as_secs() as i64
 }
 
+fn is_ignored_path(path: &str, state_dir: &Path, config_dir: &Path, is_dir: bool) -> bool {
+    let path = Path::new(path);
+    canonical_starts_with(path, state_dir)
+        || canonical_starts_with(path, config_dir)
+        || has_hidden_ancestor_dir(path)
+        || (is_dir
+            && path
+                .file_name()
+                .map(|name| {
+                    let bytes = name.as_encoded_bytes();
+                    bytes.len() > 1 && bytes.starts_with(b".")
+                })
+                .unwrap_or(false))
+}
+
+fn is_within_roots(path: &str, roots: &[PathBuf]) -> bool {
+    let path = Path::new(path);
+    roots.iter().any(|root| path_matches_root(path, root))
+}
+
+fn path_matches_root(path: &Path, root: &Path) -> bool {
+    match (fs::canonicalize(path), fs::canonicalize(root)) {
+        (Ok(path), Ok(root)) => path.starts_with(root),
+        (_, Ok(root)) => path.starts_with(&root),
+        _ => path.starts_with(root),
+    }
+}
+
+fn metadata_snapshot(path: &str) -> (u64, i64, i64, i64) {
+    let now = current_unix_time();
+    let Ok(metadata) = fs::metadata(path) else {
+        return (0, now, now, now);
+    };
+
+    let read_time = |value: io::Result<SystemTime>| {
+        value
+            .ok()
+            .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(now)
+    };
+
+    (
+        metadata.len(),
+        read_time(metadata.modified()),
+        read_time(metadata.created()),
+        read_time(metadata.accessed()),
+    )
+}
+
 fn status_response(st: &DaemonState) -> StatusResponse {
     StatusResponse {
         indexed_count: st.index.count(),
-        is_ready: st.is_ready,
+        status: st.status.clone(),
+        status_message: st.status_message.clone(),
         watcher_healthy: st.watcher.is_healthy,
         watched_dir_count: st.watcher.watched_dir_count,
         watch_failure_count: st.watcher.watch_failure_count,
         watch_overflow_count: st.watcher.watch_overflow_count,
-        last_updated_unix: current_unix_time(),
+        watcher_log: st.watcher_log.clone(),
+        last_updated_unix: st.last_updated_unix,
         build_duration_ms: st.build_duration_ms,
     }
 }
 
-fn watched_dirs(index: &Index) -> Vec<PathBuf> {
-    let mut dirs: Vec<PathBuf> = index
-        .entries
-        .iter()
-        .map(|e| {
-            let parent_end = e.name_off as usize;
-            if parent_end > 0 {
-                PathBuf::from(&e.path[..parent_end.saturating_sub(1)])
-            } else {
-                PathBuf::from("/")
-            }
-        })
-        .collect();
-    dirs.sort();
-    dirs.dedup();
-    dirs
-}
-
-fn install_watches(watcher: &mut InotifyWatcher, dirs: &[PathBuf]) -> WatcherStatus {
-    eprintln!("Starting inotify watcher on {} directories...", dirs.len());
-
+fn install_watches(watcher: &mut FanotifyWatcher, dirs: &[PathBuf]) -> WatcherStatus {
     let mut watcher_status = WatcherStatus {
         watched_dir_count: 0,
         watch_failure_count: 0,
@@ -248,7 +280,7 @@ fn install_watches(watcher: &mut InotifyWatcher, dirs: &[PathBuf]) -> WatcherSta
 
     for dir in dirs {
         match watcher.watch(dir) {
-            Ok(()) => watcher_status.watched_dir_count += 1,
+            Ok(()) => {}
             Err(e)
                 if e.kind() == io::ErrorKind::PermissionDenied
                     || e.kind() == io::ErrorKind::NotFound
@@ -256,13 +288,13 @@ fn install_watches(watcher: &mut InotifyWatcher, dirs: &[PathBuf]) -> WatcherSta
             {
                 watcher_status.watch_failure_count += 1;
             }
-            Err(e) => {
+            Err(_) => {
                 watcher_status.watch_failure_count += 1;
-                eprintln!("Failed to watch {}: {}", dir.display(), e);
             }
         }
     }
 
+    watcher_status.watched_dir_count = watcher.fs_count();
     watcher_status.is_healthy = watcher_status.watch_failure_count == 0;
     watcher_status
 }
@@ -283,14 +315,20 @@ fn handle_request(
         }
         Request::Reindex => {
             let _ = fs::remove_file(state_dir.join("index.bin"));
-            let (new_index, duration) = build_index(state_dir, config);
+            let mut st = state.lock().unwrap();
+            st.status = DaemonStatus::Indexing;
+            st.status_message = "Reindexing".to_string();
+            drop(st);
+            let (new_index, duration) = build_index(state_dir, config, state);
             if let Err(e) = save_index(&new_index, state_dir) {
                 return Response::Error(e.to_string());
             }
             let mut st = state.lock().unwrap();
             st.index = new_index;
             st.build_duration_ms = duration;
-            st.is_ready = true;
+            st.last_updated_unix = current_unix_time();
+            st.status = DaemonStatus::Ready;
+            st.status_message = format!("Indexed {} entries", st.index.count());
             Response::Ok
         }
         Request::Status => {
@@ -298,17 +336,17 @@ fn handle_request(
             Response::Status(status_response(&st))
         }
         Request::Query(q) => {
-            let st = state.lock().unwrap();
-            if !st.is_ready {
+            let mut st = state.lock().unwrap();
+            if st.status != DaemonStatus::Ready {
                 return Response::Error("daemon not ready".into());
             }
-            handle_query(&st.index, &q)
+            handle_query(&mut st.index, &q, config.index_size)
         }
         Request::Quit => unreachable!(),
     }
 }
 
-fn handle_query(index: &Index, q: &QueryRequest) -> Response {
+fn handle_query(index: &mut Index, q: &QueryRequest, index_size: bool) -> Response {
     let query = match Query::parse(&q.raw) {
         Ok(query) => query,
         Err(e) => return Response::Error(e.to_string()),
@@ -318,6 +356,17 @@ fn handle_query(index: &Index, q: &QueryRequest) -> Response {
     let (sort_key, ascending) = sort_params(query.sort);
     sort_ids(index, &mut ids, sort_key, ascending);
 
+    if index_size {
+        for id in &ids {
+            let entry = &index.entries[*id as usize];
+            if entry.is_dir || entry.size != 0 {
+                continue;
+            }
+            let path = entry.path.clone();
+            index.update_metadata(&path);
+        }
+    }
+
     let total = ids.len();
     let total_size: u64 = ids.iter().map(|id| index.entries[*id as usize].size).sum();
 
@@ -325,14 +374,33 @@ fn handle_query(index: &Index, q: &QueryRequest) -> Response {
     let end = (offset + q.max_results).min(total);
     let page = &ids[offset..end];
 
-    let paths: Vec<String> = page
+    let rows: Vec<ResultRow> = page
         .iter()
         .map(|id| {
-            let path = index.get_path(*id).unwrap_or("").to_string();
-            if q.highlight && !query.terms.is_empty() {
+            let entry = &index.entries[*id as usize];
+            let path = entry.path.clone();
+            let display_path = if q.highlight && !query.terms.is_empty() {
                 highlight_path(&path, &query)
             } else {
-                path
+                path.clone()
+            };
+            let name = entry.name().to_string();
+            let parent_end = entry.name_off as usize;
+            let parent = if parent_end > 0 {
+                path[..parent_end.saturating_sub(1)].to_string()
+            } else {
+                String::new()
+            };
+            ResultRow {
+                path: display_path,
+                name,
+                parent,
+                extension: entry.extension().to_string(),
+                is_dir: entry.is_dir,
+                size: entry.size,
+                modified_unix: entry.modified,
+                created_unix: entry.created,
+                accessed_unix: entry.accessed,
             }
         })
         .collect();
@@ -341,7 +409,7 @@ fn handle_query(index: &Index, q: &QueryRequest) -> Response {
         id: q.id,
         total_count: total,
         total_size,
-        paths,
+        rows,
     })
 }
 
@@ -378,11 +446,11 @@ fn apply_highlight_ranges(text: &str, ranges: &mut [(usize, usize)]) -> String {
     ranges.sort_unstable_by_key(|(start, end)| (*start, *end));
     let mut merged = Vec::with_capacity(ranges.len());
     for &(start, end) in ranges.iter() {
-        if let Some((_, last_end)) = merged.last_mut() {
-            if start <= *last_end {
-                *last_end = (*last_end).max(end);
-                continue;
-            }
+        if let Some((_, last_end)) = merged.last_mut()
+            && start <= *last_end
+        {
+            *last_end = (*last_end).max(end);
+            continue;
         }
         merged.push((start, end));
     }
@@ -488,35 +556,29 @@ fn serve(
     let _ = fs::remove_file(&socket_path);
     let listener = UnixListener::bind(&socket_path)?;
     set_owner_only(&socket_path)?;
-    eprintln!("Listening on {}", socket_path.display());
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(mut s) => {
-                if let Err(e) = authorize_peer(&s) {
-                    let _ = write_response(&mut s, &Response::Error(e.to_string()));
-                    continue;
-                }
-                let req = match read_request(&mut s) {
-                    Ok(Some(req)) => req,
-                    Ok(None) => continue,
-                    Err(e) => {
-                        let _ = write_response(&mut s, &Response::Error(e.to_string()));
-                        continue;
-                    }
-                };
-
-                if matches!(req, Request::Quit) {
-                    let _ = write_response(&mut s, &Response::Ok);
-                    break;
-                }
-
-                let resp = handle_request(req, &state_dir, &config, &state);
-
-                let _ = write_response(&mut s, &resp);
-            }
-            Err(e) => eprintln!("Connection error: {}", e),
+    for mut s in listener.incoming().flatten() {
+        if let Err(e) = authorize_peer(&s) {
+            let _ = write_response(&mut s, &Response::Error(e.to_string()));
+            continue;
         }
+        let req = match read_request(&mut s) {
+            Ok(Some(req)) => req,
+            Ok(None) => continue,
+            Err(e) => {
+                let _ = write_response(&mut s, &Response::Error(e.to_string()));
+                continue;
+            }
+        };
+
+        if matches!(req, Request::Quit) {
+            let _ = write_response(&mut s, &Response::Ok);
+            break;
+        }
+
+        let resp = handle_request(req, &state_dir, &config, &state);
+
+        let _ = write_response(&mut s, &resp);
     }
 
     let _ = fs::remove_file(&socket_path);
@@ -551,7 +613,7 @@ fn main() {
                 state_dir = Some(PathBuf::from(iter.next().expect("missing state dir")));
             }
             "--clean" => clean = true,
-            _ => eprintln!("Unknown argument: {}", arg),
+            _ => {}
         }
     }
 
@@ -564,41 +626,68 @@ fn main() {
         let _ = fs::remove_file(state_dir.join("index.bin"));
     }
 
+    let state = Arc::new(Mutex::new(DaemonState {
+        index: Index::new(),
+        status: DaemonStatus::Starting,
+        status_message: "Initializing daemon".to_string(),
+        build_duration_ms: 0,
+        last_updated_unix: 0,
+        watcher: WatcherStatus::default(),
+        watcher_log: Vec::new(),
+    }));
+
+    {
+        let mut st = state.lock().unwrap();
+        st.status = DaemonStatus::LoadingConfig;
+        st.status_message = "Loading configuration".to_string();
+    }
+
     let config = config_path
         .as_deref()
         .map(Config::load)
         .unwrap_or_else(|| Config::load(&config_dir.join("config.toml")))
         .unwrap_or_else(|_| Config::default_config());
 
-    let socket = socket_path.unwrap_or_else(|| state_dir.join("toged.sock"));
+    {
+        let mut st = state.lock().unwrap();
+        st.status = DaemonStatus::LoadingIndex;
+        st.status_message = "Checking for cached index".to_string();
+    }
 
-    let state = Arc::new(Mutex::new(DaemonState {
-        index: Index::new(),
-        is_ready: false,
-        build_duration_ms: 0,
-        watcher: WatcherStatus::default(),
-    }));
+    let socket = socket_path.unwrap_or_else(|| state_dir.join("toged.sock"));
 
     let index_state_dir = state_dir.clone();
     let index_config = config.clone();
     let index_state = Arc::clone(&state);
     let spawn_result = thread::Builder::new().spawn(move || {
-        let (index, duration) = build_index(&index_state_dir, &index_config);
+        let (index, duration) = build_index(&index_state_dir, &index_config, &index_state);
         let _ = save_index(&index, &index_state_dir);
         let mut st = index_state.lock().unwrap();
         st.index = index;
         st.build_duration_ms = duration;
-        st.is_ready = true;
+        st.last_updated_unix = current_unix_time();
+        st.status = DaemonStatus::StartingWatcher;
+        st.status_message = "Setting up file watcher".to_string();
+        st.status = DaemonStatus::Ready;
+        st.status_message = format!("Indexed {} entries in {}ms", st.index.count(), duration);
     });
 
     if let Err(err) = spawn_result {
         eprintln!("background indexing unavailable: {}", err);
-        let (index, duration) = build_index(&state_dir, &config);
+        let mut st = state.lock().unwrap();
+        st.status = DaemonStatus::Indexing;
+        st.status_message = "Scanning filesystem (foreground)".to_string();
+        drop(st);
+        let (index, duration) = build_index(&state_dir, &config, &state);
         let _ = save_index(&index, &state_dir);
         let mut st = state.lock().unwrap();
         st.index = index;
         st.build_duration_ms = duration;
-        st.is_ready = true;
+        st.last_updated_unix = current_unix_time();
+        st.status = DaemonStatus::StartingWatcher;
+        st.status_message = "Setting up file watcher".to_string();
+        st.status = DaemonStatus::Ready;
+        st.status_message = format!("Indexed {} entries in {}ms", st.index.count(), duration);
     }
 
     let watcher_state = Arc::clone(&state);
@@ -622,30 +711,27 @@ fn start_watcher(
     config: Config,
 ) {
     thread::Builder::new()
-        .name("inotify-watcher".into())
+        .name("fanotify-watcher".into())
         .spawn(move || {
             loop {
                 {
                     let st = state.lock().unwrap();
-                    if st.is_ready {
+                    if st.status == DaemonStatus::Ready {
                         break;
                     }
                 }
                 thread::sleep(std::time::Duration::from_millis(100));
             }
 
-            let mut watcher = match InotifyWatcher::new() {
+            let mut watcher = match FanotifyWatcher::new() {
                 Ok(w) => w,
                 Err(e) => {
-                    eprintln!("Failed to create inotify watcher: {}", e);
+                    eprintln!("Failed to create fanotify watcher: {}", e);
                     return;
                 }
             };
 
-            let dirs = {
-                let st = state.lock().unwrap();
-                watched_dirs(&st.index)
-            };
+            let dirs = discover_roots(&config);
 
             let watcher_status = install_watches(&mut watcher, &dirs);
             {
@@ -661,7 +747,7 @@ fn start_watcher(
                             thread::sleep(std::time::Duration::from_millis(100));
                             continue;
                         }
-                        eprintln!("inotify poll error: {}", e);
+                        eprintln!("fanotify poll error: {}", e);
                         thread::sleep(std::time::Duration::from_secs(1));
                         continue;
                     }
@@ -678,64 +764,88 @@ fn start_watcher(
                     for event in events {
                         match &event {
                             WatchEvent::Create { path, is_dir } => {
-                                if is_own_path(path, &state_dir, &config_dir) {
+                                if !is_within_roots(path, &dirs) {
                                     continue;
                                 }
-                                if *is_dir {
-                                    match watcher.watch(&PathBuf::from(path)) {
-                                        Ok(()) => st.watcher.watched_dir_count += 1,
-                                        Err(e)
-                                            if e.kind() == io::ErrorKind::PermissionDenied
-                                                || e.kind() == io::ErrorKind::NotFound
-                                                || e.raw_os_error() == Some(28) =>
-                                        {
-                                            st.watcher.watch_failure_count += 1;
-                                            st.watcher.is_healthy = false;
-                                        }
-                                        Err(e) => {
-                                            st.watcher.watch_failure_count += 1;
-                                            st.watcher.is_healthy = false;
-                                            eprintln!("Failed to watch {}: {}", path, e);
-                                        }
-                                    }
+                                if is_ignored_path(path, &state_dir, &config_dir, *is_dir) {
+                                    continue;
                                 }
-                                let md = std::fs::metadata(path).ok();
-                                let size = md.as_ref().map(|m| m.len()).unwrap_or(0);
-                                let now = current_unix_time();
-                                st.index
-                                    .insert_with_metadata(path, *is_dir, size, now, now, now);
+                                append_watcher_log(
+                                    &mut st,
+                                    format!("create {}{}", path, if *is_dir { " (dir)" } else { "" }),
+                                );
+                                let (size, modified, created, accessed) = metadata_snapshot(path);
+                                st.index.insert_with_metadata(
+                                    path,
+                                    *is_dir,
+                                    size,
+                                    modified,
+                                    created,
+                                    accessed,
+                                );
                             }
                             WatchEvent::Delete { path } => {
-                                if is_own_path(path, &state_dir, &config_dir) {
+                                if !is_within_roots(path, &dirs) {
                                     continue;
                                 }
+                                if is_ignored_path(path, &state_dir, &config_dir, false) {
+                                    continue;
+                                }
+                                append_watcher_log(&mut st, format!("delete {}", path));
                                 st.index.remove(path);
                             }
                             WatchEvent::Modify { path } => {
-                                if is_own_path(path, &state_dir, &config_dir) {
+                                if !is_within_roots(path, &dirs) {
                                     continue;
                                 }
+                                if is_ignored_path(path, &state_dir, &config_dir, false) {
+                                    continue;
+                                }
+                                append_watcher_log(&mut st, format!("modify {}", path));
                                 st.index.update_metadata(path);
                             }
                             WatchEvent::Move { from, to } => {
-                                if is_own_path(to, &state_dir, &config_dir)
-                                    || is_own_path(from, &state_dir, &config_dir)
-                                {
+                                let from_in_roots = is_within_roots(from, &dirs);
+                                let to_in_roots = is_within_roots(to, &dirs);
+                                if !from_in_roots && !to_in_roots {
                                     continue;
                                 }
-                                st.index.remove(from);
-                                let is_dir = std::path::Path::new(to).is_dir();
-                                let size = std::fs::metadata(to).ok().map(|m| m.len()).unwrap_or(0);
-                                let now = current_unix_time();
-                                st.index
-                                    .insert_with_metadata(to, is_dir, size, now, now, now);
+                                let from_ignored =
+                                    is_ignored_path(from, &state_dir, &config_dir, false);
+                                let to_ignored =
+                                    is_ignored_path(
+                                        to,
+                                        &state_dir,
+                                        &config_dir,
+                                        std::path::Path::new(to).is_dir(),
+                                    );
+                                append_watcher_log(&mut st, format!("move {} -> {}", from, to));
+                                if from_in_roots && !from_ignored {
+                                    st.index.remove(from);
+                                }
+                                if to_in_roots && !to_ignored {
+                                    let is_dir = std::path::Path::new(to).is_dir();
+                                    let (size, modified, created, accessed) = metadata_snapshot(to);
+                                    st.index.insert_with_metadata(
+                                        to,
+                                        is_dir,
+                                        size,
+                                        modified,
+                                        created,
+                                        accessed,
+                                    );
+                                }
                             }
                             WatchEvent::Overflow { .. } => {
                                 eprintln!(
-                                    "inotify queue overflow — some events may have been lost"
+                                    "fanotify queue overflow — some events may have been lost"
                                 );
                                 st.watcher.watch_overflow_count += 1;
                                 st.watcher.is_healthy = false;
+                                append_watcher_log(
+                                    &mut st,
+                                    "overflow: fanotify queue overflow — some events may have been lost",
+                                );
                                 needs_reindex = true;
                             }
                         }
@@ -745,16 +855,18 @@ fn start_watcher(
 
                 if needs_reindex {
                     let _ = fs::remove_file(state_dir.join("index.bin"));
-                    let (new_index, duration) = build_index(&state_dir, &config);
+                    let (new_index, duration) = build_index(&state_dir, &config, &state);
                     let _ = save_index(&new_index, &state_dir);
-                    let dirs = watched_dirs(&new_index);
+                    let dirs = discover_roots(&config);
                     let watcher_status = install_watches(&mut watcher, &dirs);
                     {
                         let mut st = state.lock().unwrap();
                         st.index = new_index;
                         st.build_duration_ms = duration;
-                        st.is_ready = true;
+                        st.status = DaemonStatus::Ready;
+                        st.status_message = format!("Reindexed {} entries", st.index.count());
                         st.watcher = watcher_status;
+                        append_watcher_log(&mut st, "reindex completed after watcher overflow");
                     }
                 }
             }
@@ -762,9 +874,9 @@ fn start_watcher(
         .ok();
 }
 
+#[cfg(test)]
 fn is_own_path(path: &str, state_dir: &Path, config_dir: &Path) -> bool {
-    let path = Path::new(path);
-    canonical_starts_with(path, state_dir) || canonical_starts_with(path, config_dir)
+    is_ignored_path(path, state_dir, config_dir, false)
 }
 
 fn canonical_starts_with(path: &Path, root: &Path) -> bool {

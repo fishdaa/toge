@@ -5,10 +5,16 @@ use std::path::Path;
 #[test]
 fn test_default_config_values() {
     let cfg = Config::default_config();
-    assert!(cfg.roots.is_empty()); // auto-detect if empty
+    let expected_home = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("USERPROFILE").map(std::path::PathBuf::from));
+    match expected_home {
+        Some(home) => assert_eq!(cfg.roots, vec![home]),
+        None => assert!(cfg.roots.is_empty()),
+    }
     assert_eq!(cfg.poll_interval_secs, 300);
     assert_eq!(cfg.operator_precedence, OperatorOrder::OrAnd);
-    assert!(!cfg.index_size);
+    assert!(cfg.index_size);
     assert!(!cfg.index_date_created);
     assert!(!cfg.exclude_hidden);
 }
@@ -50,4 +56,27 @@ folders = ["**/node_modules"]
 fn test_load_missing_config_falls_back_to_defaults() {
     let cfg = Config::load(Path::new("/nonexistent/needle/config.toml")).unwrap();
     assert_eq!(cfg, Config::default_config());
+}
+
+#[test]
+fn test_keyboard_config_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.toml");
+    let mut cfg = Config::default_config();
+    cfg.keyboard.new_window_hotkey = "Ctrl+N".to_string();
+    cfg.keyboard.command_shortcuts = vec![KeyboardShortcutConfig {
+        command_id: "window.open_options".to_string(),
+        scope: KeyboardScope::Global,
+        accelerator: "Ctrl+Comma".to_string(),
+    }];
+
+    cfg.save(&path).unwrap();
+
+    let loaded = Config::load(&path).unwrap();
+    assert_eq!(loaded.keyboard.new_window_hotkey, "Ctrl+N");
+    assert_eq!(loaded.keyboard.command_shortcuts.len(), 1);
+    assert_eq!(
+        loaded.keyboard.command_shortcuts[0].command_id,
+        "window.open_options"
+    );
 }

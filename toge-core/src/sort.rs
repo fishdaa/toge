@@ -91,29 +91,17 @@ pub fn sort_ids(index: &Index, ids: &mut [u32], key: SortKey, ascending: bool) {
 
 #[inline]
 fn cmp_str(a: &str, b: &str, ascending: bool) -> Ordering {
-    if ascending {
-        a.cmp(b)
-    } else {
-        b.cmp(a)
-    }
+    if ascending { a.cmp(b) } else { b.cmp(a) }
 }
 
 #[inline]
 fn cmp_u64(a: u64, b: u64, ascending: bool) -> Ordering {
-    if ascending {
-        a.cmp(&b)
-    } else {
-        b.cmp(&a)
-    }
+    if ascending { a.cmp(&b) } else { b.cmp(&a) }
 }
 
 #[inline]
 fn cmp_i64(a: i64, b: i64, ascending: bool) -> Ordering {
-    if ascending {
-        a.cmp(&b)
-    } else {
-        b.cmp(&a)
-    }
+    if ascending { a.cmp(&b) } else { b.cmp(&a) }
 }
 
 #[cfg(test)]

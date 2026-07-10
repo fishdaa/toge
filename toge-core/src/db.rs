@@ -1,6 +1,6 @@
 //! Index persistence: save/load binary format.
 
-use crate::index::{fnv1a_64, lowered_bytes, unique_trigrams, Entry, Index};
+use crate::index::{Entry, Index, fnv1a_64, lowered_bytes, unique_trigrams};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Read, Write};
@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 const MAGIC: &[u8] = b"NDL1";
-const VERSION: u32 = 2;
+const VERSION: u32 = 3;
 const MAX_INDEX_FILE_SIZE: usize = 1024 * 1024 * 1024;
 const MAX_PATH_SECTION_LEN: usize = 512 * 1024 * 1024;
 const MAX_ENTRY_COUNT: usize = 10_000_000;
@@ -114,7 +114,7 @@ impl Index {
             return Err(io::Error::new(io::ErrorKind::InvalidData, "bad magic"));
         }
         let version = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
-        if version > VERSION {
+        if version != VERSION {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "unsupported version",

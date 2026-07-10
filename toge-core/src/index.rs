@@ -81,21 +81,21 @@ pub(crate) fn unique_trigrams(name_lower: &[u8]) -> Vec<u32> {
     trigrams
 }
 
-/// Intersect multiple sorted trigram posting lists via galloping merge.
+/// Intersect sorted trigram posting lists, starting with the smallest list.
 /// Returns entries appearing in all lists.
 pub(crate) fn intersect_trigram_lists(trigrams: &HashMap<u32, Vec<u32>>, keys: &[u32]) -> Vec<u32> {
     if keys.is_empty() {
         return Vec::new();
     }
 
-    let lists: Vec<&[u32]> = keys
-        .iter()
-        .filter_map(|k| trigrams.get(k).map(|v| v.as_slice()))
-        .collect();
-
-    if lists.is_empty() {
-        return Vec::new();
+    let mut lists = Vec::<&[u32]>::with_capacity(keys.len());
+    for key in keys {
+        let Some(list) = trigrams.get(key) else {
+            return Vec::new();
+        };
+        lists.push(list);
     }
+    lists.sort_unstable_by_key(|list| list.len());
 
     if lists.len() == 1 {
         return lists[0].to_vec();
@@ -195,6 +195,21 @@ impl Index {
         created: i64,
         accessed: i64,
     ) -> u32 {
+        let path_hash = fnv1a_64(path.as_bytes());
+        if let Some(&id) = self.path_to_id.get(&path_hash) {
+            let entry = &mut self.entries[id as usize];
+            if entry.path == path && entry.is_dir == is_dir {
+                entry.size = size;
+                entry.modified = modified;
+                entry.created = created;
+                entry.accessed = accessed;
+                return id;
+            }
+            if entry.path == path {
+                self.remove(path);
+            }
+        }
+
         let id = self.entries.len() as u32;
         let name_off = path.rfind('/').map(|i| i + 1).unwrap_or(0) as u16;
         let name = &path[name_off as usize..];
@@ -216,9 +231,6 @@ impl Index {
             created,
             accessed,
         };
-
-        let path_hash = fnv1a_64(path.as_bytes());
-
         self.entries.push(entry);
 
         self.path_to_id.insert(path_hash, id);
@@ -269,29 +281,27 @@ impl Index {
 
         // Remove from trigram index.
         for trigram in unique_trigrams(&name_lower) {
-            if let Some(list) = self.trigrams.get_mut(&trigram) {
-                if let Ok(pos) = list.binary_search(&id) {
-                    list.remove(pos);
-                }
+            if let Some(list) = self.trigrams.get_mut(&trigram)
+                && let Ok(pos) = list.binary_search(&id)
+            {
+                list.remove(pos);
             }
         }
 
         // Remove from prefix first-byte bucket.
-        if let Some(&first_byte) = name_lower.first() {
-            if let Some(list) = self.prefix_first_byte.get_mut(&first_byte) {
-                if let Ok(pos) = list.binary_search(&id) {
-                    list.remove(pos);
-                }
-            }
+        if let Some(&first_byte) = name_lower.first()
+            && let Some(list) = self.prefix_first_byte.get_mut(&first_byte)
+            && let Ok(pos) = list.binary_search(&id)
+        {
+            list.remove(pos);
         }
 
         // Remove from by_ext.
-        if !is_dir {
-            if let Some(list) = self.by_ext.get_mut(&ext) {
-                if let Ok(pos) = list.binary_search(&id) {
-                    list.remove(pos);
-                }
-            }
+        if !is_dir
+            && let Some(list) = self.by_ext.get_mut(&ext)
+            && let Ok(pos) = list.binary_search(&id)
+        {
+            list.remove(pos);
         }
 
         let old_last_id = self.entries.len() as u32 - 1;
@@ -308,10 +318,10 @@ impl Index {
                     replace_sorted_id(list, old_last_id, id);
                 }
             }
-            if let Some(&first_byte) = swapped_name_lower.first() {
-                if let Some(list) = self.prefix_first_byte.get_mut(&first_byte) {
-                    replace_sorted_id(list, old_last_id, id);
-                }
+            if let Some(&first_byte) = swapped_name_lower.first()
+                && let Some(list) = self.prefix_first_byte.get_mut(&first_byte)
+            {
+                replace_sorted_id(list, old_last_id, id);
             }
             if !swapped_entry.is_dir {
                 let swapped_ext = swapped_entry.extension().to_string();
@@ -335,20 +345,20 @@ impl Index {
         }
         if let Ok(metadata) = std::fs::metadata(path) {
             entry.size = metadata.len();
-            if let Ok(t) = metadata.modified() {
-                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                    entry.modified = d.as_secs() as i64;
-                }
+            if let Ok(t) = metadata.modified()
+                && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
+            {
+                entry.modified = d.as_secs() as i64;
             }
-            if let Ok(t) = metadata.created() {
-                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                    entry.created = d.as_secs() as i64;
-                }
+            if let Ok(t) = metadata.created()
+                && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
+            {
+                entry.created = d.as_secs() as i64;
             }
-            if let Ok(t) = metadata.accessed() {
-                if let Ok(d) = t.duration_since(std::time::UNIX_EPOCH) {
-                    entry.accessed = d.as_secs() as i64;
-                }
+            if let Ok(t) = metadata.accessed()
+                && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
+            {
+                entry.accessed = d.as_secs() as i64;
             }
         }
         true
@@ -359,7 +369,7 @@ impl Index {
         let needle_bytes = needle.as_bytes();
 
         if needle_bytes.len() >= 3 {
-            let trigrams_keys = extract_trigrams(needle_bytes);
+            let trigrams_keys = unique_trigrams(needle_bytes);
             let candidates = intersect_trigram_lists(&self.trigrams, &trigrams_keys);
             candidates
                 .into_iter()
@@ -388,17 +398,17 @@ impl Index {
             return (0..self.entries.len() as u32).collect();
         }
 
-        if let Some(first_byte) = prefix_bytes.first() {
-            if let Some(bucket) = self.prefix_first_byte.get(first_byte) {
-                return bucket
-                    .iter()
-                    .filter(|&&id| {
-                        let entry = &self.entries[id as usize];
-                        starts_with_ignore_case(entry.name(), prefix_bytes)
-                    })
-                    .copied()
-                    .collect();
-            }
+        if let Some(first_byte) = prefix_bytes.first()
+            && let Some(bucket) = self.prefix_first_byte.get(first_byte)
+        {
+            return bucket
+                .iter()
+                .filter(|&&id| {
+                    let entry = &self.entries[id as usize];
+                    starts_with_ignore_case(entry.name(), prefix_bytes)
+                })
+                .copied()
+                .collect();
         }
 
         Vec::new()

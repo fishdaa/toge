@@ -13,6 +13,7 @@ pub struct Excludes {
     pub skip_system_paths: bool,
     pub patterns: Vec<String>,
     pub folders: Vec<String>,
+    pub paths: Vec<PathBuf>,
     pub include_only: Vec<String>,
 }
 
@@ -27,6 +28,10 @@ impl Excludes {
             if s == b"/proc" || s == b"/sys" || s == b"/dev" {
                 return true;
             }
+        }
+
+        if self.paths.iter().any(|root| path.starts_with(root)) {
+            return true;
         }
 
         if self.skip_hidden
@@ -58,6 +63,27 @@ impl Excludes {
 
         false
     }
+}
+
+pub fn has_hidden_ancestor_dir(path: &Path) -> bool {
+    path.parent().is_some_and(|parent| {
+        parent.components().any(|component| {
+            let name = component.as_os_str().as_encoded_bytes();
+            name.len() > 1 && name.starts_with(b".")
+        })
+    })
+}
+
+pub fn is_hidden_dir_path(path: &Path, is_dir: bool) -> bool {
+    has_hidden_ancestor_dir(path)
+        || (is_dir
+            && path
+                .file_name()
+                .map(|n| {
+                    let name = n.as_encoded_bytes();
+                    name.len() > 1 && name.starts_with(b".")
+                })
+                .unwrap_or(false))
 }
 
 /// Walk a directory tree and insert entries into the index.
@@ -95,6 +121,10 @@ pub fn walk(root: &Path, index: &mut Index, excludes: &Excludes, fetch_metadata:
                     Err(_) => path.is_dir(),
                 },
             };
+
+            if has_hidden_ancestor_dir(&path) || is_hidden_dir_path(&path, is_dir) {
+                continue;
+            }
 
             if excludes.is_excluded(&path) {
                 continue;
@@ -191,10 +221,10 @@ fn glob_match(name: &str, pattern: &str) -> bool {
 fn folder_matches(path: &Path, pattern: &str) -> bool {
     let normalized = pattern.strip_prefix("**/").unwrap_or(pattern);
     for component in path.components() {
-        if let Some(s) = component.as_os_str().to_str() {
-            if glob_match(s, normalized) {
-                return true;
-            }
+        if let Some(s) = component.as_os_str().to_str()
+            && glob_match(s, normalized)
+        {
+            return true;
         }
     }
     false

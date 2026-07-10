@@ -21,10 +21,10 @@ pub trait FsWatcher: Send {
 }
 
 #[cfg(target_os = "linux")]
-pub mod linux;
+pub mod fanotify;
 
 #[cfg(target_os = "linux")]
-pub use linux::InotifyWatcher;
+pub use fanotify::FanotifyWatcher;
 
 #[cfg(test)]
 mod tests;

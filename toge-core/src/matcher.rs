@@ -1,6 +1,6 @@
 //! Evaluate a parsed Query against Index entries.
 
-use crate::index::{contains_ignore_case, Entry, Index};
+use crate::index::{Entry, Index, contains_ignore_case};
 use crate::query::{Query, RangeFilter, TextTerm};
 use regex::Regex;
 
@@ -39,9 +39,7 @@ fn compile_terms(terms: &[TextTerm]) -> CompiledTerms {
 }
 
 pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
-    let mut ids: Vec<u32> = (0..index.count() as u32).collect();
-
-    if let Some(exts) = &query.ext {
+    let mut ids = if let Some(exts) = &query.ext {
         let mut ext_ids: Vec<u32> = Vec::new();
         for ext in exts {
             if let Some(ids_for_ext) = index.by_extension(ext) {
@@ -50,7 +48,27 @@ pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
         }
         ext_ids.sort_unstable();
         ext_ids.dedup();
-        ids = ext_ids;
+        ext_ids
+    } else {
+        (0..index.count() as u32).collect()
+    };
+
+    // Filename substring queries of three or more bytes can use the trigram
+    // postings already maintained by Index. The full matcher still runs below,
+    // so case-sensitive, whole-word, and additional filters keep their exact
+    // semantics; this only removes entries that cannot possibly match.
+    if !query.match_path
+        && let Some(seed) = query
+            .terms
+            .iter()
+            .filter_map(|term| match term {
+                TextTerm::Substring(value) if value.len() >= 3 => Some(value.as_str()),
+                _ => None,
+            })
+            .max_by_key(|value| value.len())
+    {
+        let substring_ids = index.search_substring(seed);
+        ids = intersect_sorted_ids(&ids, &substring_ids);
     }
 
     let compiled = compile_terms(&query.terms);
@@ -61,6 +79,25 @@ pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
             entry_matches(entry, query, &compiled)
         })
         .collect()
+}
+
+fn intersect_sorted_ids(left: &[u32], right: &[u32]) -> Vec<u32> {
+    let mut result = Vec::with_capacity(left.len().min(right.len()));
+    let (mut left_idx, mut right_idx) = (0, 0);
+
+    while left_idx < left.len() && right_idx < right.len() {
+        match left[left_idx].cmp(&right[right_idx]) {
+            std::cmp::Ordering::Less => left_idx += 1,
+            std::cmp::Ordering::Greater => right_idx += 1,
+            std::cmp::Ordering::Equal => {
+                result.push(left[left_idx]);
+                left_idx += 1;
+                right_idx += 1;
+            }
+        }
+    }
+
+    result
 }
 
 fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool {
@@ -100,34 +137,35 @@ fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool
         }
     }
 
-    if let Some(size_filter) = &query.size {
-        if !in_range(entry.size, size_filter) {
-            return false;
-        }
+    if let Some(size_filter) = &query.size
+        && !in_range(entry.size, size_filter)
+    {
+        return false;
     }
 
-    if let Some(dm) = &query.date_modified {
-        if !in_range(entry.modified, dm) {
-            return false;
-        }
+    if let Some(dm) = &query.date_modified
+        && !in_range(entry.modified, dm)
+    {
+        return false;
     }
 
-    if let Some(dc) = &query.date_created {
-        if !in_range(entry.created, dc) {
-            return false;
-        }
+    if let Some(dc) = &query.date_created
+        && !in_range(entry.created, dc)
+    {
+        return false;
     }
 
-    if let Some(da) = &query.date_accessed {
-        if !in_range(entry.accessed, da) {
-            return false;
-        }
+    if let Some(da) = &query.date_accessed
+        && !in_range(entry.accessed, da)
+    {
+        return false;
     }
 
-    if let Some(attrs) = &query.attributes {
-        if attrs.dir.is_some() && attrs.dir != Some(entry.is_dir) {
-            return false;
-        }
+    if let Some(attrs) = &query.attributes
+        && attrs.dir.is_some()
+        && attrs.dir != Some(entry.is_dir)
+    {
+        return false;
     }
 
     if compiled.items.is_empty() {
@@ -222,15 +260,15 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
 }
 
 fn in_range<T: PartialOrd + Copy>(value: T, range: &RangeFilter<T>) -> bool {
-    if let Some(min) = range.min {
-        if value < min {
-            return false;
-        }
+    if let Some(min) = range.min
+        && value < min
+    {
+        return false;
     }
-    if let Some(max) = range.max {
-        if value > max {
-            return false;
-        }
+    if let Some(max) = range.max
+        && value > max
+    {
+        return false;
     }
     true
 }
