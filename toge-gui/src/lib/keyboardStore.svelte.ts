@@ -32,8 +32,6 @@ export const keyboardState = $state({
   pendingSearchQuery: ''
 })
 
-let windowActionInFlight = false
-
 export function defaultKeyboardSettings(): KeyboardSettings {
   return {
     new_window_hotkey: 'Ctrl+N',
@@ -87,22 +85,6 @@ export async function openOptionsWindow() {
   await invoke('open_options_window')
 }
 
-async function runWindowCommand(command: string) {
-  if (windowActionInFlight) {
-    console.debug('[kbd] window cmd DROPPED (inFlight)', command)
-    return
-  }
-  windowActionInFlight = true
-  console.debug('[kbd] window cmd INVOKE', command)
-  try {
-    await invoke(command)
-  } catch (err) {
-    console.error('[kbd] window cmd ERROR', command, err)
-  } finally {
-    windowActionInFlight = false
-  }
-}
-
 export function filterKeyboardCommands(query: string): KeyboardCommand[] {
   const needle = query.trim().toLowerCase()
   if (!needle) return keyboardCommands
@@ -140,7 +122,7 @@ export function handleMainWindowKeydown(event: KeyboardEvent): boolean {
   const accelerator = formatKeyboardEvent(event)
   if (!accelerator) return false
 
-  if (handleWindowHotkey(event, accelerator)) return true
+  if (consumeNativeWindowHotkey(event, accelerator)) return true
 
   const shortcut = matchingShortcut(accelerator, keyboardState.focusScope, keyboardState.settings.command_shortcuts)
   if (!shortcut) return false
@@ -154,7 +136,7 @@ export function handleScopedKeydown(event: KeyboardEvent, focusScope: KeyboardSc
   const accelerator = formatKeyboardEvent(event)
   if (!accelerator) return false
 
-  if (handleWindowHotkey(event, accelerator)) return true
+  if (consumeNativeWindowHotkey(event, accelerator)) return true
 
   const shortcut = matchingShortcut(accelerator, focusScope, keyboardState.settings.command_shortcuts)
   if (!shortcut) return false
@@ -164,20 +146,19 @@ export function handleScopedKeydown(event: KeyboardEvent, focusScope: KeyboardSc
   return true
 }
 
-function handleWindowHotkey(event: KeyboardEvent, accelerator: string): boolean {
+function consumeNativeWindowHotkey(event: KeyboardEvent, accelerator: string): boolean {
   const settings = keyboardState.settings
-  const command =
-    accelerator === settings.new_window_hotkey ? 'create_new_main_window'
-      : accelerator === settings.show_window_hotkey ? 'show_main_window'
-        : accelerator === settings.toggle_window_hotkey ? 'toggle_main_window'
-          : null
-  if (!command) return false
-
-  event.preventDefault()
-  console.debug('[kbd] window hotkey', command, 'repeat=', event.repeat, 'inFlight=', windowActionInFlight)
-  if (!event.repeat) {
-    void runWindowCommand(command)
+  if (
+    accelerator !== settings.new_window_hotkey &&
+    accelerator !== settings.show_window_hotkey &&
+    accelerator !== settings.toggle_window_hotkey
+  ) {
+    return false
   }
+
+  // The native handler owns execution even while this window is focused.
+  // Consume a renderer event if the platform also delivers one.
+  event.preventDefault()
   return true
 }
 

@@ -9,15 +9,10 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let config = state.load_config();
     let settings = crate::keyboard::settings_from_config(&config);
-    state.set_cached_settings(settings.clone());
+    // Keep these registered across focus changes. A shortcut callback may focus
+    // the main window, so unregistering from that focus event can re-enter the
+    // global-shortcut manager while it is still dispatching the callback.
     register_window_hotkeys(app, &settings)
-}
-
-pub fn unregister_all_shortcuts(app: &AppHandle) -> Result<(), String> {
-    eprintln!("[hotkeys] unregister_all");
-    app.global_shortcut()
-        .unregister_all()
-        .map_err(|e| e.to_string())
 }
 
 pub fn register_window_hotkeys(
@@ -31,6 +26,7 @@ pub fn register_window_hotkeys(
         settings.toggle_window_hotkey
     );
     let manager = app.global_shortcut();
+    app.state::<AppState>().reset_window_hotkeys();
     manager.unregister_all().map_err(|e| e.to_string())?;
 
     for (action, accelerator) in [
@@ -54,12 +50,20 @@ pub fn register_window_hotkeys(
 }
 
 fn handle_shortcut_event(app: &AppHandle, action: WindowHotkeyAction, event: ShortcutEvent) {
+    let state = app.state::<AppState>();
+    if event.state() == ShortcutState::Released {
+        state.release_window_hotkey(action.mask());
+        return;
+    }
+
     if event.state() != ShortcutState::Pressed {
+        return;
+    }
+    if !state.press_window_hotkey(action.mask()) {
         return;
     }
 
     eprintln!("[hotkeys] global event {:?}", action);
-    let state = app.state::<AppState>();
     let _ = match action {
         WindowHotkeyAction::NewWindow => commands::create_new_main_window_internal(app, &state),
         WindowHotkeyAction::ShowWindow => commands::show_main_window_internal(app, &state),
@@ -72,4 +76,14 @@ enum WindowHotkeyAction {
     NewWindow,
     ShowWindow,
     ToggleWindow,
+}
+
+impl WindowHotkeyAction {
+    fn mask(self) -> u8 {
+        match self {
+            Self::NewWindow => 0b001,
+            Self::ShowWindow => 0b010,
+            Self::ToggleWindow => 0b100,
+        }
+    }
 }

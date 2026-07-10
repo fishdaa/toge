@@ -12,8 +12,6 @@ use std::time::Duration;
 use tauri::{Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use toge_core::sys::{FanotifyWatcher, FsWatcher, WatchEvent};
 
-const WINDOW_ACTION_DEBOUNCE_MS: u64 = 600;
-
 #[derive(serde::Serialize)]
 pub struct SearchResult {
     pub rows: Vec<ResultRow>,
@@ -165,7 +163,6 @@ pub fn save_keyboard_settings(
     let mut config = state.load_config();
     let normalized = apply_settings_to_config(&mut config, settings)?;
     state.save_config(&config)?;
-    state.set_cached_settings(normalized.clone());
     crate::global_hotkeys::register_window_hotkeys(&app, &normalized)?;
     app.emit("keyboard-settings-updated", &normalized)
         .map_err(|e| e.to_string())?;
@@ -362,10 +359,6 @@ pub(crate) fn create_new_main_window_internal(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<String, String> {
-    if !begin_main_window_action(state) {
-        eprintln!("[cmd] create_new DROPPED (debounce)");
-        return Ok(existing_or_default_main_label(app));
-    }
     eprintln!("[cmd] create_new RUN");
 
     let label = if app.get_webview_window("main").is_none() {
@@ -390,10 +383,6 @@ pub(crate) fn show_main_window_internal(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<String, String> {
-    if !begin_main_window_action(state) {
-        eprintln!("[cmd] show DROPPED (debounce)");
-        return Ok(existing_or_default_main_label(app));
-    }
     eprintln!("[cmd] show RUN");
 
     if let Some(window) = first_main_window(app) {
@@ -424,11 +413,6 @@ pub(crate) fn toggle_main_window_internal(
     app: &tauri::AppHandle,
     state: &AppState,
 ) -> Result<String, String> {
-    if !begin_main_window_action(state) {
-        eprintln!("[cmd] toggle DROPPED (debounce)");
-        return Ok(existing_or_default_main_label(app));
-    }
-
     let visible_count = app
         .webview_windows()
         .values()
@@ -514,16 +498,6 @@ fn first_main_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {
         .find_map(|(label, window)| is_main_window_label(label).then(|| window.clone()))
 }
 
-pub(crate) fn is_main_window_label(label: &str) -> bool {
+fn is_main_window_label(label: &str) -> bool {
     label == "main" || label.starts_with("main-")
-}
-
-fn existing_or_default_main_label(app: &tauri::AppHandle) -> String {
-    first_main_window(app)
-        .map(|window| window.label().to_string())
-        .unwrap_or_else(|| "main".to_string())
-}
-
-fn begin_main_window_action(state: &AppState) -> bool {
-    state.should_process_window_action(WINDOW_ACTION_DEBOUNCE_MS)
 }

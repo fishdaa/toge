@@ -64,7 +64,7 @@ describe('keyboardStore', () => {
     input.remove()
   })
 
-  it('routes toggle window hotkeys while the main window is focused', () => {
+  it('leaves window hotkeys to the native global shortcut handler', () => {
     const event = new KeyboardEvent('keydown', {
       key: 'k',
       ctrlKey: true,
@@ -79,37 +79,8 @@ describe('keyboardStore', () => {
     setKeyboardSettings(settings)
 
     expect(handleMainWindowKeydown(event)).toBe(true)
-    expect(invokeMock).toHaveBeenCalledWith('toggle_main_window')
-  })
-
-  it('does not re-invoke toggle window on repeated keydown events', () => {
-    const settings = defaultKeyboardSettings()
-    settings.toggle_window_hotkey = 'Ctrl+Alt+K'
-    setKeyboardSettings(settings)
-
-    const first = new KeyboardEvent('keydown', {
-      key: 'k',
-      ctrlKey: true,
-      altKey: true,
-      bubbles: true,
-      cancelable: true
-    })
-    Object.defineProperty(first, 'target', { value: document.body })
-
-    const repeated = new KeyboardEvent('keydown', {
-      key: 'k',
-      ctrlKey: true,
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-      repeat: true
-    })
-    Object.defineProperty(repeated, 'target', { value: document.body })
-
-    expect(handleMainWindowKeydown(first)).toBe(true)
-    expect(handleMainWindowKeydown(repeated)).toBe(true)
-    expect(invokeMock).toHaveBeenCalledTimes(1)
-    expect(invokeMock).toHaveBeenCalledWith('toggle_main_window')
+    expect(event.defaultPrevented).toBe(true)
+    expect(invokeMock).not.toHaveBeenCalled()
   })
 
   it('replaces conflicting shortcuts when applying edits', () => {

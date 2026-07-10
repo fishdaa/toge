@@ -1,9 +1,6 @@
-use crate::keyboard::KeyboardSettingsPayload;
 use std::env;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use toge_core::config::Config;
 
 pub struct AppState {
@@ -12,8 +9,7 @@ pub struct AppState {
     query_counter: AtomicU64,
     window_counter: AtomicU64,
     exiting: AtomicBool,
-    last_window_action_ms: AtomicU64,
-    cached_settings: Mutex<Option<KeyboardSettingsPayload>>,
+    pressed_window_hotkeys: AtomicU8,
 }
 
 impl Default for AppState {
@@ -30,8 +26,7 @@ impl AppState {
             query_counter: AtomicU64::new(1),
             window_counter: AtomicU64::new(1),
             exiting: AtomicBool::new(false),
-            last_window_action_ms: AtomicU64::new(0),
-            cached_settings: Mutex::new(None),
+            pressed_window_hotkeys: AtomicU8::new(0),
         }
     }
 
@@ -55,17 +50,17 @@ impl AppState {
         self.exiting.load(Ordering::SeqCst)
     }
 
-    pub fn should_process_window_action(&self, debounce_ms: u64) -> bool {
-        let now_ms = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let last = self.last_window_action_ms.load(Ordering::SeqCst);
-        if now_ms.saturating_sub(last) < debounce_ms {
-            return false;
-        }
-        self.last_window_action_ms.store(now_ms, Ordering::SeqCst);
-        true
+    pub fn press_window_hotkey(&self, mask: u8) -> bool {
+        self.pressed_window_hotkeys.fetch_or(mask, Ordering::SeqCst) & mask == 0
+    }
+
+    pub fn release_window_hotkey(&self, mask: u8) {
+        self.pressed_window_hotkeys
+            .fetch_and(!mask, Ordering::SeqCst);
+    }
+
+    pub fn reset_window_hotkeys(&self) {
+        self.pressed_window_hotkeys.store(0, Ordering::SeqCst);
     }
 
     pub fn config_path(&self) -> PathBuf {
@@ -79,18 +74,24 @@ impl AppState {
     pub fn save_config(&self, config: &Config) -> Result<(), String> {
         config.save(&self.config_path)
     }
+}
 
-    pub fn set_cached_settings(&self, settings: KeyboardSettingsPayload) {
-        if let Ok(mut guard) = self.cached_settings.lock() {
-            *guard = Some(settings);
-        }
-    }
+#[cfg(test)]
+mod tests {
+    use super::AppState;
 
-    pub fn get_cached_settings(&self) -> Option<KeyboardSettingsPayload> {
-        self.cached_settings
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone())
+    #[test]
+    fn window_hotkeys_are_edge_triggered_without_a_time_delay() {
+        let state = AppState::new();
+
+        assert!(state.press_window_hotkey(0b001));
+        assert!(!state.press_window_hotkey(0b001));
+
+        state.release_window_hotkey(0b001);
+        assert!(state.press_window_hotkey(0b001));
+
+        state.reset_window_hotkeys();
+        assert!(state.press_window_hotkey(0b001));
     }
 }
 
