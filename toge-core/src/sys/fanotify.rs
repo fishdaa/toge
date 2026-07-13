@@ -19,7 +19,7 @@
 
 use super::{FsWatcher, WatchEvent};
 use std::env;
-use std::ffi::CString;
+use std::ffi::{CString, c_char, c_void};
 use std::fs;
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -29,18 +29,24 @@ use std::path::{Path, PathBuf};
 
 unsafe extern "C" {
     fn fanotify_init(flags: u32, event_f_flags: u32) -> i32;
-    fn fanotify_mark(fan_fd: i32, flags: u32, mask: u64, dirfd: i32, pathname: *const i8) -> i32;
+    fn fanotify_mark(
+        fan_fd: i32,
+        flags: u32,
+        mask: u64,
+        dirfd: i32,
+        pathname: *const c_char,
+    ) -> i32;
     fn open_by_handle_at(mountdirfd: i32, handle: *mut FileHandle, flags: i32) -> i32;
     fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
     fn mount(
-        source: *const i8,
-        target: *const i8,
-        fstype: *const i8,
+        source: *const c_char,
+        target: *const c_char,
+        fstype: *const c_char,
         flags: u64,
-        data: *const std::ffi::c_void,
+        data: *const c_void,
     ) -> i32;
-    fn umount(target: *const i8) -> i32;
-    fn mkdir(path: *const i8, mode: u32) -> i32;
+    fn umount(target: *const c_char) -> i32;
+    fn mkdir(path: *const c_char, mode: u32) -> i32;
 }
 
 // ===== Constants =====
@@ -263,7 +269,7 @@ impl FanotifyWatcher {
                 ctgt.as_ptr(),
                 cfst.as_ptr(),
                 MS_NOSUID | MS_NODEV | MS_RDONLY,
-                cdata.as_ptr() as *const std::ffi::c_void,
+                cdata.as_ptr().cast(),
             )
         };
         if rc < 0 {

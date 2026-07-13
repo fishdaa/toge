@@ -6,6 +6,13 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-07-13
+
+### Fixed
+
+- Automation/release v0.1.12 (#20)
+
+
 ## [0.1.14] - 2026-07-13
 
 ### Fixed
