@@ -53,13 +53,17 @@ jobs:
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          # Do not restore target/: a stale cache can leave Cargo fingerprints
+          # without the matching dependency artifacts (for example Tauri rlibs).
+          cache-targets: false
 
       - name: Compute nightly version
         id: nightly
         shell: bash
         run: |
           base_version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)"
-          nightly_version="${base_version}-nightly.$(date -u +%Y%m%d)+$(git rev-parse --short HEAD)"
+          nightly_version="${base_version}-nightly.$(date -u +%Y%m%d).$(git rev-parse --short HEAD)"
           printf 'version=%s\n' "$nightly_version" >>"$GITHUB_OUTPUT"
 
       - name: Set nightly workspace version
