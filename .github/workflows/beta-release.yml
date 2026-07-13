@@ -26,7 +26,10 @@ jobs:
 
   publish-beta:
     needs: checks
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.beta.outputs.tag }}
+      version: ${{ steps.beta.outputs.version }}
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
@@ -39,6 +42,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: toge-gui/package-lock.json
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -47,7 +57,8 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
             librsvg2-dev \
-            patchelf
+            patchelf \
+            rpm
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
@@ -67,9 +78,15 @@ jobs:
       - name: Build release binaries
         run: cargo build --workspace --release
 
+      - name: Install GUI dependencies
+        run: npm ci --prefix toge-gui
+
       - name: Package beta artifacts
         id: package
         run: scripts/release/package-artifacts.sh "${{ steps.beta.outputs.tag }}" beta
+
+      - name: Package beta Linux GUI
+        run: scripts/release/package-gui-artifacts.sh "${{ steps.beta.outputs.tag }}"
 
       - name: Create beta tag
         env:
@@ -91,7 +108,20 @@ jobs:
           files: |
             dist/toge-*.tar.gz
             dist/toge-*.sha256
+            dist/toge-gui_*.deb
+            dist/toge-gui-*.rpm
+            dist/Toge_*.AppImage
+            dist/Toge_*.sha256
 
       - name: Publish beta crates
         if: ${{ env.CARGO_REGISTRY_TOKEN != '' }}
         run: scripts/release/publish-crates.sh beta
+
+  package-arm64:
+    needs: publish-beta
+    uses: ./.github/workflows/package-gui-arm64.yml
+    with:
+      ref: ${{ needs.publish-beta.outputs.tag }}
+      version: ${{ needs.publish-beta.outputs.version }}
+      tag_name: ${{ needs.publish-beta.outputs.tag }}
+    secrets: inherit

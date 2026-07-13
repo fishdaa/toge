@@ -26,6 +26,7 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::window_ready,
             commands::search_query,
             commands::get_status,
             commands::open_path,

@@ -35,9 +35,19 @@ describe('keyboardStore', () => {
     expect(formatKeyboardEvent(event)).toBe('Ctrl+Shift+N')
   })
 
-  it('ignores unsupported media keys in the renderer', () => {
+  it('formats a modifier key as the primary key', () => {
+    const event = new KeyboardEvent('keydown', {
+      key: 'Meta',
+      ctrlKey: true,
+      shiftKey: true,
+      metaKey: true
+    })
+    expect(formatKeyboardEvent(event)).toBe('Ctrl+Shift+Super')
+  })
+
+  it('formats media keys in the renderer', () => {
     const event = new KeyboardEvent('keydown', { key: 'MediaTrackPrevious' })
-    expect(formatKeyboardEvent(event)).toBe('')
+    expect(formatKeyboardEvent(event)).toBe('MediaTrackPrevious')
   })
 
   it('does not intercept plain typing in editable inputs', () => {

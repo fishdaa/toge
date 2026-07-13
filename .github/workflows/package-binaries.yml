@@ -1,0 +1,66 @@
+name: Package Binaries
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Git ref to package
+        required: true
+        type: string
+      version:
+        description: Version to embed in the packages
+        required: true
+        type: string
+      tag_name:
+        description: GitHub release tag receiving the packages
+        required: true
+        type: string
+      target_triple:
+        description: Target triple for the binary archive name
+        required: true
+        type: string
+      channel:
+        description: Release channel passed to package-artifacts.sh
+        required: false
+        type: string
+        default: nightly
+
+permissions:
+  contents: write
+
+jobs:
+  package-binaries:
+    runs-on: ${{ inputs.target_triple == 'linux-aarch64' && 'ubuntu-22.04-arm' || 'ubuntu-22.04' }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          ref: ${{ inputs.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Set package version
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: scripts/release/set-version.sh "${RELEASE_VERSION#v}"
+
+      - name: Build release binaries
+        run: cargo build --release -p toge -p toged
+
+      - name: Package binaries
+        run: scripts/release/package-artifacts.sh "${{ inputs.version }}" "${{ inputs.channel }}" "${{ inputs.target_triple }}"
+
+      - name: Attach binary packages to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag_name }}
+        run: |
+          gh release upload "$RELEASE_TAG" \
+            dist/toge-*.tar.gz \
+            dist/toge-*.sha256 \
+            --clobber

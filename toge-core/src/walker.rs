@@ -1,5 +1,6 @@
 //! Filesystem walking and exclusion logic.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -89,6 +90,52 @@ pub fn is_hidden_dir_path(path: &Path, is_dir: bool) -> bool {
 /// Walk a directory tree and insert entries into the index.
 /// When `fetch_metadata` is false, size/timestamps are set to 0 to avoid a `stat` syscall per file.
 pub fn walk(root: &Path, index: &mut Index, excludes: &Excludes, fetch_metadata: bool) -> usize {
+    visit(root, excludes, fetch_metadata, |path, is_dir, metadata| {
+        let (size, modified, created, accessed) = metadata;
+        index.insert_with_metadata(path, is_dir, size, modified, created, accessed);
+    })
+}
+
+/// Reconcile a persisted index with the current contents of the configured roots.
+///
+/// Existing entries are updated in place, new entries are inserted, and entries that
+/// are no longer present (or are now excluded) are removed.
+pub fn reconcile(
+    roots: &[PathBuf],
+    index: &mut Index,
+    excludes: &Excludes,
+    fetch_metadata: bool,
+) -> usize {
+    let mut seen = HashSet::with_capacity(index.count());
+    let mut count = 0;
+
+    for root in roots {
+        count += visit(root, excludes, fetch_metadata, |path, is_dir, metadata| {
+            seen.insert(path.to_string());
+            let (size, modified, created, accessed) = metadata;
+            index.insert_with_metadata(path, is_dir, size, modified, created, accessed);
+        });
+    }
+
+    let stale: Vec<String> = index
+        .entries
+        .iter()
+        .filter(|entry| !seen.contains(&entry.path))
+        .map(|entry| entry.path.clone())
+        .collect();
+    for path in stale {
+        index.remove(&path);
+    }
+
+    count
+}
+
+fn visit(
+    root: &Path,
+    excludes: &Excludes,
+    fetch_metadata: bool,
+    mut on_entry: impl FnMut(&str, bool, (u64, i64, i64, i64)),
+) -> usize {
     let mut count = 0;
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
 
@@ -130,7 +177,7 @@ pub fn walk(root: &Path, index: &mut Index, excludes: &Excludes, fetch_metadata:
                 continue;
             }
 
-            if fetch_metadata {
+            let metadata = if fetch_metadata {
                 let metadata = fs::symlink_metadata(&path).ok();
                 let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
                 let modified = metadata
@@ -152,17 +199,11 @@ pub fn walk(root: &Path, index: &mut Index, excludes: &Excludes, fetch_metadata:
                     .map(|d| d.as_secs() as i64)
                     .unwrap_or(0);
 
-                index.insert_with_metadata(
-                    path.to_str().unwrap_or(""),
-                    is_dir,
-                    size,
-                    modified,
-                    created,
-                    accessed,
-                );
+                (size, modified, created, accessed)
             } else {
-                index.insert_with_metadata(path.to_str().unwrap_or(""), is_dir, 0, 0, 0, 0);
-            }
+                (0, 0, 0, 0)
+            };
+            on_entry(path.to_str().unwrap_or(""), is_dir, metadata);
             count += 1;
 
             if is_dir {

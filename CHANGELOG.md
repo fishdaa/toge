@@ -6,6 +6,13 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-07-10
+
+### Fixed
+
+- chore(release): update version to 0.1.8 and adjust release workflow (#14)
+
+
 ## [0.1.11] - 2026-07-06
 
 ### Fixed

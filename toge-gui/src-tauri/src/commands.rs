@@ -55,6 +55,12 @@ pub struct WatcherSelfTestResult {
 }
 
 #[tauri::command]
+pub fn window_ready(window: tauri::Window) -> Result<(), String> {
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn search_query(
     state: State<'_, AppState>,
     query: String,
@@ -328,6 +334,7 @@ pub(crate) fn open_debug_window_internal(app: &tauri::AppHandle) -> Result<(), S
         .inner_size(760.0, 560.0)
         .min_inner_size(520.0, 360.0)
         .resizable(true)
+        .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -351,6 +358,7 @@ pub(crate) fn open_options_window_internal(app: &tauri::AppHandle) -> Result<(),
         .inner_size(720.0, 560.0)
         .min_inner_size(640.0, 480.0)
         .resizable(true)
+        .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -427,8 +435,19 @@ pub(crate) fn toggle_main_window_internal(
     for window in app.webview_windows().values() {
         if is_main_window_label(window.label()) {
             let is_visible = window.is_visible().map_err(|e| e.to_string())?;
-            if is_visible {
+            let is_focused = window.is_focused().map_err(|e| e.to_string())?;
+            if is_visible && is_focused {
                 window.hide().map_err(|e| e.to_string())?;
+                return Ok(window.label().to_string());
+            }
+            if is_visible {
+                // KDE Plasma may reject a focus request for an already-mapped
+                // window. Remapping it gives the compositor a fresh window
+                // activation to place in front.
+                window.hide().map_err(|e| e.to_string())?;
+                window.show().map_err(|e| e.to_string())?;
+                window.unminimize().map_err(|e| e.to_string())?;
+                focus_after_remap(window.clone());
                 return Ok(window.label().to_string());
             }
         }
@@ -483,10 +502,21 @@ fn build_main_window(app: &tauri::AppHandle, label: &str) -> Result<(), String> 
         .min_inner_size(480.0, 320.0)
         .resizable(true)
         .decorations(true)
+        .visible(false)
         .build()
         .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+fn focus_after_remap(window: tauri::WebviewWindow) {
+    thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        let focus_window = window.clone();
+        let _ = window.run_on_main_thread(move || {
+            let _ = focus_window.set_focus();
+        });
+    });
 }
 
 fn first_main_window(app: &tauri::AppHandle) -> Option<tauri::WebviewWindow> {

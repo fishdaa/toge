@@ -76,6 +76,25 @@ fn read_response(stream: &mut UnixStream) -> Response {
     Response::decode(&buf).unwrap()
 }
 
+fn query_count(sock: &Path, query: &str) -> usize {
+    let mut stream = UnixStream::connect(sock).unwrap();
+    send_request(
+        &mut stream,
+        &Request::Query(toge_core::ipc::QueryRequest {
+            id: 1,
+            raw: query.to_string(),
+            max_results: 10,
+            offset: 0,
+            format: toge_core::ipc::OutputFormat::Default,
+            highlight: false,
+        }),
+    );
+    match read_response(&mut stream) {
+        Response::Results(results) => results.total_count,
+        other => panic!("expected results, got {:?}", other),
+    }
+}
+
 fn setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {
     let dir = test_dir(name);
     let _ = fs::remove_dir_all(&dir);
@@ -219,6 +238,44 @@ fn daemon_query_returns_real_file_size() {
         }
         other => panic!("expected results, got {:?}", other),
     }
+
+    cleanup(&dir, &mut child);
+}
+
+#[test]
+fn daemon_startup_reconciles_changes_made_while_stopped() {
+    if !uds_available("startup-reconcile") {
+        return;
+    }
+    let (dir, state, cfg) = setup("startup-reconcile");
+    let sock = socket_path("startup-reconcile");
+    let args = [
+        "--socket",
+        sock.to_str().unwrap(),
+        "--config",
+        cfg.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+    ];
+
+    let mut child = spawn_needled(&[
+        args[0], args[1], args[2], args[3], args[4], args[5], "--clean",
+    ]);
+    assert!(wait_for_ready(&sock, 10_000), "initial daemon not ready");
+
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    send_request(&mut stream, &Request::Quit);
+    assert_eq!(read_response(&mut stream), Response::Ok);
+    assert!(child.wait().unwrap().success());
+
+    let root = dir.join("root");
+    fs::remove_file(root.join("foo.txt")).unwrap();
+    fs::write(root.join("bar.txt"), "created while stopped").unwrap();
+
+    let mut child = spawn_needled(&args);
+    assert!(wait_for_ready(&sock, 10_000), "restarted daemon not ready");
+    assert_eq!(query_count(&sock, "foo.txt"), 0);
+    assert_eq!(query_count(&sock, "bar.txt"), 1);
 
     cleanup(&dir, &mut child);
 }

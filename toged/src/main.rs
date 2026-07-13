@@ -22,7 +22,7 @@ use toge_core::query::Query;
 use toge_core::sort::{SortKey, sort_ids};
 use toge_core::sys::FsWatcher;
 use toge_core::sys::{FanotifyWatcher, WatchEvent};
-use toge_core::walker::{Excludes, has_hidden_ancestor_dir, walk};
+use toge_core::walker::{Excludes, has_hidden_ancestor_dir, reconcile, walk};
 
 struct DaemonState {
     index: Index,
@@ -153,17 +153,7 @@ fn discover_roots(config: &Config) -> Vec<PathBuf> {
 
 fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>>) -> (Index, u64) {
     let index_path = state_dir.join("index.bin");
-    if let Ok(idx) = Index::load(&index_path) {
-        {
-            let mut st = state.lock().unwrap();
-            st.status = DaemonStatus::LoadingIndex;
-            st.status_message = format!("Loaded {} entries from cache", idx.count());
-        }
-        return (idx, 0);
-    }
-
     let start = Instant::now();
-    let mut index = Index::new();
     let excludes = Excludes {
         skip_hidden: config.exclude_hidden,
         skip_system_paths: true,
@@ -178,6 +168,18 @@ fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>
         || config.index_date_modified
         || config.index_date_created
         || config.index_date_accessed;
+
+    if let Ok(mut index) = Index::load(&index_path) {
+        {
+            let mut st = state.lock().unwrap();
+            st.status = DaemonStatus::Indexing;
+            st.status_message = format!("Reconciling {} cached entries", index.count());
+        }
+        reconcile(&roots, &mut index, &excludes, fetch_metadata);
+        return (index, start.elapsed().as_millis() as u64);
+    }
+
+    let mut index = Index::new();
     let total_roots = roots.len();
     for (i, root) in roots.iter().enumerate() {
         {

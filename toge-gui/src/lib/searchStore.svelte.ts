@@ -74,6 +74,7 @@ export const state = $state({
   totalCount: 0,
   totalSize: 0,
   isLoading: false,
+  hasCompletedSearch: false,
   statusText: 'Ready',
   selectedIndex: -1,
   sortColumn: loadSortColumn() as SortColumn,
@@ -197,10 +198,12 @@ function runSearch(nextQuery?: string): Promise<void> {
     state.sizeIndexed = false
     state.statusText = 'Ready'
     state.isLoading = false
+    state.hasCompletedSearch = false
     return Promise.resolve()
   }
 
   state.query = q
+  state.hasCompletedSearch = false
 
   const col = state.sortColumn
   const dir = state.sortDirection
@@ -243,6 +246,7 @@ async function executeSearch(request: PendingSearch) {
     const prevPath = prevIdx >= 0 && prevIdx < prevRows.length ? prevRows[prevIdx]?.path : null
 
     state.results = result.rows
+    state.hasCompletedSearch = true
 
     const newIdx = prevPath ? result.rows.findIndex((r) => r.path === prevPath) : -1
     state.selectedIndex = newIdx >= 0 ? newIdx : result.rows.length > 0 ? 0 : -1
@@ -257,6 +261,7 @@ async function executeSearch(request: PendingSearch) {
     if (request.requestId !== latestSearchRequestId) return
 
     state.error = String(e)
+    state.hasCompletedSearch = false
     state.statusText = `Error: ${e}`
     appendDiagnostics(`Search failed: ${String(e)}`)
   } finally {
@@ -300,6 +305,7 @@ export function clearSearch() {
   state.selectedIndex = -1
   state.error = null
   state.isLoading = false
+  state.hasCompletedSearch = false
 }
 
 export function setSort(column: SortColumn) {

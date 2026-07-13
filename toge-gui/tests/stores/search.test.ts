@@ -39,6 +39,7 @@ describe('searchStore', () => {
     expect(s.state.query).toBe('')
     expect(s.state.results).toEqual([])
     expect(s.state.isLoading).toBe(false)
+    expect(s.state.hasCompletedSearch).toBe(false)
     expect(s.state.statusText).toBe('Ready')
     expect(s.state.selectedIndex).toBe(-1)
     expect(s.state.sortColumn).toBe('name')
@@ -78,6 +79,7 @@ describe('searchStore', () => {
     expect(s.state.query).toBe('')
     expect(s.state.results).toEqual([])
     expect(s.state.selectedIndex).toBe(-1)
+    expect(s.state.hasCompletedSearch).toBe(false)
   })
 
   it('selects next row', async () => {
@@ -339,6 +341,7 @@ describe('searchStore', () => {
     await s.search()
 
     expect(s.state.statusText).toBe('7 results | size unavailable')
+    expect(s.state.hasCompletedSearch).toBe(true)
   })
 
   it('clears the committed query when a debounced search becomes empty', async () => {

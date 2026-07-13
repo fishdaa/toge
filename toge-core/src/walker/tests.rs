@@ -181,6 +181,47 @@ fn test_walk_with_metadata_populates_file_fields() {
 }
 
 #[test]
+fn test_reconcile_repairs_offline_add_delete_and_rename_drift() {
+    let (_dir, root) = visible_root();
+    let removed = root.join("removed.txt");
+    let renamed_from = root.join("before.txt");
+    fs::write(&removed, "old").unwrap();
+    fs::write(&renamed_from, "rename me").unwrap();
+
+    let mut idx = Index::new();
+    walk(&root, &mut idx, &Excludes::new(), false);
+
+    fs::remove_file(&removed).unwrap();
+    let renamed_to = root.join("after.txt");
+    fs::rename(&renamed_from, &renamed_to).unwrap();
+    let added = root.join("added.txt");
+    fs::write(&added, "new").unwrap();
+
+    reconcile(&[root], &mut idx, &Excludes::new(), false);
+
+    assert!(idx.search_substring("removed.txt").is_empty());
+    assert!(idx.search_substring("before.txt").is_empty());
+    assert_eq!(idx.search_substring("after.txt").len(), 1);
+    assert_eq!(idx.search_substring("added.txt").len(), 1);
+}
+
+#[test]
+fn test_reconcile_refreshes_metadata_changed_while_offline() {
+    let (_dir, root) = visible_root();
+    let file = root.join("file.txt");
+    fs::write(&file, "a").unwrap();
+
+    let mut idx = Index::new();
+    walk(&root, &mut idx, &Excludes::new(), true);
+    fs::write(&file, "a longer value").unwrap();
+
+    reconcile(&[root], &mut idx, &Excludes::new(), true);
+
+    let id = idx.search_substring("file.txt")[0] as usize;
+    assert_eq!(idx.entries[id].size, 14);
+}
+
+#[test]
 fn test_excludes_system_paths() {
     let ex = Excludes {
         skip_system_paths: true,

@@ -198,10 +198,10 @@ export function formatKeyboardEvent(event: KeyboardEvent): string {
   if (!key) return ''
 
   const parts: string[] = []
-  if (event.ctrlKey) parts.push('Ctrl')
-  if (event.altKey) parts.push('Alt')
-  if (event.shiftKey) parts.push('Shift')
-  if (event.metaKey) parts.push('Meta')
+  if (event.ctrlKey && key !== 'Ctrl') parts.push('Ctrl')
+  if (event.altKey && key !== 'Alt') parts.push('Alt')
+  if (event.shiftKey && key !== 'Shift') parts.push('Shift')
+  if (event.metaKey && key !== 'Super') parts.push('Meta')
   parts.push(key)
   return parts.join('+')
 }
@@ -210,11 +210,15 @@ function normalizeKey(key: string): string {
   const lower = key.trim().toLowerCase()
   switch (lower) {
     case '':
-    case 'control':
-    case 'shift':
-    case 'alt':
-    case 'meta':
       return ''
+    case 'control':
+      return 'Ctrl'
+    case 'shift':
+      return 'Shift'
+    case 'alt':
+      return 'Alt'
+    case 'meta':
+      return 'Super'
     case 'enter':
       return 'Enter'
     case 'escape':
@@ -242,13 +246,23 @@ function normalizeKey(key: string): string {
     case 'tab':
       return 'Tab'
     case 'mediatrackprevious':
+      return 'MediaTrackPrevious'
     case 'mediatracknext':
+      return 'MediaTrackNext'
+    case 'mediaplay':
+      return 'MediaPlay'
+    case 'mediapause':
+      return 'MediaPause'
     case 'mediaplaypause':
+      return navigator.userAgent.toLowerCase().includes('linux') ? 'MediaPlay' : 'MediaPlayPause'
     case 'mediastop':
+      return 'MediaStop'
     case 'audiovolumedown':
+      return 'AudioVolumeDown'
     case 'audiovolumeup':
+      return 'AudioVolumeUp'
     case 'audiovolumemute':
-      return ''
+      return 'AudioVolumeMute'
     default:
       if (/^f\d{1,2}$/i.test(key)) {
         return key.toUpperCase()

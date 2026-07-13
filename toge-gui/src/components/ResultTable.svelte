@@ -245,9 +245,13 @@
         <div class="row-spacer" style={`height: ${bottomSpacerHeight}px;`}></div>
       {/if}
 
-      {#if !hasResults() && !searchState.isLoading}
+      {#if searchState.hasCompletedSearch && !hasResults() && !searchState.isLoading}
         <div class="empty-searchState">
           No results found
+        </div>
+      {:else if !searchState.hasCompletedSearch && !hasResults() && !searchState.isLoading}
+        <div class="empty-searchState">
+          Start typing to search
         </div>
       {/if}
     </div>

@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen } from '@testing-library/svelte'
 import ResultTable from '@/components/ResultTable.svelte'
-import { setResults, setTableColumnWidths, state, setSelectedIndex } from '$lib/searchStore'
+import { invoke } from '@tauri-apps/api/core'
+import { clearSearch, search, setResults, setTableColumnWidths, state, setSelectedIndex } from '$lib/searchStore'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn()
@@ -10,14 +11,30 @@ vi.mock('@tauri-apps/api/core', () => ({
 describe('ResultTable', () => {
   beforeEach(() => {
     vi.resetModules()
-    setResults([])
-    setSelectedIndex(-1)
+    vi.clearAllMocks()
+    clearSearch()
     setTableColumnWidths([220, 320, 88, 140])
   })
 
-  it('renders empty state when no results', async () => {
+  it('renders a prompt before the first search', () => {
     render(ResultTable)
+    expect(screen.getByText('Start typing to search')).toBeTruthy()
+    expect(screen.queryByText('No results found')).toBeNull()
+  })
+
+  it('renders the empty state after a completed search has no results', async () => {
+    vi.mocked(invoke).mockResolvedValue({
+      rows: [],
+      total_count: 0,
+      total_size: 0,
+      size_indexed: true
+    })
+
+    await search('missing-file')
+    render(ResultTable)
+
     expect(screen.getByText('No results found')).toBeTruthy()
+    expect(screen.queryByText('Start typing to search')).toBeNull()
   })
 
   it('renders resize handles for adjustable columns', async () => {
