@@ -103,6 +103,17 @@ jobs:
             dist/Toge_*.AppImage
             dist/Toge_*.sha256
 
+  package-binaries-arm64:
+    needs: publish-nightly
+    uses: ./.github/workflows/package-binaries.yml
+    with:
+      ref: nightly
+      version: ${{ needs.publish-nightly.outputs.version }}
+      tag_name: nightly
+      target_triple: linux-aarch64
+      channel: nightly
+    secrets: inherit
+
   package-arm64:
     needs: publish-nightly
     uses: ./.github/workflows/package-gui-arm64.yml
