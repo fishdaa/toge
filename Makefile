@@ -39,8 +39,8 @@ fmt: ## Format all code
 gui: ## Run GUI in dev mode (Vite + Tauri)
 	./dev-gui.sh
 
-gui-release: ## Build frontend then run GUI (release)
-	./release-gui.sh
+gui-release: ## Run GUI in dev mode with optimized Tauri and daemon binaries
+	./dev-gui.sh --release
 
 gui-package: ## Build DEB, RPM, and AppImage packages (usage: make gui-package V=0.1.12)
 	bash scripts/release/package-gui-artifacts.sh $(V)

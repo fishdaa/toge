@@ -88,6 +88,10 @@ socket and index are temporary and are removed when the development session
 ends. Assign the development instance a different global shortcut in Options
 to exercise both applications side by side.
 
+Use `make gui-release` for performance testing. It uses the same isolated
+development profile and Vite frontend, but builds both the Tauri application
+and `toged` with Rust release optimizations.
+
 Use a named profile when you need another independent set of development
 settings:
 

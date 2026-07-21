@@ -6,6 +6,22 @@ GUI_DIR="$SCRIPT_DIR/toge-gui"
 PID_VITE=""
 PID_DAEMON=""
 DEV_RUNTIME_DIR=""
+BUILD_PROFILE="debug"
+CARGO_PROFILE_ARGS=()
+
+case "${1:-}" in
+  "") ;;
+  --release)
+    BUILD_PROFILE="release"
+    CARGO_PROFILE_ARGS=(--release)
+    ;;
+  *)
+    echo "Usage: $0 [--release]" >&2
+    exit 2
+    ;;
+esac
+
+DAEMON_BIN="$SCRIPT_DIR/target/$BUILD_PROFILE/toged"
 
 cleanup() {
   if [ -n "$PID_DAEMON" ] && kill -0 "$PID_DAEMON" 2>/dev/null; then
@@ -22,10 +38,10 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Building daemon for this dev session..."
+echo "Building daemon for this dev session ($BUILD_PROFILE)..."
 cd "$SCRIPT_DIR"
-cargo build -p toged
-sudo setcap cap_sys_admin,cap_dac_read_search+ep "$SCRIPT_DIR/target/debug/toged"
+cargo build "${CARGO_PROFILE_ARGS[@]}" -p toged
+sudo setcap cap_sys_admin,cap_dac_read_search+ep "$DAEMON_BIN"
 
 DEV_RUNTIME_DIR="$(mktemp -d /tmp/toge-gui-dev.XXXXXX)"
 DEV_PROFILE="${TOGE_DEV_PROFILE:-default}"
@@ -47,7 +63,7 @@ echo "Development settings: $XDG_CONFIG_HOME/toge/config.toml"
 echo "Development state: $XDG_STATE_HOME/toge (removed on exit)"
 
 echo "Starting toged for this dev session..."
-"$SCRIPT_DIR/target/debug/toged" --socket "$TOGE_SOCKET" &
+"$DAEMON_BIN" --socket "$TOGE_SOCKET" &
 PID_DAEMON=$!
 
 echo "Starting Vite dev server..."
@@ -64,4 +80,4 @@ for i in $(seq 1 30); do
 done
 
 cd "$SCRIPT_DIR"
-cargo run -p toge-gui-lib
+cargo run "${CARGO_PROFILE_ARGS[@]}" -p toge-gui-lib
