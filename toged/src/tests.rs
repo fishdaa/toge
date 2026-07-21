@@ -1,7 +1,7 @@
 use crate::{
     DaemonState, WatcherStatus, apply_highlight_ranges, canonical_starts_with, discover_roots,
-    ensure_private_dir, handle_request, highlight_path, is_ignored_path, is_own_path,
-    is_within_roots, status_response, term_needles,
+    ensure_private_dir, handle_request, highlight_path, index_created_path, is_ignored_path,
+    is_own_path, is_within_roots, remove_deleted_path, status_response, term_needles,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -18,6 +18,54 @@ fn visible_tempdir() -> tempfile::TempDir {
         .prefix("toged-test-")
         .tempdir_in(std::env::temp_dir())
         .unwrap()
+}
+
+#[test]
+fn moved_in_directory_is_indexed_recursively() {
+    let root = visible_tempdir();
+    let torrent = root.path().join("completed-torrent");
+    let season = torrent.join("season");
+    let episode = season.join("episode.mkv");
+    fs::create_dir_all(&season).unwrap();
+    fs::write(&episode, b"complete").unwrap();
+
+    let mut state = DaemonState {
+        index: Index::new(),
+        status: DaemonStatus::Ready,
+        status_message: String::new(),
+        build_duration_ms: 0,
+        last_updated_unix: 0,
+        watcher: WatcherStatus::default(),
+        watcher_log: Vec::new(),
+    };
+    index_created_path(
+        &mut state,
+        torrent.to_str().unwrap(),
+        true,
+        &Config::default_config(),
+    );
+
+    assert!(state.index.id_by_path(episode.to_str().unwrap()).is_some());
+    assert!(state.index.id_by_path(season.to_str().unwrap()).is_some());
+}
+
+#[test]
+fn deleting_directory_removes_indexed_descendants() {
+    let mut index = Index::new();
+    index.insert("/downloads/torrent", true);
+    index.insert("/downloads/torrent/season", true);
+    index.insert("/downloads/torrent/season/episode.mkv", false);
+    index.insert("/downloads/torrent-2/keep.mkv", false);
+
+    remove_deleted_path(&mut index, "/downloads/torrent");
+
+    assert!(index.id_by_path("/downloads/torrent").is_none());
+    assert!(
+        index
+            .id_by_path("/downloads/torrent/season/episode.mkv")
+            .is_none()
+    );
+    assert!(index.id_by_path("/downloads/torrent-2/keep.mkv").is_some());
 }
 
 /// Helper to build and run the daemon binary with given args.

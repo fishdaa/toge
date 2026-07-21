@@ -258,6 +258,45 @@ fn metadata_snapshot(path: &str) -> (u64, i64, i64, i64) {
     )
 }
 
+fn index_created_path(st: &mut DaemonState, path: &str, is_dir: bool, config: &Config) {
+    let (size, modified, created, accessed) = metadata_snapshot(path);
+    st.index
+        .insert_with_metadata(path, is_dir, size, modified, created, accessed);
+
+    if is_dir {
+        let excludes = Excludes {
+            skip_hidden: config.exclude_hidden,
+            skip_system_paths: true,
+            patterns: config.exclude_patterns.clone(),
+            folders: config.exclude_folders.clone(),
+            paths: Vec::new(),
+            include_only: config.include_only.clone(),
+        };
+        walk(
+            Path::new(path),
+            &mut st.index,
+            &excludes,
+            config.index_size
+                || config.index_date_modified
+                || config.index_date_created
+                || config.index_date_accessed,
+        );
+    }
+}
+
+fn remove_deleted_path(index: &mut Index, path: &str) {
+    let deleted = Path::new(path);
+    let paths: Vec<String> = index
+        .entries
+        .iter()
+        .filter(|entry| Path::new(&entry.path).starts_with(deleted))
+        .map(|entry| entry.path.clone())
+        .collect();
+    for path in paths {
+        index.remove(&path);
+    }
+}
+
 fn status_response(st: &DaemonState) -> StatusResponse {
     StatusResponse {
         indexed_count: st.index.count(),
@@ -283,15 +322,13 @@ fn install_watches(watcher: &mut FanotifyWatcher, dirs: &[PathBuf]) -> WatcherSt
     for dir in dirs {
         match watcher.watch(dir) {
             Ok(()) => {}
-            Err(e)
-                if e.kind() == io::ErrorKind::PermissionDenied
-                    || e.kind() == io::ErrorKind::NotFound
-                    || e.raw_os_error() == Some(28) =>
-            {
+            Err(error) => {
                 watcher_status.watch_failure_count += 1;
-            }
-            Err(_) => {
-                watcher_status.watch_failure_count += 1;
+                eprintln!(
+                    "Failed to install fanotify filesystem watch for {}: {}",
+                    dir.display(),
+                    error
+                );
             }
         }
     }
@@ -726,7 +763,7 @@ fn start_watcher(
             }
 
             let mut watcher = match FanotifyWatcher::new() {
-                Ok(w) => w,
+                Ok(watcher) => watcher,
                 Err(e) => {
                     eprintln!("Failed to create fanotify watcher: {}", e);
                     return;
@@ -734,11 +771,18 @@ fn start_watcher(
             };
 
             let dirs = discover_roots(&config);
-
             let watcher_status = install_watches(&mut watcher, &dirs);
             {
                 let mut st = state.lock().unwrap();
                 st.watcher = watcher_status;
+                if st.watcher.is_healthy {
+                    append_watcher_log(&mut st, "using fanotify filesystem watcher");
+                } else {
+                    append_watcher_log(
+                        &mut st,
+                        "fanotify coverage incomplete; check toged capabilities and watcher failures",
+                    );
+                }
             }
 
             loop {
@@ -776,15 +820,7 @@ fn start_watcher(
                                     &mut st,
                                     format!("create {}{}", path, if *is_dir { " (dir)" } else { "" }),
                                 );
-                                let (size, modified, created, accessed) = metadata_snapshot(path);
-                                st.index.insert_with_metadata(
-                                    path,
-                                    *is_dir,
-                                    size,
-                                    modified,
-                                    created,
-                                    accessed,
-                                );
+                                index_created_path(&mut st, path, *is_dir, &config);
                             }
                             WatchEvent::Delete { path } => {
                                 if !is_within_roots(path, &dirs) {
@@ -794,7 +830,8 @@ fn start_watcher(
                                     continue;
                                 }
                                 append_watcher_log(&mut st, format!("delete {}", path));
-                                st.index.remove(path);
+                                remove_deleted_path(&mut st.index, path);
+                                let _ = watcher.unwatch(Path::new(path));
                             }
                             WatchEvent::Modify { path } => {
                                 if !is_within_roots(path, &dirs) {
@@ -823,18 +860,16 @@ fn start_watcher(
                                     );
                                 append_watcher_log(&mut st, format!("move {} -> {}", from, to));
                                 if from_in_roots && !from_ignored {
-                                    st.index.remove(from);
+                                    remove_deleted_path(&mut st.index, from);
+                                    let _ = watcher.unwatch(Path::new(from));
                                 }
                                 if to_in_roots && !to_ignored {
                                     let is_dir = std::path::Path::new(to).is_dir();
-                                    let (size, modified, created, accessed) = metadata_snapshot(to);
-                                    st.index.insert_with_metadata(
+                                    index_created_path(
+                                        &mut st,
                                         to,
                                         is_dir,
-                                        size,
-                                        modified,
-                                        created,
-                                        accessed,
+                                        &config,
                                     );
                                 }
                             }
@@ -859,7 +894,6 @@ fn start_watcher(
                     let _ = fs::remove_file(state_dir.join("index.bin"));
                     let (new_index, duration) = build_index(&state_dir, &config, &state);
                     let _ = save_index(&new_index, &state_dir);
-                    let dirs = discover_roots(&config);
                     let watcher_status = install_watches(&mut watcher, &dirs);
                     {
                         let mut st = state.lock().unwrap();

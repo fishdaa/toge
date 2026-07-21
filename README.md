@@ -71,7 +71,18 @@ cargo build --workspace
 
 Stable releases include x86_64 and ARM64 DEB, RPM, and AppImage packages. Each
 package includes the desktop application, the `toge` CLI, and the `toged` daemon
-the GUI starts on demand. Release assets also include SHA-256 checksum files.
+the GUI starts on demand. DEB and RPM installation grants `toged` the Linux
+capabilities required for filesystem-wide fanotify marks. Release assets also
+include SHA-256 checksum files.
+
+AppImage cannot apply this privileged installation step; use the DEB or RPM
+package when live fanotify indexing is required.
+
+Source builds must grant those capabilities after rebuilding the daemon:
+
+```bash
+sudo ./scripts/setcap-toged.sh target/debug/toged
+```
 
 To build all GUI release formats locally:
 

@@ -47,12 +47,20 @@
     ],
     "linux": {
       "deb": {
+        "depends": [
+          "libcap2-bin"
+        ],
+        "postInstallScript": "linux/post-install.sh",
         "files": {
           "/usr/bin/toge": "../../target/release/toge",
           "/usr/bin/toged": "../../target/release/toged"
         }
       },
       "rpm": {
+        "depends": [
+          "libcap"
+        ],
+        "postInstallScript": "linux/post-install.sh",
         "files": {
           "/usr/bin/toge": "../../target/release/toge",
           "/usr/bin/toged": "../../target/release/toged"
