@@ -6,6 +6,17 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [Unreleased]
 
+## [0.1.17] - 2026-07-21
+
+### Fixed
+
+- Automation/release v0.1.12 (#20)
+
+### Changed
+
+- chore(deps): Bump regex from 1.13.0 to 1.13.1 (#26)
+
+
 ## [0.1.16] - 2026-07-21
 
 ### Fixed
