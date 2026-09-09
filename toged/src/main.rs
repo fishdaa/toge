@@ -404,11 +404,41 @@ fn handle_query(index: &mut Index, q: &QueryRequest, index_size: bool) -> Respon
         Err(e) => return Response::Error(e.to_string()),
     };
 
-    let mut ids = match_query(index, &query);
     let (sort_key, ascending) = sort_params(query.sort);
-    sort_ids(index, &mut ids, sort_key, ascending);
 
-    if index_size {
+    // Metadata tiers may be disabled while a query still explicitly asks for
+    // a date filter or date ordering. Refresh before matching/sorting so those
+    // operations use current filesystem values instead of zero/stale cache
+    // entries.
+    let needs_all_metadata = query.date_modified.is_some()
+        || query.date_created.is_some()
+        || query.date_accessed.is_some();
+    if needs_all_metadata {
+        let paths: Vec<String> = index
+            .entries
+            .iter()
+            .map(|entry| entry.path.clone())
+            .collect();
+        for path in paths {
+            index.update_metadata(&path);
+        }
+    }
+
+    let mut ids = match_query(index, &query);
+
+    if matches!(
+        sort_key,
+        SortKey::Modified | SortKey::Created | SortKey::Accessed
+    ) && !needs_all_metadata
+    {
+        let paths: Vec<String> = ids
+            .iter()
+            .map(|id| index.entries[*id as usize].path.clone())
+            .collect();
+        for path in paths {
+            index.update_metadata(&path);
+        }
+    } else if index_size {
         for id in &ids {
             let entry = &index.entries[*id as usize];
             if entry.is_dir || entry.size != 0 {
@@ -418,6 +448,8 @@ fn handle_query(index: &mut Index, q: &QueryRequest, index_size: bool) -> Respon
             index.update_metadata(&path);
         }
     }
+
+    sort_ids(index, &mut ids, sort_key, ascending);
 
     let total = ids.len();
     let total_size: u64 = ids.iter().map(|id| index.entries[*id as usize].size).sum();

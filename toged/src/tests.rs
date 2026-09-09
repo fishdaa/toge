@@ -1,8 +1,8 @@
 use crate::{
     DaemonState, WatcherStatus, apply_highlight_ranges, canonical_starts_with, discover_roots,
-    ensure_private_dir, handle_request, highlight_path, index_created_path, is_ignored_path,
-    is_own_path, is_within_roots, mark_watcher_unavailable, remove_deleted_path, status_response,
-    term_needles,
+    ensure_private_dir, handle_query, handle_request, highlight_path, index_created_path,
+    is_ignored_path, is_own_path, is_within_roots, mark_watcher_unavailable, remove_deleted_path,
+    status_response, term_needles,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -150,6 +150,39 @@ fn query_before_ready_returns_not_ready_error() {
     );
 
     assert_eq!(resp, Response::Error("daemon not ready".into()));
+}
+
+#[test]
+fn modified_sort_refreshes_timestamps_when_metadata_indexing_is_disabled() {
+    let root = visible_tempdir();
+    let older = root.path().join("older.txt");
+    let newer = root.path().join("newer.txt");
+    fs::write(&older, b"older").unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    fs::write(&newer, b"newer").unwrap();
+
+    let mut index = Index::new();
+    index.insert_with_metadata(older.to_str().unwrap(), false, 0, 0, 0, 0);
+    index.insert_with_metadata(newer.to_str().unwrap(), false, 0, 0, 0, 0);
+
+    let response = handle_query(
+        &mut index,
+        &QueryRequest {
+            id: 1,
+            raw: "sort:modified-desc".into(),
+            max_results: 10,
+            offset: 0,
+            format: OutputFormat::Default,
+            highlight: false,
+        },
+        false,
+    );
+
+    let Response::Results(results) = response else {
+        panic!("expected sorted results");
+    };
+    assert_eq!(results.rows[0].path, newer.to_str().unwrap());
+    assert!(results.rows[0].modified_unix > results.rows[1].modified_unix);
 }
 
 #[test]
