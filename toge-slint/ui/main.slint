@@ -1,0 +1,138 @@
+import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette } from "std-widgets.slint";
+
+export component AboutWindow inherits Window {
+    title: "About Toge";
+    width: 360px; height: 270px;
+    VerticalBox {
+        padding: 24px; spacing: 16px;
+        Text { text: "Toge"; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
+        Text { text: "Fast local file search"; horizontal-alignment: center; }
+        AboutSlint { }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Toge";
+    preferred-width: 900px; preferred-height: 580px;
+    min-width: 560px; min-height: 300px;
+    background: Palette.background;
+    in property <[[StandardListViewItem]]> rows;
+    in property <string> status: "Connecting to index…";
+    in property <bool> busy: true;
+    in property <bool> has-error: false;
+    in-out property <int> selected: -1;
+    callback query-edited(string);
+    callback submit(string);
+    callback sort-results(int, bool);
+    callback action(string);
+    callback row-clicked(int);
+    callback about();
+    forward-focus: search;
+    public function select-row(index: int) {
+        root.selected = index;
+        selection-scroll.start();
+    }
+    // Wait for the new result model to lay out before calculating scroll offsets.
+    selection-scroll := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.stop();
+            if (root.selected <= 0) { table.viewport-y = 0px; }
+            else { table.set-current-row(root.selected); }
+        }
+    }
+
+    FocusScope {
+        width: 100%; height: 100%;
+        key-pressed(event) => {
+            if (event.modifiers.control && event.text == "l") {
+                search.focus(); search.select-all(); return accept;
+            }
+            return reject;
+        }
+        VerticalLayout {
+            width: 100%; height: 100%; spacing: 0px;
+            Rectangle {
+                height: 64px;
+                HorizontalLayout {
+                    padding-left: 16px; padding-right: 16px;
+                    padding-top: 14px; padding-bottom: 14px; spacing: 12px;
+                    Text { text: "toge"; font-size: 19px; font-weight: 700; color: Palette.foreground; }
+                    search := LineEdit {
+                        horizontal-stretch: 1;
+                        placeholder-text: "Search files and folders…";
+                        edited(text) => { root.query-edited(text); }
+                        accepted(text) => { root.submit(text); }
+                    }
+                    if root.has-error: Button {
+                        text: "Retry";
+                        clicked => { root.submit(search.text); }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Palette.foreground; opacity: 0.10; }
+            keys := FocusScope {
+                vertical-stretch: 1;
+                forward-focus: table;
+                key-pressed(event) => {
+                    if (event.text == Key.Return) { root.action("open"); return accept; }
+                    if (event.modifiers.control && event.text == "c") { root.action("copy"); return accept; }
+                    return reject;
+                }
+                table := StandardTableView {
+                    width: 100%; height: 100%;
+                    rows: root.rows;
+                    current-row <=> root.selected;
+                    columns: [
+                        { title: "Name", width: 220px, min-width: 140px },
+                        { title: "Path", width: 340px, min-width: 160px },
+                        { title: "Size", width: 90px, min-width: 70px },
+                        { title: "Modified", width: 150px, min-width: 120px }
+                    ];
+                    sort-ascending(column) => { root.sort-results(column, true); }
+                    sort-descending(column) => { root.sort-results(column, false); }
+                    row-pointer-event(index, event, position) => {
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            root.selected = index; root.row-clicked(index);
+                        }
+                    }
+                }
+                if root.rows.length == 0: VerticalLayout {
+                    x: 24px; width: parent.width - 48px;
+                    y: (parent.height - self.height) / 2;
+                    spacing: 8px;
+                    Text {
+                        text: root.has-error ? "Couldn’t load results" : root.busy ? "Preparing your search" : "No matches";
+                        font-size: 18px; font-weight: 600;
+                        horizontal-alignment: center;
+                        color: Palette.foreground;
+                    }
+                    Text {
+                        text: root.has-error ? "Check the status below and try again." : root.busy ? "Results will appear when the index is ready." : "Try another name, or use ext:pdf or path:src.";
+                        horizontal-alignment: center;
+                        color: Palette.foreground; opacity: 0.55;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Palette.foreground; opacity: 0.10; }
+            Rectangle {
+                height: 44px;
+                HorizontalLayout {
+                    padding-left: 12px; padding-right: 12px;
+                    padding-top: 7px; padding-bottom: 7px; spacing: 8px;
+                    Text {
+                        text: root.status; overflow: elide;
+                        horizontal-stretch: 1; font-size: 12px;
+                        color: Palette.foreground; opacity: 0.65;
+                    }
+                    Button { text: "Open"; enabled: root.selected >= 0; clicked => { root.action("open"); } }
+                    Button { text: "Copy path"; enabled: root.selected >= 0; clicked => { root.action("copy"); } }
+                    Button { text: "Folder"; enabled: root.selected >= 0; clicked => { root.action("parent"); } }
+                    Button { text: "About"; clicked => { root.about(); } }
+                }
+            }
+        }
+    }
+}
