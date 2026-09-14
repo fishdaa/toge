@@ -1,5 +1,31 @@
 import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette } from "std-widgets.slint";
 
+component ContextMenuItem {
+    in property <string> label;
+    callback activated;
+    width: 100%; height: 30px;
+
+    highlight := Rectangle {
+        x: 4px; y: 1px;
+        width: parent.width - 8px; height: parent.height - 2px;
+        background: Palette.foreground;
+        opacity: touch-area.has-hover ? 0.10 : 0;
+        border-radius: 3px;
+    }
+    Text {
+        x: 14px; width: parent.width - 28px; height: parent.height;
+        text: root.label;
+        color: Palette.foreground;
+        vertical-alignment: center;
+        font-size: 13px;
+    }
+    touch-area := TouchArea {
+        width: 100%; height: 100%;
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}
+
 export component AboutWindow inherits Window {
     title: "About Toge";
     width: 360px; height: 270px;
@@ -21,6 +47,9 @@ export component AppWindow inherits Window {
     in property <bool> busy: true;
     in property <bool> has-error: false;
     in-out property <int> selected: -1;
+    in-out property <bool> context-menu-open: false;
+    in-out property <length> context-menu-x: 0px;
+    in-out property <length> context-menu-y: 0px;
     callback query-edited(string);
     callback submit(string);
     callback sort-results(int, bool);
@@ -93,44 +122,95 @@ export component AppWindow inherits Window {
                     sort-ascending(column) => { root.sort-results(column, true); }
                     sort-descending(column) => { root.sort-results(column, false); }
                     row-pointer-event(index, event, position) => {
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                            root.selected = index;
+                            root.context-menu-x = position.x;
+                            root.context-menu-y = position.y;
+                            root.context-menu-open = true;
+                        }
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            root.context-menu-open = false;
                             root.selected = index; root.row-clicked(index);
                         }
                     }
                 }
-                if root.rows.length == 0: VerticalLayout {
-                    x: 24px; width: parent.width - 48px;
-                    y: (parent.height - self.height) / 2;
-                    spacing: 8px;
-                    Text {
-                        text: root.has-error ? "Couldn’t load results" : root.busy ? "Preparing your search" : "No matches";
-                        font-size: 18px; font-weight: 600;
-                        horizontal-alignment: center;
-                        color: Palette.foreground;
+                if root.rows.length == 0: Rectangle {
+                    // StandardTableView keeps a roughly 42px header above its body.
+                    // Keep the empty state in the body so it does not overlap the headings.
+                    x: 0px; y: 42px;
+                    width: parent.width; height: parent.height - 42px;
+                    background: transparent;
+                    VerticalLayout {
+                        x: 24px; width: parent.width - 48px;
+                        height: self.preferred-height;
+                        y: (parent.height - self.height) / 2;
+                        spacing: 8px;
+                        Text {
+                            text: root.has-error ? "Couldn’t load results" : root.busy ? "Preparing your search" : "No matches";
+                            font-size: 18px; font-weight: 600;
+                            horizontal-alignment: center;
+                            color: Palette.foreground;
+                        }
+                        Text {
+                            text: root.has-error ? "Check the status below and try again." : root.busy ? "Results will appear when the index is ready." : "Try another name, or use ext:pdf or path:src.";
+                            horizontal-alignment: center;
+                            color: Palette.foreground; opacity: 0.55;
+                            wrap: word-wrap;
+                        }
                     }
-                    Text {
-                        text: root.has-error ? "Check the status below and try again." : root.busy ? "Results will appear when the index is ready." : "Try another name, or use ext:pdf or path:src.";
-                        horizontal-alignment: center;
-                        color: Palette.foreground; opacity: 0.55;
-                        wrap: word-wrap;
+                }
+                if root.context-menu-open: TouchArea {
+                    width: parent.width; height: parent.height;
+                    clicked => { root.context-menu-open = false; }
+                }
+                if root.context-menu-open: Rectangle {
+                    x: min(root.context-menu-x, parent.width - self.width - 8px);
+                    y: min(root.context-menu-y, parent.height - self.height - 8px);
+                    width: 184px; height: 137px;
+                    background: Palette.background;
+                    border-width: 1px;
+                    border-color: Palette.foreground;
+                    border-radius: 4px;
+                    drop-shadow-blur: 12px;
+                    drop-shadow-color: #40000000;
+                    VerticalLayout {
+                        padding-top: 5px; padding-bottom: 5px;
+                        spacing: 1px;
+                        ContextMenuItem {
+                            label: "Open";
+                            activated => { root.context-menu-open = false; root.action("open"); }
+                        }
+                        ContextMenuItem {
+                            label: "Copy path";
+                            activated => { root.context-menu-open = false; root.action("copy"); }
+                        }
+                        ContextMenuItem {
+                            label: "Open folder";
+                            activated => { root.context-menu-open = false; root.action("parent"); }
+                        }
+                        Rectangle {
+                            height: 1px;
+                            background: Palette.foreground;
+                            opacity: 0.12;
+                        }
+                        ContextMenuItem {
+                            label: "About";
+                            activated => { root.context-menu-open = false; root.about(); }
+                        }
                     }
                 }
             }
             Rectangle { height: 1px; background: Palette.foreground; opacity: 0.10; }
             Rectangle {
-                height: 44px;
+                height: 36px;
                 HorizontalLayout {
                     padding-left: 12px; padding-right: 12px;
-                    padding-top: 7px; padding-bottom: 7px; spacing: 8px;
+                    padding-top: 5px; padding-bottom: 5px;
                     Text {
                         text: root.status; overflow: elide;
                         horizontal-stretch: 1; font-size: 12px;
                         color: Palette.foreground; opacity: 0.65;
                     }
-                    Button { text: "Open"; enabled: root.selected >= 0; clicked => { root.action("open"); } }
-                    Button { text: "Copy path"; enabled: root.selected >= 0; clicked => { root.action("copy"); } }
-                    Button { text: "Folder"; enabled: root.selected >= 0; clicked => { root.action("parent"); } }
-                    Button { text: "About"; clicked => { root.about(); } }
                 }
             }
         }

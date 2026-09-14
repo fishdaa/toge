@@ -1,6 +1,6 @@
 //! IPC protocol types and serialization.
 
-pub const MAX_IPC_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+pub const MAX_IPC_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 pub const MAX_RESPONSE_PATHS: usize = 1_000_000;
 pub const MAX_STATUS_LOG_ENTRIES: usize = 10_000;
 

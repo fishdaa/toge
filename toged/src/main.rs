@@ -641,6 +641,7 @@ fn serve(
     let listener = UnixListener::bind(&socket_path)?;
     set_owner_only(&socket_path)?;
 
+    let mut workers = Vec::new();
     for mut s in listener.incoming().flatten() {
         if let Err(e) = authorize_peer(&s) {
             let _ = write_response(&mut s, &Response::Error(e.to_string()));
@@ -660,9 +661,22 @@ fn serve(
             break;
         }
 
-        let resp = handle_request(req, &state_dir, &config, &state);
-
-        let _ = write_response(&mut s, &resp);
+        // Requests are read serially above (cheap: local clients write their
+        // whole message immediately), but the potentially slow part — running
+        // the query against the index — runs on its own thread so one slow
+        // request (e.g. a broad substring scan) can't stall every other
+        // connection behind it, as a single-threaded accept loop would.
+        let state_dir = state_dir.clone();
+        let config = config.clone();
+        let state = state.clone();
+        workers.push(thread::spawn(move || {
+            let resp = handle_request(req, &state_dir, &config, &state);
+            let _ = write_response(&mut s, &resp);
+        }));
+        workers.retain(|h: &thread::JoinHandle<()>| !h.is_finished());
+    }
+    for handle in workers {
+        let _ = handle.join();
     }
 
     let _ = fs::remove_file(&socket_path);

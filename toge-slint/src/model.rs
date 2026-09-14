@@ -6,6 +6,7 @@ use toge_core::ipc::ResultRow;
 pub struct Results {
     rows: RefCell<Vec<ResultRow>>,
     order: RefCell<Vec<usize>>,
+    rendered: RefCell<Vec<Option<ModelRc<StandardListViewItem>>>>,
     sort: Cell<Option<(i32, bool)>>,
     pub size_indexed: Cell<bool>,
     notify: ModelNotify,
@@ -28,12 +29,22 @@ impl Results {
     }
     pub fn replace(&self, rows: Vec<ResultRow>) {
         *self.order.borrow_mut() = (0..rows.len()).collect();
+        let rendered_len = rows.len();
         *self.rows.borrow_mut() = rows;
+        let mut rendered = self.rendered.borrow_mut();
+        rendered.clear();
+        rendered.resize_with(rendered_len, || None);
         self.resort();
     }
     pub fn sort(&self, column: i32, ascending: bool) {
         self.sort.set(Some((column, ascending)));
         self.resort();
+    }
+    pub fn set_size_indexed(&self, value: bool) {
+        if self.size_indexed.replace(value) != value {
+            self.rendered.borrow_mut().fill(None);
+            self.notify.reset();
+        }
     }
     fn resort(&self) {
         if let Some((column, ascending)) = self.sort.get() {
@@ -60,6 +71,11 @@ impl Model for Results {
     }
     fn row_data(&self, row: usize) -> Option<Self::Data> {
         let index = *self.order.borrow().get(row)?;
+
+        if let Some(rendered) = self.rendered.borrow()[index].clone() {
+            return Some(rendered);
+        }
+
         let rows = self.rows.borrow();
         let r = &rows[index];
         let size = if self.size_indexed.get() {
@@ -67,7 +83,7 @@ impl Model for Results {
         } else {
             "—".into()
         };
-        Some(ModelRc::new(VecModel::from(
+        let rendered = ModelRc::new(VecModel::from(
             vec![
                 r.name.clone(),
                 r.parent.clone(),
@@ -77,7 +93,9 @@ impl Model for Results {
             .into_iter()
             .map(|text| StandardListViewItem::from(slint::SharedString::from(text)))
             .collect::<Vec<_>>(),
-        )))
+        ));
+        self.rendered.borrow_mut()[index] = Some(rendered.clone());
+        Some(rendered)
     }
     fn model_tracker(&self) -> &dyn ModelTracker {
         &self.notify

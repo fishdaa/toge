@@ -63,75 +63,95 @@ impl Mailbox {
 }
 
 pub fn start(mailbox: Arc<Mailbox>, ui: slint::Weak<crate::AppWindow>) {
+    // Serializes only the daemon-launch check, not query handling: each dispatched
+    // query runs on its own thread so a slow/stale query (e.g. a broad substring
+    // scan that takes ~1s server-side) can't stall a fresher one that supersedes
+    // it mid-flight, the way a single shared worker thread would.
+    let daemon_start = Arc::new(Mutex::new(()));
     std::thread::spawn(move || {
         let socket = crate::client::socket_path();
         while let Some(q) = mailbox.next() {
-            let outcome = (|| {
-                crate::client::ensure_daemon_running(&socket)?;
-                let deadline = Instant::now() + Duration::from_secs(30);
-                loop {
-                    if !mailbox.current(q.id) {
-                        return Err(std::io::Error::other("superseded"));
-                    }
-                    let status = crate::client::status(&socket)?;
-                    if status.status == toge_core::ipc::DaemonStatus::Ready {
-                        break;
-                    }
-                    let message = format!("{:?}: {}", status.status, status.status_message);
-                    let m = mailbox.clone();
-                    let id = q.id;
-                    let _ = ui.upgrade_in_event_loop(move |ui| {
-                        if m.current(id) {
-                            ui.set_status(message.into());
-                        }
-                    });
-                    if Instant::now() >= deadline {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            "Daemon is still indexing. Retry shortly.",
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(200));
-                }
-                crate::client::query(&socket, q.id, &q.text, 10_000, 0)
-            })();
+            let mailbox = mailbox.clone();
+            let ui = ui.clone();
+            let socket = socket.clone();
+            let daemon_start = daemon_start.clone();
+            std::thread::spawn(move || run_query(q, &mailbox, &ui, &socket, &daemon_start));
+        }
+    });
+}
+
+fn run_query(
+    q: Query,
+    mailbox: &Arc<Mailbox>,
+    ui: &slint::Weak<crate::AppWindow>,
+    socket: &std::path::Path,
+    daemon_start: &Arc<Mutex<()>>,
+) {
+    let outcome = (|| {
+        {
+            let _guard = daemon_start.lock().unwrap();
+            crate::client::ensure_daemon_running(socket)?;
+        }
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            if !mailbox.current(q.id) {
+                return Err(std::io::Error::other("superseded"));
+            }
+            let status = crate::client::status(socket)?;
+            if status.status == toge_core::ipc::DaemonStatus::Ready {
+                break;
+            }
+            let message = format!("{:?}: {}", status.status, status.status_message);
             let m = mailbox.clone();
-            let size_indexed = config_size_indexed();
+            let id = q.id;
             let _ = ui.upgrade_in_event_loop(move |ui| {
-                if !m.current(q.id) {
-                    return;
-                }
-                ui.set_busy(false);
-                match outcome {
-                    Ok(response) => {
-                        ui.set_has_error(false);
-                        let model = ui.get_rows();
-                        let results = model
-                            .as_any()
-                            .downcast_ref::<crate::model::Results>()
-                            .unwrap();
-                        let selected = results.path(ui.get_selected());
-                        let n = response.rows.len();
-                        results.size_indexed.set(size_indexed);
-                        results.replace(response.rows);
-                        let index = selected.as_deref().map_or(-1, |p| results.find(p));
-                        ui.invoke_select_row(if index >= 0 {
-                            index
-                        } else if n > 0 {
-                            0
-                        } else {
-                            -1
-                        });
-                        ui.set_status(
-                            format!("Showing {n} of {} matches", response.total_count).into(),
-                        );
-                    }
-                    Err(error) => {
-                        ui.set_has_error(true);
-                        ui.set_status(format!("{error} — Retry to reconnect").into());
-                    }
+                if m.current(id) {
+                    ui.set_status(message.into());
                 }
             });
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Daemon is still indexing. Retry shortly.",
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        crate::client::query(socket, q.id, &q.text, usize::MAX, 0)
+    })();
+    let m = mailbox.clone();
+    let size_indexed = config_size_indexed();
+    let _ = ui.upgrade_in_event_loop(move |ui| {
+        if !m.current(q.id) {
+            return;
+        }
+        ui.set_busy(false);
+        match outcome {
+            Ok(response) => {
+                ui.set_has_error(false);
+                let model = ui.get_rows();
+                let results = model
+                    .as_any()
+                    .downcast_ref::<crate::model::Results>()
+                    .unwrap();
+                let selected = results.path(ui.get_selected());
+                let n = response.rows.len();
+                results.set_size_indexed(size_indexed);
+                results.replace(response.rows);
+                let index = selected.as_deref().map_or(-1, |p| results.find(p));
+                ui.invoke_select_row(if index >= 0 {
+                    index
+                } else if n > 0 {
+                    0
+                } else {
+                    -1
+                });
+                ui.set_status(format!("Showing {n} of {} matches", response.total_count).into());
+            }
+            Err(error) => {
+                ui.set_has_error(true);
+                ui.set_status(format!("{error} — Retry to reconnect").into());
+            }
         }
     });
 }
