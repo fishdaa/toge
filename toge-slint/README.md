@@ -35,12 +35,16 @@ The initial empty query lists indexed entries. Use Up/Down in the table, Enter
 or double-click to open, Ctrl+C in the table to copy the selected path, and Ctrl+L
 to return to the search field. Buttons also expose open/copy/open-parent actions.
 Column headers sort the loaded results. Size and modified time sort numerically.
-Selection follows the full path across sorting and result replacement.
+Sorting clears the selection and returns the list to the top. Selection follows
+the full path when search results are replaced.
 
 Results are capped at 10,000 and the status shows returned and total counts.
+Narrow the search to find matches beyond that limit.
 Sorting applies only to those returned rows. Missing indexed sizes display `—`.
 Connection/indexing errors appear in the status area; Retry resubmits the current
-query. Socket reads/writes have timeouts, and superseded results/errors are ignored.
+query. Query responses have a 30-second timeout; status checks have a two-second
+timeout and retry while the daemon is busy, within the readiness deadline.
+Superseded results/errors are ignored.
 
 This MVP does not implement tray/global shortcuts, autostart, settings editing,
 diagnostics, destructive file actions, persistent column widths, multiple windows,

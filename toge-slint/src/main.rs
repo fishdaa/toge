@@ -55,9 +55,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(ui) = weak.upgrade() {
             let model = ui.get_rows();
             let results = model.as_any().downcast_ref::<model::Results>().unwrap();
-            let path = results.path(ui.get_selected());
             results.sort(column, ascending);
-            ui.invoke_select_row(path.as_deref().map_or(-1, |p| results.find(p)));
+            ui.invoke_select_row(-1);
         }
     });
     let weak = ui.as_weak();

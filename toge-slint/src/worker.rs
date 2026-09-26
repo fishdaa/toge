@@ -97,7 +97,20 @@ fn run_query(
             if !mailbox.current(q.id) {
                 return Err(std::io::Error::other("superseded"));
             }
-            let status = crate::client::status(socket)?;
+            if Instant::now() >= deadline {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "Daemon is still busy or indexing. Retry shortly.",
+                ));
+            }
+            let status = match crate::client::status(socket) {
+                Ok(status) => status,
+                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                    std::thread::sleep(Duration::from_millis(200));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if status.status == toge_core::ipc::DaemonStatus::Ready {
                 break;
             }
@@ -117,7 +130,7 @@ fn run_query(
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        crate::client::query(socket, q.id, &q.text, usize::MAX, 0)
+        crate::client::query(socket, q.id, &q.text, 0)
     })();
     let m = mailbox.clone();
     let size_indexed = config_size_indexed();

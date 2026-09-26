@@ -44,7 +44,10 @@ fn daemon_command(sock: &Path) -> Command {
 
 pub fn ensure_daemon_running(sock: &Path) -> io::Result<()> {
     match status(sock) {
+        // A connected daemon may be busy with another query holding its index lock.
+        // A status timeout is not evidence that it needs to be launched again.
         Ok(_) => return Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::TimedOut => return Ok(()),
         Err(e)
             if matches!(
                 e.kind(),
@@ -78,9 +81,14 @@ pub fn ensure_daemon_running(sock: &Path) -> io::Result<()> {
     ))
 }
 
-fn connect(sock: &Path) -> io::Result<UnixStream> {
+const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+// Keep broad searches within the IPC frame and row limits.
+const MAX_DISPLAY_RESULTS: usize = 10_000;
+const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
+
+fn connect(sock: &Path, timeout: Duration) -> io::Result<UnixStream> {
     let stream = UnixStream::connect(sock)?;
-    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     Ok(stream)
 }
@@ -94,6 +102,22 @@ fn send_request(stream: &mut UnixStream, req: &Request) -> io::Result<()> {
 }
 
 fn read_response(stream: &mut UnixStream) -> io::Result<Response> {
+    read_response_frame(stream).map_err(|error| {
+        if matches!(
+            error.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        ) {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Daemon response timed out. Retry shortly.",
+            )
+        } else {
+            error
+        }
+    })
+}
+
+fn read_response_frame(stream: &mut UnixStream) -> io::Result<Response> {
     let mut len_buf = [0u8; 8];
     stream.read_exact(&mut len_buf)?;
     let len = u64::from_le_bytes(len_buf) as usize;
@@ -109,7 +133,7 @@ fn read_response(stream: &mut UnixStream) -> io::Result<Response> {
 }
 
 pub fn status(sock: &Path) -> io::Result<StatusResponse> {
-    let mut stream = connect(sock)?;
+    let mut stream = connect(sock, STATUS_TIMEOUT)?;
     send_request(&mut stream, &Request::Status)?;
     match read_response(&mut stream)? {
         Response::Status(s) => Ok(s),
@@ -121,18 +145,12 @@ pub fn status(sock: &Path) -> io::Result<StatusResponse> {
     }
 }
 
-pub fn query(
-    sock: &Path,
-    id: u64,
-    raw: &str,
-    max_results: usize,
-    offset: usize,
-) -> io::Result<ResultsResponse> {
-    let mut stream = connect(sock)?;
+pub fn query(sock: &Path, id: u64, raw: &str, offset: usize) -> io::Result<ResultsResponse> {
+    let mut stream = connect(sock, QUERY_TIMEOUT)?;
     let req = Request::Query(QueryRequest {
         id,
         raw: raw.to_string(),
-        max_results,
+        max_results: MAX_DISPLAY_RESULTS,
         offset,
         format: toge_core::ipc::OutputFormat::Default,
         highlight: false,
@@ -184,10 +202,24 @@ mod tests {
             .set_read_timeout(Some(Duration::from_millis(30)))
             .unwrap();
         let error = read_response(&mut reader).unwrap_err();
-        assert!(matches!(
-            error.kind(),
-            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
-        ));
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("Daemon response timed out"));
+    }
+
+    #[test]
+    fn busy_daemon_status_does_not_trigger_a_new_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 9];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(request[8], 2); // Status request
+            thread::sleep(STATUS_TIMEOUT + Duration::from_millis(100));
+        });
+        assert!(ensure_daemon_running(&path).is_ok());
+        server.join().unwrap();
     }
 
     #[test]
@@ -210,6 +242,10 @@ mod tests {
                     }
                     _ => panic!("expected query"),
                 }
+                // A valid query may take longer than the status timeout.
+                if response_id == 7 {
+                    thread::sleep(STATUS_TIMEOUT + Duration::from_millis(100));
+                }
                 let response = Response::Results(ResultsResponse {
                     id: response_id,
                     total_count: 0,
@@ -222,7 +258,7 @@ mod tests {
                     .unwrap();
                 stream.write_all(&response).unwrap();
             });
-            let result = query(&path, 7, "ext:pdf", 10_000, 0);
+            let result = query(&path, 7, "ext:pdf", 0);
             assert_eq!(result.is_ok(), response_id == 7);
             server.join().unwrap();
         }
