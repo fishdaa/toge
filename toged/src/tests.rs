@@ -423,3 +423,39 @@ fn is_within_roots_rejects_paths_outside_home_root() {
     ));
     assert!(!is_within_roots("/var/tmp/outside.txt", &[home]));
 }
+
+#[test]
+fn unlimited_query_returns_every_match_and_handles_nonzero_offsets() {
+    let mut index = Index::new();
+    for i in 0..10_003 {
+        index.insert(&format!("/unlimited/file-{i:05}.txt"), false);
+    }
+    for offset in [0, 3, usize::MAX] {
+        let Response::Results(results) = handle_query(
+            &mut index,
+            &QueryRequest {
+                id: 7,
+                raw: String::new(),
+                max_results: usize::MAX,
+                offset,
+                format: OutputFormat::Default,
+                highlight: false,
+            },
+            false,
+        ) else {
+            panic!("expected results")
+        };
+        assert_eq!(results.total_count, 10_003);
+        assert_eq!(results.rows.len(), 10_003 - offset.min(10_003));
+        if offset < 10_003 {
+            assert_eq!(
+                results.rows[0].path,
+                format!("/unlimited/file-{offset:05}.txt")
+            );
+            assert_eq!(
+                results.rows.last().unwrap().path,
+                "/unlimited/file-10002.txt"
+            );
+        }
+    }
+}

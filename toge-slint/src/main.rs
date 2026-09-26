@@ -1,14 +1,28 @@
+mod access;
+mod actions;
 mod client;
 mod format;
 mod model;
+mod preferences;
 mod worker;
 use slint::{ComponentHandle, Model};
 use std::{rc::Rc, sync::Arc};
 slint::include_modules!();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|arg| arg == "--request-watcher-access")
+    {
+        if args.len() != 2 {
+            return Err("Usage: toge-slint --request-watcher-access path/to/toged".into());
+        }
+        return access::request(std::path::Path::new(&args[1]));
+    }
     let ui = AppWindow::new()?;
     ui.set_rows(slint::ModelRc::from(Rc::new(model::Results::default())));
+    preferences::connect(&ui, preferences::path());
     let about = Rc::new(std::cell::RefCell::new(None::<AboutWindow>));
     ui.on_about(move || {
         let mut window = about.borrow_mut();
@@ -51,15 +65,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let weak = ui.as_weak();
-    ui.on_sort_results(move |column, ascending| {
-        if let Some(ui) = weak.upgrade() {
-            let model = ui.get_rows();
-            let results = model.as_any().downcast_ref::<model::Results>().unwrap();
-            results.sort(column, ascending);
-            ui.invoke_select_row(-1);
-        }
-    });
-    let weak = ui.as_weak();
     let last_click = std::cell::RefCell::new(None::<(String, std::time::Instant)>);
     ui.on_row_clicked(move |index| {
         if let Some(ui) = weak.upgrade() {
@@ -79,65 +84,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     });
-    let weak = ui.as_weak();
-    ui.on_action(move |action| {
-        let Some(ui) = weak.upgrade() else {
-            return;
-        };
-        let model = ui.get_rows();
-        let results = model.as_any().downcast_ref::<model::Results>().unwrap();
-        let Some(path) = results.path(ui.get_selected()) else {
-            return;
-        };
-        let weak = ui.as_weak();
-        std::thread::spawn(move || {
-            if let Err(e) = file_action(&action, &path) {
-                let _ = weak.upgrade_in_event_loop(move |ui| {
-                    ui.set_status(format!("Action failed: {e}").into())
-                });
-            }
-        });
-    });
+    actions::connect(&ui);
     let result = ui.run();
     mailbox.close();
     result?;
     Ok(())
-}
-fn file_action(action: &str, path: &str) -> std::io::Result<()> {
-    use std::process::{Command, Stdio};
-    if action == "copy" {
-        use std::io::Write;
-        for (program, args) in [
-            ("wl-copy", vec![]),
-            ("xclip", vec!["-selection", "clipboard"]),
-            ("xsel", vec!["--clipboard", "--input"]),
-        ] {
-            let Ok(mut child) = Command::new(program)
-                .args(args)
-                .stdin(Stdio::piped())
-                .spawn()
-            else {
-                continue;
-            };
-            child.stdin.take().unwrap().write_all(path.as_bytes())?;
-            if child.wait()?.success() {
-                return Ok(());
-            }
-        }
-        return Err(std::io::Error::other(
-            "Install wl-clipboard (Wayland) or xclip/xsel (X11)",
-        ));
-    }
-    let target = if action == "parent" {
-        std::path::Path::new(path)
-            .parent()
-            .unwrap_or(std::path::Path::new(path))
-    } else {
-        std::path::Path::new(path)
-    };
-    if Command::new("xdg-open").arg(target).status()?.success() {
-        Ok(())
-    } else {
-        Err(std::io::Error::other("xdg-open failed"))
-    }
 }

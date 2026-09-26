@@ -9,11 +9,14 @@ case "${1:-}" in
   *) echo "Usage: $0 [--release]" >&2; exit 2 ;;
 esac
 cd "$REPO_ROOT"
-cargo build "${CARGO_ARGS[@]}" -p toge-slint -p toged
 DEV_PROFILE="${TOGE_DEV_PROFILE:-slint}"
 case "$DEV_PROFILE" in
   ""|*[!A-Za-z0-9._-]*) echo "Invalid TOGE_DEV_PROFILE" >&2; exit 2 ;;
 esac
+cargo build "${CARGO_ARGS[@]}" -p toge-slint -p toged
+# Ask through the native Slint UI if this build lost its file capabilities.
+"$REPO_ROOT/target/$BUILD_PROFILE/toge-slint" --request-watcher-access "$REPO_ROOT/target/$BUILD_PROFILE/toged"
+bash "$REPO_ROOT/scripts/check-toged-capabilities.sh" "$REPO_ROOT/target/$BUILD_PROFILE/toged"
 DEV_RUNTIME_DIR="$(mktemp -d /tmp/toge-slint-dev.XXXXXX)"
 PID_DAEMON=""
 cleanup() {

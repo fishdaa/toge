@@ -455,7 +455,7 @@ fn handle_query(index: &mut Index, q: &QueryRequest, index_size: bool) -> Respon
     let total_size: u64 = ids.iter().map(|id| index.entries[*id as usize].size).sum();
 
     let offset = q.offset.min(total);
-    let end = (offset + q.max_results).min(total);
+    let end = offset.saturating_add(q.max_results).min(total);
     let page = &ids[offset..end];
 
     let rows: Vec<ResultRow> = page

@@ -36,6 +36,69 @@ impl Results {
         rendered.resize_with(rendered_len, || None);
         self.resort();
     }
+    pub fn append(&self, rows: Vec<ResultRow>) {
+        let start = self.rows.borrow().len();
+        let count = rows.len();
+        if count == 0 {
+            return;
+        }
+        self.rows.borrow_mut().extend(rows);
+        self.order.borrow_mut().extend(start..start + count);
+        self.rendered
+            .borrow_mut()
+            .resize_with(start + count, || None);
+        if self.sort.get().is_some() {
+            self.resort();
+        } else {
+            self.notify.row_added(start, count);
+        }
+    }
+    pub fn remove_path(&self, path: &str) {
+        let prefix = format!("{path}/");
+        let rows = self
+            .rows
+            .borrow()
+            .iter()
+            .filter(|row| row.path != path && !row.path.starts_with(&prefix))
+            .cloned()
+            .collect();
+        self.replace(rows);
+    }
+    pub fn rename_path(&self, old: &str, new: &str) {
+        let prefix = format!("{old}/");
+        let rows = self
+            .rows
+            .borrow()
+            .iter()
+            .cloned()
+            .map(|mut row| {
+                if row.path == old || row.path.starts_with(&prefix) {
+                    row.path = format!("{new}{}", &row.path[old.len()..]);
+                    let path = std::path::Path::new(&row.path);
+                    row.name = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
+                    row.parent = path
+                        .parent()
+                        .unwrap_or(std::path::Path::new("/"))
+                        .to_string_lossy()
+                        .into_owned();
+                    row.extension = if row.is_dir {
+                        String::new()
+                    } else {
+                        path.extension()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned()
+                    };
+                }
+                row
+            })
+            .collect();
+        self.replace(rows);
+    }
     pub fn sort(&self, column: i32, ascending: bool) {
         self.sort.set(Some((column, ascending)));
         self.resort();
@@ -120,6 +183,58 @@ mod tests {
             created_unix: 0,
             accessed_unix: 0,
         }
+    }
+    #[test]
+    fn appending_keeps_cached_rows_and_active_sort() {
+        let m = Results::default();
+        m.replace(vec![row("large", 100), row("small", 9)]);
+        let cached = m.row_data(0).unwrap();
+        m.append(vec![row("middle", 20)]);
+        assert_eq!(m.path(0).as_deref(), Some("large"));
+        assert_eq!(m.row_count(), 3);
+        assert_eq!(m.row_data(0).unwrap(), cached);
+        m.sort(2, true);
+        m.append(vec![row("tiny", 1)]);
+        assert_eq!(m.path(0).as_deref(), Some("tiny"));
+        assert_eq!(m.find("large"), 3);
+        m.append(vec![]);
+        assert_eq!(m.row_count(), 4);
+    }
+    #[test]
+    fn renaming_updates_descendants_cached_cells_and_sort_order() {
+        let m = Results::default();
+        let mut directory = row("/tmp/old", 0);
+        directory.is_dir = true;
+        m.replace(vec![
+            directory,
+            row("/tmp/old/child.txt", 1),
+            row("/tmp/older/keep", 2),
+        ]);
+        m.sort(1, true);
+        let _ = m.row_data(m.find("/tmp/old/child.txt") as usize).unwrap();
+        m.rename_path("/tmp/old", "/tmp/new");
+        assert_eq!(m.find("/tmp/old"), -1);
+        assert_eq!(m.row_count(), 3);
+        let child = m.find("/tmp/new/child.txt") as usize;
+        let cells = m.row_data(child).unwrap();
+        assert_eq!(cells.row_data(0).unwrap().text, "child.txt");
+        assert_eq!(cells.row_data(1).unwrap().text, "/tmp/new");
+        assert!(m.find("/tmp/older/keep") >= 0);
+        assert_eq!(m.rows.borrow()[1].extension, "txt");
+        m.rename_path("/tmp/new/child.txt", "/tmp/new/child.pdf");
+        assert_eq!(m.rows.borrow()[1].extension, "pdf");
+    }
+    #[test]
+    fn removing_directory_removes_only_its_descendants() {
+        let m = Results::default();
+        m.replace(vec![
+            row("/tmp/old", 0),
+            row("/tmp/old/child", 1),
+            row("/tmp/older/keep", 2),
+        ]);
+        m.remove_path("/tmp/old");
+        assert_eq!(m.row_count(), 1);
+        assert_eq!(m.path(0).as_deref(), Some("/tmp/older/keep"));
     }
     #[test]
     fn numeric_sort_and_path_selection_survive_replacement() {

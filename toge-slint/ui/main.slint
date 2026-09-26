@@ -1,4 +1,4 @@
-import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette } from "std-widgets.slint";
+import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette, ScrollView } from "std-widgets.slint";
 
 component ContextMenuItem {
     in property <string> label;
@@ -26,6 +26,38 @@ component ContextMenuItem {
     }
 }
 
+export component AccessWindow inherits Window {
+    title: "Toge — Live updates";
+    preferred-width: 460px; preferred-height: 320px;
+    min-width: 420px; min-height: 300px;
+    background: Palette.background;
+    in property <bool> granting: false;
+    in property <string> message: "";
+    callback approve();
+    callback cancel();
+    VerticalLayout {
+        padding: 24px; spacing: 16px;
+        Text { text: "Enable live file updates?"; font-size: 21px; font-weight: 700; color: Palette.foreground; }
+        Text {
+            text: "Toge needs administrator approval to monitor filesystem changes and keep search results up to date.";
+            wrap: word-wrap; color: Palette.foreground;
+        }
+        Text {
+            text: "This grants elevated filesystem access to the Toge background service. Approval applies to this build; rebuilding may require approval again.";
+            wrap: word-wrap; color: Palette.foreground;
+        }
+        Text {
+            text: root.granting ? "Waiting for system approval…" : root.message;
+            wrap: word-wrap; color: Palette.foreground;
+        }
+        HorizontalLayout {
+            spacing: 12px;
+            Button { text: "Cancel"; enabled: !root.granting; clicked => { root.cancel(); } }
+            Button { text: root.granting ? "Waiting…" : "Enable live updates"; enabled: !root.granting; clicked => { root.approve(); } }
+        }
+    }
+}
+
 export component AboutWindow inherits Window {
     title: "About Toge";
     width: 360px; height: 270px;
@@ -50,6 +82,14 @@ export component AppWindow inherits Window {
     in-out property <bool> context-menu-open: false;
     in-out property <length> context-menu-x: 0px;
     in-out property <length> context-menu-y: 0px;
+    in-out property <int> sort-column: -1;
+    in-out property <bool> sort-ascending: true;
+    in-out property <int> rename-row: -1;
+    in-out property <string> rename-path;
+    in-out property <string> rename-name;
+    in-out property <bool> rename-working: false;
+    private property <int> rename-selection-end;
+    callback rename-commit(string);
     callback query-edited(string);
     callback submit(string);
     callback sort-results(int, bool);
@@ -61,6 +101,45 @@ export component AppWindow inherits Window {
         root.selected = index;
         selection-scroll.start();
     }
+    public function apply-sort(column: int, ascending: bool) {
+        root.cancel-rename(false);
+        root.context-menu-open = false;
+        root.sort-column = column;
+        root.sort-ascending = ascending;
+        table.columns[0].sort-order = column == 0 ? (ascending ? SortOrder.ascending : SortOrder.descending) : SortOrder.unsorted;
+        table.columns[1].sort-order = column == 1 ? (ascending ? SortOrder.ascending : SortOrder.descending) : SortOrder.unsorted;
+        table.columns[2].sort-order = column == 2 ? (ascending ? SortOrder.ascending : SortOrder.descending) : SortOrder.unsorted;
+        table.columns[3].sort-order = column == 3 ? (ascending ? SortOrder.ascending : SortOrder.descending) : SortOrder.unsorted;
+    }
+    public function begin-rename(index: int, name: string, selection-end: int) {
+        root.rename-row = index;
+        root.rename-name = name;
+        root.rename-selection-end = selection-end;
+        root.context-menu-open = false;
+        table.viewport-x = 0px;
+        table.set-current-row(index);
+        rename-focus.start();
+    }
+    public function focus-rename() { inline-name.focus(); }
+    public function cancel-rename(return-focus: bool) {
+        if (root.rename-working) { return; }
+        rename-focus.stop();
+        root.rename-row = -1;
+        root.rename-path = "";
+        root.rename-name = "";
+        if (return-focus) { table.focus(); }
+    }
+    rename-focus := Timer {
+        interval: 1ms;
+        triggered => {
+            self.stop();
+            if (root.rename-row >= 0) {
+                inline-name.focus();
+                inline-name.set-selection-offsets(0, root.rename-selection-end);
+            }
+        }
+    }
+
     // Wait for the new result model to lay out before calculating scroll offsets.
     selection-scroll := Timer {
         interval: 1ms;
@@ -76,7 +155,7 @@ export component AppWindow inherits Window {
         width: 100%; height: 100%;
         key-pressed(event) => {
             if (event.modifiers.control && event.text == "l") {
-                search.focus(); search.select-all(); return accept;
+                root.cancel-rename(false); search.focus(); search.select-all(); return accept;
             }
             return reject;
         }
@@ -87,11 +166,24 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     padding-left: 16px; padding-right: 16px;
                     padding-top: 14px; padding-bottom: 14px; spacing: 12px;
-                    Text { text: "toge"; font-size: 19px; font-weight: 700; color: Palette.foreground; }
+                    Rectangle {
+                        width: logo.preferred-width;
+                        accessible-role: button;
+                        accessible-label: "About Toge";
+                        logo := Text {
+                            text: "toge"; font-size: 19px; font-weight: 700;
+                            color: Palette.foreground; vertical-alignment: center;
+                        }
+                        TouchArea {
+                            width: 100%; height: 100%; mouse-cursor: pointer;
+                            clicked => { root.cancel-rename(false); root.context-menu-open = false; root.about(); }
+                        }
+                    }
                     search := LineEdit {
                         horizontal-stretch: 1;
                         placeholder-text: "Search files and folders…";
-                        edited(text) => { root.query-edited(text); }
+                        enabled: !root.rename-working;
+                        edited(text) => { root.cancel-rename(false); root.query-edited(text); }
                         accepted(text) => { root.submit(text); }
                     }
                     if root.has-error: Button {
@@ -105,23 +197,32 @@ export component AppWindow inherits Window {
                 vertical-stretch: 1;
                 forward-focus: table;
                 key-pressed(event) => {
+                    // Let the inline field handle text shortcuts and Enter itself.
+                    if (root.rename-path != "") { return reject; }
                     if (event.text == Key.Return) { root.action("open"); return accept; }
-                    if (event.modifiers.control && event.text == "c") { root.action("copy"); return accept; }
+                    if (event.modifiers.control && event.text == "c") { root.action(event.modifiers.shift ? "copy-path" : "copy"); return accept; }
+                    if (event.modifiers.control && event.text == "x") { root.action("cut"); return accept; }
+                    if (event.text == Key.F2) { root.action("rename"); return accept; }
+                    if (event.text == Key.Delete) { root.action("delete"); return accept; }
+                    if (event.text == Key.Escape) { root.context-menu-open = false; return accept; }
                     return reject;
                 }
                 table := StandardTableView {
                     width: 100%; height: 100%;
                     rows: root.rows;
+                    enabled: !root.rename-working;
                     current-row <=> root.selected;
                     columns: [
                         { title: "Name", width: 220px, min-width: 140px },
                         { title: "Path", width: 340px, min-width: 160px },
                         { title: "Size", width: 90px, min-width: 70px },
-                        { title: "Modified", width: 150px, min-width: 120px }
+                        // Fill the remaining width even before any rows are loaded.
+                        { title: "Modified", width: 0px, min-width: 150px, horizontal-stretch: 1 }
                     ];
                     sort-ascending(column) => { root.sort-results(column, true); }
                     sort-descending(column) => { root.sort-results(column, false); }
                     row-pointer-event(index, event, position) => {
+                        if (event.kind == PointerEventKind.down) { root.cancel-rename(false); }
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                             root.selected = index;
                             root.context-menu-x = position.x;
@@ -131,6 +232,47 @@ export component AppWindow inherits Window {
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                             root.context-menu-open = false;
                             root.selected = index; root.row-clicked(index);
+                        }
+                    }
+                }
+                // StandardTableView's selection fill can match its row stripes.
+                // Tint only the selected row, using the same virtual row geometry
+                // as the table's own scrolling and keyboard selection.
+                if root.selected >= 0 && root.selected < root.rows.length: Rectangle {
+                    x: 0px; y: table.height - table.visible-height;
+                    width: table.visible-width; height: table.visible-height;
+                    clip: true;
+                    Rectangle {
+                        y: table.viewport-y + root.selected * self.height;
+                        width: parent.width;
+                        height: table.viewport-height / max(1, root.rows.length);
+                        background: Palette.selection-background;
+                        opacity: 0.32;
+                    }
+                }
+                // Use the table's own viewport geometry so the editor follows
+                // the Name cell through scrolling, column resizing, and window resizing.
+                Rectangle {
+                    visible: root.rename-row >= 0;
+                    x: 0px; y: table.height - table.visible-height;
+                    width: table.visible-width; height: table.visible-height;
+                    clip: true;
+                    inline-name := LineEdit {
+                        x: table.viewport-x + 4px;
+                        y: table.viewport-y + root.rename-row * (table.viewport-height / max(1, root.rows.length)) + 1px;
+                        width: max(table.columns[0].width, table.columns[0].min-width) - 8px;
+                        height: max(1px, table.viewport-height / max(1, root.rows.length) - 2px);
+                        text <=> root.rename-name;
+                        enabled: !root.rename-working;
+                        accepted(text) => { root.rename-commit(text); }
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) { root.cancel-rename(true); return accept; }
+                            return reject;
+                        }
+                        changed has-focus => {
+                            if (!self.has-focus && root.rename-path != "" && !root.rename-working) {
+                                root.cancel-rename(false);
+                            }
                         }
                     }
                 }
@@ -164,16 +306,20 @@ export component AppWindow inherits Window {
                     clicked => { root.context-menu-open = false; }
                 }
                 if root.context-menu-open: Rectangle {
-                    x: min(root.context-menu-x, parent.width - self.width - 8px);
-                    y: min(root.context-menu-y, parent.height - self.height - 8px);
-                    width: 184px; height: 137px;
+                    x: max(8px, min(root.context-menu-x, parent.width - self.width - 8px));
+                    y: max(8px, min(root.context-menu-y, parent.height - self.height - 8px));
+                    width: 184px; height: min(229px, parent.height - 16px);
                     background: Palette.background;
                     border-width: 1px;
                     border-color: Palette.foreground;
                     border-radius: 4px;
                     drop-shadow-blur: 12px;
                     drop-shadow-color: #40000000;
-                    VerticalLayout {
+                    ScrollView {
+                      width: parent.width; height: parent.height;
+                      viewport-width: self.visible-width;
+                      VerticalLayout {
+                        height: 229px;
                         padding-top: 5px; padding-bottom: 5px;
                         spacing: 1px;
                         ContextMenuItem {
@@ -182,7 +328,7 @@ export component AppWindow inherits Window {
                         }
                         ContextMenuItem {
                             label: "Copy path";
-                            activated => { root.context-menu-open = false; root.action("copy"); }
+                            activated => { root.context-menu-open = false; root.action("copy-path"); }
                         }
                         ContextMenuItem {
                             label: "Open folder";
@@ -193,10 +339,11 @@ export component AppWindow inherits Window {
                             background: Palette.foreground;
                             opacity: 0.12;
                         }
-                        ContextMenuItem {
-                            label: "About";
-                            activated => { root.context-menu-open = false; root.about(); }
-                        }
+                        ContextMenuItem { label: "Copy"; activated => { root.context-menu-open = false; root.action("copy"); } }
+                        ContextMenuItem { label: "Cut"; activated => { root.context-menu-open = false; root.action("cut"); } }
+                        ContextMenuItem { label: "Rename"; activated => { root.context-menu-open = false; root.action("rename"); } }
+                        ContextMenuItem { label: "Delete"; activated => { root.context-menu-open = false; root.action("delete"); } }
+                      }
                     }
                 }
             }

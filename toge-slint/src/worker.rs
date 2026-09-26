@@ -87,6 +87,7 @@ fn run_query(
     socket: &std::path::Path,
     daemon_start: &Arc<Mutex<()>>,
 ) {
+    let size_indexed = config_size_indexed();
     let outcome = (|| {
         {
             let _guard = daemon_start.lock().unwrap();
@@ -130,44 +131,111 @@ fn run_query(
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        crate::client::query(socket, q.id, &q.text, 0)
-    })();
-    let m = mailbox.clone();
-    let size_indexed = config_size_indexed();
-    let _ = ui.upgrade_in_event_loop(move |ui| {
-        if !m.current(q.id) {
-            return;
-        }
-        ui.set_busy(false);
-        match outcome {
-            Ok(response) => {
-                ui.set_has_error(false);
-                let model = ui.get_rows();
-                let results = model
-                    .as_any()
-                    .downcast_ref::<crate::model::Results>()
-                    .unwrap();
-                let selected = results.path(ui.get_selected());
-                let n = response.rows.len();
-                results.set_size_indexed(size_indexed);
-                results.replace(response.rows);
-                let index = selected.as_deref().map_or(-1, |p| results.find(p));
-                ui.invoke_select_row(if index >= 0 {
-                    index
-                } else if n > 0 {
-                    0
-                } else {
-                    -1
-                });
-                ui.set_status(format!("Showing {n} of {} matches", response.total_count).into());
+        let selection = Arc::new(Mutex::new(StreamSelection::default()));
+        crate::client::query_stream(socket, q.id, &q.text, 0, |response, first, done| {
+            let selection = selection.clone();
+            if !mailbox.current(q.id) {
+                return Err(std::io::Error::other("superseded"));
             }
-            Err(error) => {
+            let m = mailbox.clone();
+            let id = q.id;
+            ui.upgrade_in_event_loop(move |ui| {
+                if !m.current(id) {
+                    return;
+                }
+                apply_batch(
+                    &ui,
+                    response,
+                    first,
+                    done,
+                    size_indexed,
+                    &mut selection.lock().unwrap(),
+                );
+            })
+            .map_err(|error| std::io::Error::other(error.to_string()))
+        })
+    })();
+    if let Err(error) = outcome {
+        let m = mailbox.clone();
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            if m.current(q.id) {
+                ui.set_busy(false);
                 ui.set_has_error(true);
                 ui.set_status(format!("{error} — Retry to reconnect").into());
             }
-        }
-    });
+        });
+    }
 }
+
+#[derive(Default)]
+struct StreamSelection {
+    preferred: Option<String>,
+    last_selected: Option<String>,
+}
+
+fn apply_batch(
+    ui: &crate::AppWindow,
+    response: toge_core::ipc::ResultsResponse,
+    first: bool,
+    done: bool,
+    size_indexed: bool,
+    selection: &mut StreamSelection,
+) {
+    let model = ui.get_rows();
+    let results = model
+        .as_any()
+        .downcast_ref::<crate::model::Results>()
+        .unwrap();
+    let selected = results.path(ui.get_selected());
+    if first {
+        // The previously selected path may arrive in a later batch.
+        selection.preferred = selected.clone();
+    } else if selected != selection.last_selected {
+        // A selection made during transfer takes precedence.
+        selection.preferred = None;
+    }
+    results.set_size_indexed(size_indexed);
+    if first {
+        results.replace(response.rows);
+    } else {
+        results.append(response.rows);
+    }
+    crate::actions::sync_rename(ui, results);
+    let n = results.row_count();
+    let preferred_index = selection
+        .preferred
+        .as_deref()
+        .map_or(-1, |p| results.find(p));
+    let index = if preferred_index >= 0 {
+        selection.preferred = None;
+        preferred_index
+    } else {
+        selected.as_deref().map_or(-1, |p| results.find(p))
+    };
+    // Avoid reselecting on ordinary appends, which would reset the user's scroll.
+    let next = if index >= 0 {
+        index
+    } else if n > 0 {
+        0
+    } else {
+        -1
+    };
+    if first || next != ui.get_selected() {
+        ui.invoke_select_row(next);
+    }
+    selection.last_selected = results.path(next);
+    ui.set_has_error(false);
+    ui.set_busy(!done);
+    ui.set_status(
+        format!(
+            "Showing {n} of {} matches{}",
+            response.total_count,
+            if done { "" } else { " — Receiving…" },
+        )
+        .into(),
+    );
+}
+
 fn config_size_indexed() -> bool {
     let root = std::env::var_os("XDG_CONFIG_HOME")
         .map(std::path::PathBuf::from)
