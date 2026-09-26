@@ -1,13 +1,15 @@
 use crate::{
     DaemonState, WatcherStatus, apply_highlight_ranges, canonical_starts_with, discover_roots,
     ensure_private_dir, handle_query, handle_request, highlight_path, index_created_path,
-    is_ignored_path, is_own_path, is_within_roots, mark_watcher_unavailable, remove_deleted_path,
-    status_response, term_needles,
+    is_ignored_path, is_own_path, is_within_roots, mark_watcher_unavailable, read_request,
+    remove_deleted_path, status_response, stream_results, term_needles, write_stream_event,
 };
-use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use std::{fs, io, thread};
 
 use toge_core::config::Config;
 use toge_core::index::Index;
@@ -458,4 +460,86 @@ fn unlimited_query_returns_every_match_and_handles_nonzero_offsets() {
             );
         }
     }
+}
+
+#[test]
+fn stream_sends_bounded_batches_and_final_totals_in_both_orders() {
+    use toge_core::ipc::{STREAM_BATCH_SIZE, StreamOrder, StreamQueryRequest};
+    for order in [StreamOrder::Index, StreamOrder::Sorted] {
+        let mut index = Index::new();
+        for i in (0..300).rev() {
+            index.insert_with_metadata(&format!("/tmp/file-{i:04}.txt"), false, i, 0, 0, 0);
+        }
+        let expected_total_size = index.entries.iter().map(|entry| entry.size).sum::<u64>();
+        let request = StreamQueryRequest {
+            query: QueryRequest {
+                id: 7,
+                raw: "file".into(),
+                max_results: 270,
+                offset: 5,
+                format: OutputFormat::Default,
+                highlight: false,
+            },
+            order,
+        };
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let producer_request = request.clone();
+        let producer = thread::spawn(move || {
+            assert_eq!(
+                read_request(&mut server).unwrap(),
+                Some(Request::StreamQuery(producer_request.clone()))
+            );
+            stream_results(&mut server, &producer_request, &mut index, false)
+        });
+        let mut paths = Vec::new();
+        let mut batch_sizes = Vec::new();
+        let summary = toge_core::ipc::stream_query(&mut client, &request, |rows| {
+            batch_sizes.push(rows.len());
+            paths.extend(rows.iter().map(|row| row.path.clone()));
+            Ok(())
+        })
+        .unwrap();
+        producer.join().unwrap().unwrap();
+        assert_eq!(batch_sizes, [STREAM_BATCH_SIZE, STREAM_BATCH_SIZE, 14]);
+        assert_eq!(summary.total_count, 300);
+        assert_eq!(summary.returned_count, 270);
+        assert_eq!(summary.total_size, expected_total_size);
+        match order {
+            StreamOrder::Index => assert_eq!(paths[0], "/tmp/file-0294.txt"),
+            StreamOrder::Sorted => assert_eq!(paths[0], "/tmp/file-0005.txt"),
+        }
+    }
+}
+
+#[test]
+fn disconnected_stream_and_expired_write_stop_promptly() {
+    let mut index = Index::new();
+    index.insert("/tmp/foo.txt", false);
+    let request = toge_core::ipc::StreamQueryRequest {
+        query: QueryRequest {
+            id: 1,
+            raw: "".into(),
+            max_results: usize::MAX,
+            offset: 0,
+            format: OutputFormat::Default,
+            highlight: false,
+        },
+        order: toge_core::ipc::StreamOrder::Index,
+    };
+    let (mut server, client) = UnixStream::pair().unwrap();
+    drop(client);
+    assert!(stream_results(&mut server, &request, &mut index, false).is_err());
+    let (mut server, _client) = UnixStream::pair().unwrap();
+    let event = toge_core::ipc::StreamEvent::Done(toge_core::ipc::StreamSummary {
+        id: 1,
+        total_count: 0,
+        total_size: 0,
+        returned_count: 0,
+    });
+    assert_eq!(
+        write_stream_event(&mut server, &event, Instant::now())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::TimedOut
+    );
 }

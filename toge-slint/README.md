@@ -60,18 +60,29 @@ and direction are saved in `toge/slint-ui.toml` under the active XDG configurati
 directory and restored, including the header arrow, on launch. Selection follows
 the full path when search results are replaced.
 
-Results appear in batches of 128 while the IPC response transfers; the status
-shows “Receiving…” until the final batch arrives. The daemon still completes
-matching and sorting before sending. This uses the existing wire protocol and
-works with older daemons. Editing the query discards stale batches.
-All matching rows are requested; there is no 10,000-row display cap. The status
-shows received and total counts. The existing 256 MB IPC frame limit still applies;
-a larger response reports an error, so narrow the query in that case.
-Column sorting applies to the rows received so far. Missing indexed sizes display `—`.
+The client uses the daemon's stream protocol in index order. Results appear in
+batches of at most 128 during matching, rather than after the daemon collects and
+sorts the full result set. Column headers still sort the received rows locally.
+The status shows the received count while searching and exact totals only after
+the completion summary. The GUI waits for each batch to be applied before reading
+the next, keeping queued UI data bounded.
+
+All matching rows are requested; there is no 10,000-row display cap. Each wire
+frame is limited to 4 MiB; the full result set can span many frames. The GUI still
+stores every received row, so its result model uses O(M) RAM for M displayed
+matches. Missing indexed sizes display `—`.
+
+Editing a query or closing the GUI immediately shuts down the active query socket.
+Stale batches and errors are ignored, and cancellation does not wait for another
+batch to arrive. Streams hold the daemon's index lock, so cancellation also lets
+new searches proceed once the daemon detects the closed socket. Use a daemon
+built with stream support; older daemons display an instruction to restart or
+rebuild `toged`.
+
 Connection/indexing errors appear in the status area; Retry resubmits the current
-query. Query responses have a 30-second timeout; status checks have a two-second
-timeout and retry while the daemon is busy, within the readiness deadline.
-Superseded results/errors are ignored.
+query. Incomplete streams remain errors even if some rows arrived. Query responses
+have a 30-second read timeout; status checks have a two-second timeout and retry
+while the daemon is busy, within the readiness deadline.
 
 This MVP does not implement tray/global shortcuts, autostart, settings editing,
 diagnostics, persistent column widths,

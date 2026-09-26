@@ -1,6 +1,5 @@
 //! Filesystem walking and exclusion logic.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
@@ -106,25 +105,34 @@ pub fn reconcile(
     excludes: &Excludes,
     fetch_metadata: bool,
 ) -> usize {
-    let mut seen = HashSet::with_capacity(index.count());
+    // One flag per entry avoids retaining a second owned copy of every path.
+    let mut seen = vec![false; index.count()];
     let mut count = 0;
 
     for root in roots {
         count += visit(root, excludes, fetch_metadata, |path, is_dir, metadata| {
-            seen.insert(path.to_string());
+            // insert_with_metadata removes and swap-moves an entry when its
+            // file/directory type changes. Mirror that move in the flags.
+            if let Some(id) = index.id_by_path(path) {
+                let entry = &index.entries[id as usize];
+                if entry.path == path && entry.is_dir != is_dir {
+                    seen.swap_remove(id as usize);
+                }
+            }
             let (size, modified, created, accessed) = metadata;
-            index.insert_with_metadata(path, is_dir, size, modified, created, accessed);
+            let id = index.insert_with_metadata(path, is_dir, size, modified, created, accessed);
+            seen.resize(index.count(), false);
+            seen[id as usize] = true;
         });
     }
 
-    let stale: Vec<String> = index
-        .entries
-        .iter()
-        .filter(|entry| !seen.contains(&entry.path))
-        .map(|entry| entry.path.clone())
-        .collect();
-    for path in stale {
-        index.remove(&path);
+    // Work backwards so swap-removal only moves entries already checked.
+    // At most one temporary path is allocated, rather than a vector of all stale paths.
+    for (id, &was_seen) in seen.iter().enumerate().rev() {
+        if !was_seen {
+            let path = index.entries[id].path.clone();
+            index.remove(&path);
+        }
     }
 
     count

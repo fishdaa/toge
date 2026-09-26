@@ -7,6 +7,7 @@ pub const MAX_STATUS_LOG_ENTRIES: usize = 10_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Query(QueryRequest),
+    StreamQuery(StreamQueryRequest),
     Status,
     Flush,
     Reindex,
@@ -21,6 +22,39 @@ pub struct QueryRequest {
     pub offset: usize,
     pub format: OutputFormat,
     pub highlight: bool,
+}
+
+/// Index order avoids a full result-ID buffer; sorted order uses the query's sort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StreamOrder {
+    Index,
+    Sorted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamQueryRequest {
+    pub query: QueryRequest,
+    pub order: StreamOrder,
+}
+
+pub const STREAM_BATCH_SIZE: usize = 128;
+pub const MAX_STREAM_FRAME_SIZE: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamSummary {
+    pub id: u64,
+    pub total_count: usize,
+    pub total_size: u64,
+    pub returned_count: usize,
+}
+
+/// A stream sends zero or more row batches followed by exactly one completion
+/// summary or error. EOF without completion means the stream was interrupted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEvent {
+    Rows { id: u64, rows: Vec<ResultRow> },
+    Done(StreamSummary),
+    Error(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -203,6 +237,14 @@ impl Request {
                 buf.push(q.format.to_u8());
                 buf.push(if q.highlight { 1 } else { 0 });
             }
+            Request::StreamQuery(stream) => {
+                buf = Request::Query(stream.query.clone()).encode();
+                buf[0] = 6;
+                buf.push(match stream.order {
+                    StreamOrder::Index => 0,
+                    StreamOrder::Sorted => 1,
+                });
+            }
             Request::Status => buf.push(2),
             Request::Flush => buf.push(3),
             Request::Reindex => buf.push(4),
@@ -217,7 +259,7 @@ impl Request {
         }
         let mut off = 1;
         match bytes[0] {
-            1 => {
+            1 | 6 => {
                 let id = take_u64(bytes, &mut off).ok_or("missing id")?;
                 let raw = take_string(bytes, &mut off).ok_or("missing raw")?;
                 let max_results = take_usize(bytes, &mut off).ok_or("missing max_results")?;
@@ -233,14 +275,24 @@ impl Request {
                 {
                     off += 1;
                 }
-                Ok(Request::Query(QueryRequest {
+                let query = QueryRequest {
                     id,
                     raw,
                     max_results,
                     offset,
                     format,
                     highlight,
-                }))
+                };
+                if bytes[0] == 6 {
+                    let order = match bytes.get(off) {
+                        Some(0) => StreamOrder::Index,
+                        Some(1) => StreamOrder::Sorted,
+                        _ => return Err("missing or invalid stream order".into()),
+                    };
+                    Ok(Request::StreamQuery(StreamQueryRequest { query, order }))
+                } else {
+                    Ok(Request::Query(query))
+                }
             }
             2 => Ok(Request::Status),
             3 => Ok(Request::Flush),
@@ -251,27 +303,33 @@ impl Request {
     }
 }
 
+fn encode_results(id: u64, total_count: usize, total_size: u64, rows: &[ResultRow]) -> Vec<u8> {
+    let mut buf = Vec::new();
+    buf.push(1);
+    push_u64(&mut buf, id);
+    push_usize(&mut buf, total_count);
+    push_u64(&mut buf, total_size);
+    push_usize(&mut buf, rows.len());
+    for row in rows {
+        push_string(&mut buf, &row.path);
+        push_string(&mut buf, &row.name);
+        push_string(&mut buf, &row.parent);
+        push_string(&mut buf, &row.extension);
+        buf.push(if row.is_dir { 1 } else { 0 });
+        push_u64(&mut buf, row.size);
+        push_u64(&mut buf, row.modified_unix as u64);
+        push_u64(&mut buf, row.created_unix as u64);
+        push_u64(&mut buf, row.accessed_unix as u64);
+    }
+    buf
+}
+
 impl Response {
     pub fn encode(&self) -> Vec<u8> {
         let mut buf = Vec::new();
         match self {
             Response::Results(r) => {
-                buf.push(1);
-                push_u64(&mut buf, r.id);
-                push_usize(&mut buf, r.total_count);
-                push_u64(&mut buf, r.total_size);
-                push_usize(&mut buf, r.rows.len());
-                for row in &r.rows {
-                    push_string(&mut buf, &row.path);
-                    push_string(&mut buf, &row.name);
-                    push_string(&mut buf, &row.parent);
-                    push_string(&mut buf, &row.extension);
-                    buf.push(if row.is_dir { 1 } else { 0 });
-                    push_u64(&mut buf, row.size);
-                    push_u64(&mut buf, row.modified_unix as u64);
-                    push_u64(&mut buf, row.created_unix as u64);
-                    push_u64(&mut buf, row.accessed_unix as u64);
-                }
+                buf = encode_results(r.id, r.total_count, r.total_size, &r.rows);
             }
             Response::Status(s) => {
                 buf.push(2);
@@ -404,3 +462,113 @@ impl Response {
 
 #[cfg(test)]
 mod tests;
+
+impl StreamEvent {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            Self::Rows { id, rows } => encode_results(*id, 0, 0, rows),
+            Self::Error(error) => Response::Error(error.clone()).encode(),
+            Self::Done(summary) => {
+                let mut buf = vec![5];
+                push_u64(&mut buf, summary.id);
+                push_usize(&mut buf, summary.total_count);
+                push_u64(&mut buf, summary.total_size);
+                push_usize(&mut buf, summary.returned_count);
+                buf
+            }
+        }
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, String> {
+        if bytes.len() > MAX_STREAM_FRAME_SIZE {
+            return Err("stream frame too large".into());
+        }
+        if !matches!(bytes.first(), Some(1 | 4 | 5)) {
+            return Err("unexpected stream event".into());
+        }
+        if bytes.first() == Some(&5) {
+            let mut off = 1;
+            let summary = StreamSummary {
+                id: take_u64(bytes, &mut off).ok_or("missing stream id")?,
+                total_count: take_usize(bytes, &mut off).ok_or("missing stream total count")?,
+                total_size: take_u64(bytes, &mut off).ok_or("missing stream total size")?,
+                returned_count: take_usize(bytes, &mut off)
+                    .ok_or("missing stream returned count")?,
+            };
+            if off != bytes.len() {
+                return Err("trailing stream summary bytes".into());
+            }
+            return Ok(Self::Done(summary));
+        }
+        // Check the row count before allocating the decoded row vector.
+        if bytes.first() == Some(&1) {
+            let mut off = 25;
+            if take_usize(bytes, &mut off).ok_or("missing stream row count")? > STREAM_BATCH_SIZE {
+                return Err("stream batch too large".into());
+            }
+        }
+        match Response::decode(bytes)? {
+            Response::Results(results) => Ok(Self::Rows {
+                id: results.id,
+                rows: results.rows,
+            }),
+            Response::Error(error) => Ok(Self::Error(error)),
+            _ => Err("unexpected stream event".into()),
+        }
+    }
+}
+
+/// Consume a daemon stream one batch at a time. Returning an error from the
+/// callback stops consumption; drop/close the connection to cancel the server.
+/// Totals are available only when the completion summary arrives.
+pub fn stream_query<S: std::io::Read + std::io::Write>(
+    connection: &mut S,
+    request: &StreamQueryRequest,
+    mut on_rows: impl FnMut(&[ResultRow]) -> std::io::Result<()>,
+) -> std::io::Result<StreamSummary> {
+    use std::io::{Error, ErrorKind};
+    let request_bytes = Request::StreamQuery(request.clone()).encode();
+    connection.write_all(&(request_bytes.len() as u64).to_le_bytes())?;
+    connection.write_all(&request_bytes)?;
+    connection.flush()?;
+    let mut returned = 0usize;
+    loop {
+        let mut len = [0; 8];
+        connection.read_exact(&mut len)?;
+        let len = u64::from_le_bytes(len);
+        if len > MAX_STREAM_FRAME_SIZE as u64 {
+            return Err(Error::new(ErrorKind::InvalidData, "stream frame too large"));
+        }
+        let mut bytes = vec![0; len as usize];
+        connection.read_exact(&mut bytes)?;
+        match StreamEvent::decode(&bytes).map_err(|e| Error::new(ErrorKind::InvalidData, e))? {
+            StreamEvent::Rows { id, rows } if id == request.query.id => {
+                returned = returned
+                    .checked_add(rows.len())
+                    .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream count overflow"))?;
+                if returned > request.query.max_results {
+                    return Err(Error::new(ErrorKind::InvalidData, "too many streamed rows"));
+                }
+                on_rows(&rows)?;
+            }
+            StreamEvent::Done(summary)
+                if summary.id == request.query.id
+                    && summary.returned_count == returned
+                    && returned
+                        == summary
+                            .total_count
+                            .saturating_sub(request.query.offset)
+                            .min(request.query.max_results) =>
+            {
+                return Ok(summary);
+            }
+            StreamEvent::Error(error) => return Err(Error::other(error)),
+            _ => {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    "inconsistent stream response",
+                ));
+            }
+        }
+    }
+}

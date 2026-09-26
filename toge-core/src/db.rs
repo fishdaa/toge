@@ -1,9 +1,11 @@
 //! Index persistence: save/load binary format.
 
-use crate::index::{Entry, Index, fnv1a_64, lowered_bytes, unique_trigrams};
+use crate::index::{
+    Entry, Index, fnv1a_64, fnv1a_extend, lowered_bytes, push_index_value, unique_trigrams,
+};
 use std::collections::HashMap;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -22,69 +24,111 @@ pub struct SaveStats {
     pub bytes_written: u64,
 }
 
+// Hash bytes as they are written, excluding the checksum field at offsets 12..20.
+// The serialized index never needs to exist as a second in-memory copy.
+struct IndexWriter<W> {
+    inner: W,
+    checksum: u64,
+    bytes_written: u64,
+}
+
+impl<W: Write> Write for IndexWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(buf)?;
+        let start = self.bytes_written;
+        let end = start + written as u64;
+        if start < 12 {
+            self.checksum = fnv1a_extend(self.checksum, &buf[..(end.min(12) - start) as usize]);
+        }
+        if end > 20 {
+            self.checksum = fnv1a_extend(
+                self.checksum,
+                &buf[(20u64.saturating_sub(start)) as usize..written],
+            );
+        }
+        self.bytes_written = end;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 impl Index {
     pub fn save(&self, path: &Path) -> io::Result<SaveStats> {
         let tmp_path = path.with_extension("bin.tmp");
-        let mut data = Vec::new();
+        let mut header = Vec::new();
 
         // Header placeholder.
-        data.extend_from_slice(MAGIC);
-        data.extend_from_slice(&VERSION.to_le_bytes());
+        header.extend_from_slice(MAGIC);
+        header.extend_from_slice(&VERSION.to_le_bytes());
         let entry_count = self.entries.len() as u32;
-        data.extend_from_slice(&entry_count.to_le_bytes());
-        data.extend_from_slice(&0u64.to_le_bytes()); // checksum placeholder
-        data.extend_from_slice(&0u32.to_le_bytes()); // tier flags
+        header.extend_from_slice(&entry_count.to_le_bytes());
+        header.extend_from_slice(&0u64.to_le_bytes()); // checksum placeholder
+        header.extend_from_slice(&0u32.to_le_bytes()); // tier flags
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
-        data.extend_from_slice(&timestamp.to_le_bytes());
-        data.resize(64, 0); // pad header to 64 bytes
+        header.extend_from_slice(&timestamp.to_le_bytes());
+        header.resize(64, 0); // pad header to 64 bytes
+
+        let file = fs::File::create(&tmp_path)?;
+        #[cfg(unix)]
+        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let mut data = IndexWriter {
+            inner: BufWriter::new(file),
+            checksum: fnv1a_64(&[]),
+            bytes_written: 0,
+        };
+        data.write_all(&header)?;
 
         // Section 1: paths (null-separated).
-        let mut path_buf = Vec::new();
+        let path_len: u64 = self
+            .entries
+            .iter()
+            .map(|entry| entry.path.len() as u64 + 1)
+            .sum();
+        data.write_all(&path_len.to_le_bytes())?;
         for entry in &self.entries {
-            path_buf.extend_from_slice(entry.path.as_bytes());
-            path_buf.push(0);
+            data.write_all(entry.path.as_bytes())?;
+            data.write_all(&[0])?;
         }
-        data.extend_from_slice(&(path_buf.len() as u64).to_le_bytes());
-        data.extend_from_slice(&path_buf);
 
         // Section 2: metadata.
         for entry in &self.entries {
-            data.extend_from_slice(&entry.name_off.to_le_bytes());
-            data.extend_from_slice(&entry.ext_off.to_le_bytes());
-            data.push(if entry.is_dir { 1 } else { 0 });
+            data.write_all(&entry.name_off.to_le_bytes())?;
+            data.write_all(&entry.ext_off.to_le_bytes())?;
+            data.write_all(&[if entry.is_dir { 1 } else { 0 }])?;
         }
         // Section 2b: optional metadata fields (size, modified, created, accessed).
         for entry in &self.entries {
-            data.extend_from_slice(&entry.size.to_le_bytes());
-            data.extend_from_slice(&entry.modified.to_le_bytes());
-            data.extend_from_slice(&entry.created.to_le_bytes());
-            data.extend_from_slice(&entry.accessed.to_le_bytes());
+            data.write_all(&entry.size.to_le_bytes())?;
+            data.write_all(&entry.modified.to_le_bytes())?;
+            data.write_all(&entry.created.to_le_bytes())?;
+            data.write_all(&entry.accessed.to_le_bytes())?;
         }
 
         // Section 3: by_ext map.
         let mut ext_entries: Vec<_> = self.by_ext.iter().collect();
         ext_entries.sort_by_key(|(k, _)| *k);
-        data.extend_from_slice(&(ext_entries.len() as u32).to_le_bytes());
+        data.write_all(&(ext_entries.len() as u32).to_le_bytes())?;
         for (ext, ids) in ext_entries {
-            data.extend_from_slice(&(ext.len() as u32).to_le_bytes());
-            data.extend_from_slice(ext.as_bytes());
-            data.extend_from_slice(&(ids.len() as u32).to_le_bytes());
+            data.write_all(&(ext.len() as u32).to_le_bytes())?;
+            data.write_all(ext.as_bytes())?;
+            data.write_all(&(ids.len() as u32).to_le_bytes())?;
             for id in ids {
-                data.extend_from_slice(&id.to_le_bytes());
+                data.write_all(&id.to_le_bytes())?;
             }
         }
 
-        // Compute checksum over everything except the checksum field itself (bytes 12-19).
-        let checksum = fnv1a_64(&[&data[..12], &data[20..]].concat());
-        data[12..20].copy_from_slice(&checksum.to_le_bytes());
-
-        let mut file = fs::File::create(&tmp_path)?;
-        #[cfg(unix)]
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
-        file.write_all(&data)?;
+        let bytes_written = data.bytes_written;
+        let checksum = data.checksum;
+        data.flush()?;
+        let mut file = data.inner.into_inner().map_err(|err| err.into_error())?;
+        file.seek(SeekFrom::Start(12))?;
+        file.write_all(&checksum.to_le_bytes())?;
         file.sync_all()?;
         drop(file);
 
@@ -92,14 +136,15 @@ impl Index {
 
         Ok(SaveStats {
             entry_count,
-            bytes_written: data.len() as u64,
+            bytes_written,
         })
     }
 
     pub fn load(path: &Path) -> io::Result<Index> {
-        let mut file = fs::File::open(path)?;
+        let file = fs::File::open(path)?;
         let mut data = Vec::new();
-        file.read_to_end(&mut data)?;
+        file.take(MAX_INDEX_FILE_SIZE as u64 + 1)
+            .read_to_end(&mut data)?;
         if data.len() > MAX_INDEX_FILE_SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -130,7 +175,7 @@ impl Index {
         let stored_checksum = u64::from_le_bytes([
             data[12], data[13], data[14], data[15], data[16], data[17], data[18], data[19],
         ]);
-        let computed_checksum = fnv1a_64(&[&data[..12], &data[20..]].concat());
+        let computed_checksum = fnv1a_extend(fnv1a_64(&data[..12]), &data[20..]);
         if stored_checksum != computed_checksum {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -171,22 +216,14 @@ impl Index {
             ));
         }
         let path_section = &data[offset..offset + path_section_len];
-        let paths: Vec<&str> = path_section
+        let mut paths = path_section
             .split(|&b| b == 0)
             .filter(|s| !s.is_empty())
             .map(|s| {
                 std::str::from_utf8(s)
                     .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid utf8 path"))
-            })
-            .collect::<Result<_, _>>()?;
+            });
         offset += path_section_len;
-
-        if paths.len() != entry_count {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "entry count mismatch",
-            ));
-        }
 
         // Section 2: metadata.
         let metadata_size = entry_count
@@ -199,7 +236,10 @@ impl Index {
             ));
         }
         let mut entries = Vec::with_capacity(entry_count);
-        for path in paths {
+        for _ in 0..entry_count {
+            let path = paths.next().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "entry count mismatch")
+            })??;
             let meta_off = offset;
             offset += 5;
             let name_off = u16::from_le_bytes([data[meta_off], data[meta_off + 1]]);
@@ -215,6 +255,13 @@ impl Index {
                 created: 0,
                 accessed: 0,
             });
+        }
+
+        if paths.next().is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "entry count mismatch",
+            ));
         }
 
         // Section 2b: optional metadata fields (size, modified, created, accessed).
@@ -356,6 +403,9 @@ impl Index {
             by_ext.insert(key, ids);
         }
 
+        // Release the serialized bytes before allocating the search indexes.
+        drop(data);
+
         let mut path_to_id = HashMap::with_capacity(entry_count);
         for (id, entry) in entries.iter().enumerate() {
             let path_hash = fnv1a_64(entry.path.as_bytes());
@@ -369,23 +419,25 @@ impl Index {
             let id = id as u32;
             let name_lower = lowered_bytes(entry.name());
             for trigram in unique_trigrams(&name_lower) {
-                trigrams.entry(trigram).or_insert_with(Vec::new).push(id);
+                push_index_value(trigrams.entry(trigram).or_insert_with(Vec::new), id);
             }
             if let Some(&first_byte) = name_lower.first() {
-                prefix_first_byte
-                    .entry(first_byte)
-                    .or_insert_with(Vec::new)
-                    .push(id);
+                push_index_value(
+                    prefix_first_byte.entry(first_byte).or_insert_with(Vec::new),
+                    id,
+                );
             }
         }
 
-        Ok(Index {
+        let mut index = Index {
             entries,
             by_ext,
             path_to_id,
             trigrams,
             prefix_first_byte,
-        })
+        };
+        index.compact();
+        Ok(index)
     }
 }
 

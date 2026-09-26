@@ -159,3 +159,113 @@ fn test_response_status_decode_supports_legacy_payload_without_watcher_log() {
         })
     );
 }
+
+fn stream_request() -> StreamQueryRequest {
+    StreamQueryRequest {
+        query: QueryRequest {
+            id: 42,
+            raw: "foo".into(),
+            max_results: 10,
+            offset: 0,
+            format: OutputFormat::Default,
+            highlight: true,
+        },
+        order: StreamOrder::Index,
+    }
+}
+
+#[test]
+fn stream_request_and_events_roundtrip() {
+    for order in [StreamOrder::Index, StreamOrder::Sorted] {
+        let mut request = stream_request();
+        request.order = order;
+        let request = Request::StreamQuery(request);
+        assert_eq!(Request::decode(&request.encode()).unwrap(), request);
+        let mut truncated = request.encode();
+        truncated.pop();
+        assert!(Request::decode(&truncated).is_err());
+    }
+    for event in [
+        StreamEvent::Rows {
+            id: 42,
+            rows: vec![],
+        },
+        StreamEvent::Done(StreamSummary {
+            id: 42,
+            total_count: 0,
+            total_size: 0,
+            returned_count: 0,
+        }),
+        StreamEvent::Error("bad query".into()),
+    ] {
+        assert_eq!(StreamEvent::decode(&event.encode()).unwrap(), event);
+    }
+    let oversized = encode_results(42, 0, 0, &[]);
+    let mut oversized = oversized;
+    oversized[25..33].copy_from_slice(&((STREAM_BATCH_SIZE + 1) as u64).to_le_bytes());
+    assert!(
+        StreamEvent::decode(&oversized)
+            .unwrap_err()
+            .contains("batch too large")
+    );
+}
+
+#[test]
+fn stream_client_requires_completion_and_validates_frames() {
+    struct Connection {
+        input: std::io::Cursor<Vec<u8>>,
+        output: Vec<u8>,
+    }
+    impl std::io::Read for Connection {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            std::io::Read::read(&mut self.input, buf)
+        }
+    }
+    impl std::io::Write for Connection {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.output.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let request = stream_request();
+    let summary = StreamSummary {
+        id: 42,
+        total_count: 0,
+        total_size: 0,
+        returned_count: 0,
+    };
+    let event = StreamEvent::Done(summary.clone()).encode();
+    let frame = [&(event.len() as u64).to_le_bytes()[..], &event].concat();
+    let mut connection = Connection {
+        input: std::io::Cursor::new(frame.clone()),
+        output: vec![],
+    };
+    assert_eq!(
+        stream_query(&mut connection, &request, |_| Ok(())).unwrap(),
+        summary
+    );
+    assert_eq!(
+        Request::decode(&connection.output[8..]).unwrap(),
+        Request::StreamQuery(request.clone())
+    );
+    for input in [
+        vec![],
+        frame[..frame.len() - 1].to_vec(),
+        ((MAX_STREAM_FRAME_SIZE + 1) as u64).to_le_bytes().to_vec(),
+    ] {
+        let mut connection = Connection {
+            input: std::io::Cursor::new(input),
+            output: vec![],
+        };
+        assert!(stream_query(&mut connection, &request, |_| Ok(())).is_err());
+    }
+    let bad = StreamEvent::Done(StreamSummary { id: 99, ..summary }).encode();
+    let mut connection = Connection {
+        input: std::io::Cursor::new([&(bad.len() as u64).to_le_bytes()[..], &bad].concat()),
+        output: vec![],
+    };
+    assert!(stream_query(&mut connection, &request, |_| Ok(())).is_err());
+}

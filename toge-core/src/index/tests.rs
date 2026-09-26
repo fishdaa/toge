@@ -215,3 +215,51 @@ fn test_remove_after_duplicate_insert_clears_search_results() {
     assert!(idx.search_substring("video").is_empty());
     assert!(idx.by_extension("mkv").is_none_or(|ids| ids.is_empty()));
 }
+
+#[test]
+fn compaction_releases_capacity_and_preserves_mutable_search_indexes() {
+    let mut idx = Index::new();
+    for i in 0..300 {
+        idx.insert(&format!("/tmp/document-{i:04}.txt"), false);
+    }
+    for i in 0..200 {
+        assert!(idx.remove(&format!("/tmp/document-{i:04}.txt")));
+    }
+    let entries = idx.entries.clone();
+    let substring = idx.search_substring("document");
+    let prefix = idx.search_prefix("document");
+    let extensions = idx.by_extension("txt").unwrap().to_vec();
+    let before = idx.metadata_size();
+    idx.compact();
+    assert!(idx.metadata_size() < before);
+    assert_eq!(idx.entries, entries);
+    assert_eq!(idx.search_substring("document"), substring);
+    assert_eq!(idx.search_prefix("document"), prefix);
+    assert_eq!(idx.by_extension("txt").unwrap(), extensions);
+    for (id, entry) in idx.entries.iter().enumerate() {
+        assert_eq!(idx.id_by_path(&entry.path), Some(id as u32));
+    }
+    let entry_capacity = idx.entries.capacity();
+    let posting_capacity = idx.by_ext["txt"].capacity();
+    idx.insert("/tmp/document-new.txt", false);
+    assert!(idx.entries.capacity() <= entry_capacity + entry_capacity / 4);
+    assert!(idx.by_ext["txt"].capacity() <= posting_capacity + posting_capacity / 4);
+    assert_eq!(idx.search_substring("document-new").len(), 1);
+    assert!(idx.remove("/tmp/document-0250.txt"));
+    assert!(idx.search_substring("document-0250").is_empty());
+    assert!(idx.remove("/tmp/document-new.txt"));
+    assert!(idx.search_substring("document-new").is_empty());
+}
+
+#[test]
+fn metadata_refresh_by_id_preserves_paths_and_handles_missing_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("file.txt");
+    std::fs::write(&path, "updated content").unwrap();
+    let mut idx = Index::new();
+    let id = idx.insert(path.to_str().unwrap(), false);
+    assert!(idx.update_metadata_by_id(id));
+    assert_eq!(idx.entries[id as usize].size, 15);
+    assert_eq!(idx.get_path(id), path.to_str());
+    assert!(!idx.update_metadata_by_id(u32::MAX));
+}

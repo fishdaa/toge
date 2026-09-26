@@ -252,3 +252,33 @@ fn test_trigram_seed_preserves_case_sensitive_semantics() {
 
     assert_eq!(match_query(&idx, &query), vec![upper]);
 }
+
+#[test]
+fn lazy_matching_agrees_with_materialized_queries() {
+    let idx = sample_index();
+    for raw in [
+        "",
+        "foo",
+        "FOO",
+        "ext:txt",
+        "ext:txt;rs",
+        "folder:",
+        "file:",
+        "path:alice",
+        "regex:^f",
+        "*.txt",
+        "!foo",
+        "foo|bar",
+        "size:>500",
+        "case:README",
+    ] {
+        let query = Query::parse(raw).unwrap();
+        assert_eq!(
+            iter_query(&idx, &query).collect::<Vec<_>>(),
+            match_query(&idx, &query),
+            "{raw}"
+        );
+    }
+    let query = Query::default();
+    assert_eq!(iter_query(&idx, &query).take(2).collect::<Vec<_>>(), [0, 1]);
+}

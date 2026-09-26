@@ -13,6 +13,7 @@ struct State {
     generation: u64,
     pending: Option<Query>,
     closed: bool,
+    active: Option<(u64, std::os::unix::net::UnixStream)>,
 }
 #[derive(Default)]
 pub struct Mailbox {
@@ -23,6 +24,9 @@ impl Mailbox {
     pub fn submit(&self, text: String, immediate: bool) {
         let mut s = self.state.lock().unwrap();
         s.generation += 1;
+        if let Some((_, socket)) = s.active.take() {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
         s.pending = Some(Query {
             id: s.generation,
             text,
@@ -39,8 +43,26 @@ impl Mailbox {
         let s = self.state.lock().unwrap();
         !s.closed && s.generation == id
     }
+    fn register(&self, id: u64, socket: &std::os::unix::net::UnixStream) -> std::io::Result<()> {
+        let mut s = self.state.lock().unwrap();
+        if s.closed || s.generation != id {
+            return Err(std::io::Error::other("superseded"));
+        }
+        s.active = Some((id, socket.try_clone()?));
+        Ok(())
+    }
+    fn finish(&self, id: u64) {
+        let mut s = self.state.lock().unwrap();
+        if s.active.as_ref().is_some_and(|(active, _)| *active == id) {
+            s.active = None;
+        }
+    }
     pub fn close(&self) {
-        self.state.lock().unwrap().closed = true;
+        let mut s = self.state.lock().unwrap();
+        s.closed = true;
+        if let Some((_, socket)) = s.active.take() {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
         self.wake.notify_one();
     }
     fn next(&self) -> Option<Query> {
@@ -132,29 +154,51 @@ fn run_query(
             std::thread::sleep(Duration::from_millis(200));
         }
         let selection = Arc::new(Mutex::new(StreamSelection::default()));
-        crate::client::query_stream(socket, q.id, &q.text, 0, |response, first, done| {
-            let selection = selection.clone();
-            if !mailbox.current(q.id) {
-                return Err(std::io::Error::other("superseded"));
-            }
-            let m = mailbox.clone();
-            let id = q.id;
-            ui.upgrade_in_event_loop(move |ui| {
-                if !m.current(id) {
-                    return;
+        crate::client::query_stream(
+            socket,
+            q.id,
+            &q.text,
+            0,
+            |socket| mailbox.register(q.id, socket),
+            |response, first, done| {
+                let selection = selection.clone();
+                if !mailbox.current(q.id) {
+                    return Err(std::io::Error::other("superseded"));
                 }
-                apply_batch(
-                    &ui,
-                    response,
-                    first,
-                    done,
-                    size_indexed,
-                    &mut selection.lock().unwrap(),
-                );
-            })
-            .map_err(|error| std::io::Error::other(error.to_string()))
-        })
+                let m = mailbox.clone();
+                let id = q.id;
+                // Wait until the UI applies this batch before reading another one.
+                // This bounds queued row data and lets socket backpressure reach the daemon.
+                let (applied, wait) = std::sync::mpsc::sync_channel(1);
+                ui.upgrade_in_event_loop(move |ui| {
+                    if !m.current(id) {
+                        return;
+                    }
+                    apply_batch(
+                        &ui,
+                        response,
+                        first,
+                        done,
+                        size_indexed,
+                        &mut selection.lock().unwrap(),
+                    );
+                    let _ = applied.send(());
+                })
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
+                loop {
+                    if !mailbox.current(id) {
+                        return Err(std::io::Error::other("superseded"));
+                    }
+                    match wait.recv_timeout(Duration::from_millis(50)) {
+                        Ok(()) => return Ok(()),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(_) => return Err(std::io::Error::other("UI closed")),
+                    }
+                }
+            },
+        )
     })();
+    mailbox.finish(q.id);
     if let Err(error) = outcome {
         let m = mailbox.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
@@ -171,6 +215,7 @@ fn run_query(
 struct StreamSelection {
     preferred: Option<String>,
     last_selected: Option<String>,
+    restore_scroll: bool,
 }
 
 fn apply_batch(
@@ -190,9 +235,11 @@ fn apply_batch(
     if first {
         // The previously selected path may arrive in a later batch.
         selection.preferred = selected.clone();
+        selection.restore_scroll = false;
     } else if selected != selection.last_selected {
         // A selection made during transfer takes precedence.
         selection.preferred = None;
+        selection.restore_scroll = false;
     }
     results.set_size_indexed(size_indexed);
     if first {
@@ -208,6 +255,7 @@ fn apply_batch(
         .map_or(-1, |p| results.find(p));
     let index = if preferred_index >= 0 {
         selection.preferred = None;
+        selection.restore_scroll = true;
         preferred_index
     } else {
         selected.as_deref().map_or(-1, |p| results.find(p))
@@ -220,18 +268,23 @@ fn apply_batch(
     } else {
         -1
     };
-    if first || next != ui.get_selected() {
+    if first || next != ui.get_selected() || (done && selection.restore_scroll) {
+        // The virtual table's row-height estimate can change as batches arrive.
+        // Reposition a restored selection once the final model size is known.
         ui.invoke_select_row(next);
+    }
+    if done {
+        selection.restore_scroll = false;
     }
     selection.last_selected = results.path(next);
     ui.set_has_error(false);
     ui.set_busy(!done);
     ui.set_status(
-        format!(
-            "Showing {n} of {} matches{}",
-            response.total_count,
-            if done { "" } else { " — Receiving…" },
-        )
+        if done {
+            format!("Showing {n} of {} matches", response.total_count)
+        } else {
+            format!("Received {n} matches — Searching…")
+        }
         .into(),
     );
 }
@@ -260,5 +313,34 @@ mod tests {
         assert_eq!(m.next().unwrap().text, "newest");
         m.close();
         assert!(m.next().is_none());
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    use super::*;
+    use std::io::Read;
+    use std::os::unix::net::UnixStream;
+
+    #[test]
+    fn editing_or_closing_shuts_down_active_socket_without_waiting_for_a_batch() {
+        let mailbox = Mailbox::default();
+        mailbox.submit("old".into(), true);
+        let old = mailbox.next().unwrap();
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        mailbox.register(old.id, &socket).unwrap();
+        mailbox.submit("new".into(), true);
+        assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+        assert!(mailbox.register(old.id, &socket).is_err());
+        let new = mailbox.next().unwrap();
+        let (socket, mut peer) = UnixStream::pair().unwrap();
+        peer.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+        mailbox.register(new.id, &socket).unwrap();
+        // A stale worker finishing must not remove the current socket.
+        mailbox.finish(old.id);
+        mailbox.close();
+        assert_eq!(peer.read(&mut [0; 1]).unwrap(), 0);
+        assert!(mailbox.register(new.id, &socket).is_err());
     }
 }

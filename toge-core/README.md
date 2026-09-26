@@ -59,3 +59,57 @@ cargo run --release --example profile -p toge-core -- insert
 ```
 
 For the broader project overview, see the repository root [README.md](../README.md).
+
+## Streaming queries
+
+For a local index, `matcher::iter_query` yields IDs lazily in index order:
+
+```rust
+use toge_core::{Index, matcher::iter_query, query::Query};
+
+let index = Index::new();
+let query = Query::parse("ext:rs").unwrap();
+for id in iter_query(&index, &query).take(100) {
+    println!("{}", index.entries[id as usize].path);
+}
+```
+
+This iterator scans the index and reads stored metadata. It does not sort or
+apply result limits itself; use iterator adapters such as `skip` and `take`.
+Dropping it cancels the scan. `QueryMatcher` also supports incremental matching
+when the caller needs to refresh metadata between entries.
+
+For a daemon connection, `ipc::stream_query` invokes a callback for each batch:
+
+```rust,no_run
+use std::os::unix::net::UnixStream;
+use toge_core::ipc::{stream_query, OutputFormat, QueryRequest, StreamOrder, StreamQueryRequest};
+
+let mut socket = UnixStream::connect("/path/to/toged.sock")?;
+let request = StreamQueryRequest {
+    query: QueryRequest {
+        id: 1, raw: "ext:rs".into(), max_results: usize::MAX,
+        offset: 0, format: OutputFormat::Default, highlight: false,
+    },
+    order: StreamOrder::Index,
+};
+let summary = stream_query(&mut socket, &request, |rows| {
+    for row in rows { println!("{}", row.path); }
+    Ok(())
+})?;
+println!("{} matches", summary.total_count);
+# Ok::<(), std::io::Error>(())
+```
+
+Batches contain at most 128 rows, and client frames are limited to 4 MiB. A final
+`StreamSummary` reports the full match count, total size, and returned row count.
+EOF without that summary is an interrupted stream, not successful completion.
+A callback error stops consumption; close/drop the socket to cancel the daemon.
+
+`StreamOrder::Index` explicitly ignores sorting and avoids collecting matching
+IDs. For fixed query and path sizes its extra memory is O(1) with respect to the
+number of files: one batch, one encoded frame, and matcher state.
+`StreamOrder::Sorted` honors `Query.sort` and retains O(M) IDs for M matches,
+while result-row serialization stays bounded to one batch.
+Both modes honor the request's offset and limit, and scan all matches to produce
+exact final totals. The pre-existing `Request::Query` protocol is unchanged.

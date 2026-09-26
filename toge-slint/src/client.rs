@@ -1,14 +1,14 @@
 // Adapted from the Tauri shell IPC client; shares the existing wire protocol.
 use std::env;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 use toge_core::ipc::{
-    MAX_IPC_MESSAGE_SIZE, QueryRequest, Request, Response, ResultRow, ResultsResponse,
-    StatusResponse,
+    MAX_IPC_MESSAGE_SIZE, QueryRequest, Request, Response, ResultsResponse, StatusResponse,
+    StreamOrder, StreamQueryRequest, stream_query,
 };
 
 pub fn socket_path() -> PathBuf {
@@ -146,124 +146,57 @@ pub fn status(sock: &Path) -> io::Result<StatusResponse> {
     }
 }
 
-// Decode the existing Results frame incrementally, so older daemons work too.
-// A batch is published before reading the rest of the frame; no full-frame buffer
-// or duplicate 10k-row result vector is needed.
+// Consume bounded daemon frames. The GUI sorts loaded rows locally, so use
+// index order to avoid a daemon-wide matching-ID buffer.
 pub fn query_stream(
     sock: &Path,
     id: u64,
     raw: &str,
     offset: usize,
+    register: impl FnOnce(&UnixStream) -> io::Result<()>,
     mut publish: impl FnMut(ResultsResponse, bool, bool) -> io::Result<()>,
 ) -> io::Result<()> {
-    let mut stream = connect(sock, QUERY_TIMEOUT)?;
-    send_request(
-        &mut stream,
-        &Request::Query(QueryRequest {
+    let mut connection = connect(sock, QUERY_TIMEOUT)?;
+    register(&connection)?;
+    let request = StreamQueryRequest {
+        query: QueryRequest {
             id,
             raw: raw.to_string(),
             max_results: usize::MAX,
             offset,
             format: toge_core::ipc::OutputFormat::Default,
             highlight: false,
-        }),
-    )?;
-    read_results_stream(&mut BufReader::new(stream), id, &mut publish).map_err(response_error)
-}
-
-fn invalid(message: &str) -> io::Error {
-    io::Error::new(io::ErrorKind::InvalidData, message)
-}
-
-fn read_u64(reader: &mut impl Read) -> io::Result<u64> {
-    let mut bytes = [0; 8];
-    reader.read_exact(&mut bytes)?;
-    Ok(u64::from_le_bytes(bytes))
-}
-
-fn read_string(reader: &mut std::io::Take<impl Read>) -> io::Result<String> {
-    let len = read_u64(reader)?;
-    if len > reader.limit() {
-        return Err(invalid("string exceeds response frame"));
-    }
-    let mut bytes = vec![0; len as usize];
-    reader.read_exact(&mut bytes)?;
-    String::from_utf8(bytes).map_err(|_| invalid("invalid UTF-8"))
-}
-
-fn read_results_stream(
-    reader: &mut impl Read,
-    id: u64,
-    publish: &mut impl FnMut(ResultsResponse, bool, bool) -> io::Result<()>,
-) -> io::Result<()> {
-    let len = read_u64(reader)?;
-    if len > MAX_IPC_MESSAGE_SIZE as u64 {
-        return Err(invalid("response too large"));
-    }
-    let mut frame = reader.take(len);
-    let mut tag = [0];
-    frame.read_exact(&mut tag)?;
-    if tag[0] == 4 {
-        return Err(io::Error::other(read_string(&mut frame)?));
-    }
-    if tag[0] != 1 || read_u64(&mut frame)? != id {
-        return Err(invalid("unexpected response type or query id"));
-    }
-    let total_count =
-        usize::try_from(read_u64(&mut frame)?).map_err(|_| invalid("total count overflow"))?;
-    let total_size = read_u64(&mut frame)?;
-    let count = read_u64(&mut frame)?;
-    // Each row needs at least four string lengths, a flag, and four u64s.
-    // Validate against the frame itself rather than imposing a display cap.
-    const MIN_ROW_BYTES: u64 = 4 * 8 + 1 + 4 * 8;
-    if count > frame.limit() / MIN_ROW_BYTES {
-        return Err(invalid("row count exceeds response frame"));
-    }
-    const BATCH_SIZE: usize = 128;
-    let mut rows = Vec::with_capacity(BATCH_SIZE);
+        },
+        order: StreamOrder::Index,
+    };
     let mut first = true;
-    for index in 0..count {
-        let path = read_string(&mut frame)?;
-        let name = read_string(&mut frame)?;
-        let parent = read_string(&mut frame)?;
-        let extension = read_string(&mut frame)?;
-        let mut is_dir = [0];
-        frame.read_exact(&mut is_dir)?;
-        rows.push(ResultRow {
-            path,
-            name,
-            parent,
-            extension,
-            is_dir: is_dir[0] == 1,
-            size: read_u64(&mut frame)?,
-            modified_unix: read_u64(&mut frame)? as i64,
-            created_unix: read_u64(&mut frame)? as i64,
-            accessed_unix: read_u64(&mut frame)? as i64,
-        });
-        if rows.len() == BATCH_SIZE && index + 1 < count {
-            publish(
-                ResultsResponse {
-                    id,
-                    total_count,
-                    total_size,
-                    rows,
-                },
-                first,
-                false,
-            )?;
-            first = false;
-            rows = Vec::with_capacity(BATCH_SIZE);
+    let summary = stream_query(&mut connection, &request, |rows| {
+        publish(
+            ResultsResponse {
+                id,
+                total_count: 0,
+                total_size: 0,
+                rows: rows.to_vec(),
+            },
+            first,
+            false,
+        )?;
+        first = false;
+        Ok(())
+    })
+    .map_err(|error| {
+        if error.to_string() == "unknown request type" {
+            io::Error::other("Daemon does not support streaming. Restart or rebuild toged.")
+        } else {
+            response_error(error)
         }
-    }
-    if frame.limit() != 0 {
-        return Err(invalid("unexpected trailing result bytes"));
-    }
+    })?;
     publish(
         ResultsResponse {
             id,
-            total_count,
-            total_size,
-            rows,
+            total_count: summary.total_count,
+            total_size: summary.total_size,
+            rows: vec![],
         },
         first,
         true,
@@ -278,12 +211,19 @@ fn query(sock: &Path, id: u64, raw: &str, offset: usize) -> io::Result<ResultsRe
         total_size: 0,
         rows: vec![],
     };
-    query_stream(sock, id, raw, offset, |batch, _, _| {
-        result.total_count = batch.total_count;
-        result.total_size = batch.total_size;
-        result.rows.extend(batch.rows);
-        Ok(())
-    })?;
+    query_stream(
+        sock,
+        id,
+        raw,
+        offset,
+        |_| Ok(()),
+        |batch, _, _| {
+            result.total_count = batch.total_count;
+            result.total_size = batch.total_size;
+            result.rows.extend(batch.rows);
+            Ok(())
+        },
+    )?;
     Ok(result)
 }
 
@@ -291,8 +231,9 @@ fn query(sock: &Path, id: u64, raw: &str, offset: usize) -> io::Result<ResultsRe
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+    use toge_core::ipc::{ResultRow, StreamEvent, StreamSummary};
 
-    fn result_rows(count: usize) -> Vec<ResultRow> {
+    pub(super) fn result_rows(count: usize) -> Vec<ResultRow> {
         (0..count)
             .map(|i| ResultRow {
                 path: format!("/test/{i}"),
@@ -306,142 +247,6 @@ mod tests {
                 accessed_unix: 3,
             })
             .collect()
-    }
-
-    #[test]
-    fn publishes_first_batch_before_peer_sends_remaining_rows() {
-        let rows = result_rows(300);
-        let full = Response::Results(ResultsResponse {
-            id: 7,
-            total_count: 500,
-            total_size: 42,
-            rows: rows.clone(),
-        })
-        .encode();
-        let prefix = Response::Results(ResultsResponse {
-            id: 7,
-            total_count: 500,
-            total_size: 42,
-            rows: rows[..128].to_vec(),
-        })
-        .encode()
-        .len();
-        let (mut reader, mut writer) = UnixStream::pair().unwrap();
-        reader
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let (sent, received) = std::sync::mpsc::channel();
-        let server = thread::spawn(move || {
-            writer
-                .write_all(&(full.len() as u64).to_le_bytes())
-                .unwrap();
-            writer.write_all(&full[..prefix]).unwrap();
-            // Deadlocks/times out if the client waits for the full frame.
-            received.recv_timeout(Duration::from_secs(2)).unwrap();
-            writer.write_all(&full[prefix..]).unwrap();
-        });
-        let mut collected = vec![];
-        let mut flags = vec![];
-        read_results_stream(&mut reader, 7, &mut |batch, first, done| {
-            assert_eq!(batch.total_count, 500);
-            assert_eq!(batch.total_size, 42);
-            if first {
-                sent.send(()).unwrap();
-            }
-            flags.push((batch.rows.len(), first, done));
-            collected.extend(batch.rows);
-            Ok(())
-        })
-        .unwrap();
-        server.join().unwrap();
-        assert_eq!(
-            flags,
-            [(128, true, false), (128, false, false), (44, false, true)]
-        );
-        assert_eq!(collected, rows);
-    }
-
-    #[test]
-    fn streams_every_row_beyond_the_old_display_limit() {
-        let expected = result_rows(25_003);
-        let payload = Response::Results(ResultsResponse {
-            id: 7,
-            total_count: expected.len(),
-            total_size: 42,
-            rows: expected.clone(),
-        })
-        .encode();
-        let mut wire = (payload.len() as u64).to_le_bytes().to_vec();
-        wire.extend(payload);
-        let mut rows = Vec::new();
-        let mut completed = false;
-        read_results_stream(&mut &wire[..], 7, &mut |batch, first, done| {
-            assert_eq!(batch.total_count, 25_003);
-            assert_eq!(first, rows.is_empty());
-            assert!(batch.rows.len() <= 128);
-            assert!(!completed);
-            completed = done;
-            rows.extend(batch.rows);
-            Ok(())
-        })
-        .unwrap();
-        assert!(completed);
-        assert_eq!(rows, expected);
-    }
-
-    #[test]
-    fn streaming_empty_errors_truncation_and_cancellation() {
-        let empty = Response::Results(ResultsResponse {
-            id: 7,
-            total_count: 0,
-            total_size: 0,
-            rows: vec![],
-        })
-        .encode();
-        let mut wire = (empty.len() as u64).to_le_bytes().to_vec();
-        wire.extend(empty);
-        let mut called = false;
-        read_results_stream(&mut &wire[..], 7, &mut |batch, first, done| {
-            called = true;
-            assert!(first && done && batch.rows.is_empty());
-            Ok(())
-        })
-        .unwrap();
-        assert!(called);
-        assert!(read_results_stream(&mut &wire[..], 8, &mut |_, _, _| panic!()).is_err());
-        let full = Response::Results(ResultsResponse {
-            id: 7,
-            total_count: 300,
-            total_size: 0,
-            rows: result_rows(300),
-        })
-        .encode();
-        let mut wire = (full.len() as u64).to_le_bytes().to_vec();
-        wire.extend(&full);
-        let error = read_results_stream(&mut &wire[..wire.len() - 1], 7, &mut |_, _, done| {
-            assert!(!done);
-            Ok(())
-        })
-        .unwrap_err();
-        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
-        let mut reader = &wire[..];
-        let error = read_results_stream(&mut reader, 7, &mut |_, _, _| {
-            Err(io::Error::other("superseded"))
-        })
-        .unwrap_err();
-        assert_eq!(error.to_string(), "superseded");
-        assert!(!reader.is_empty());
-        wire[8 + 25..8 + 33].copy_from_slice(&u64::MAX.to_le_bytes());
-        assert!(read_results_stream(&mut &wire[..], 7, &mut |_, _, _| panic!()).is_err());
-        let error = Response::Error("bad query".into()).encode();
-        let mut wire = (error.len() as u64).to_le_bytes().to_vec();
-        wire.extend(error);
-        assert_eq!(
-            read_results_stream(&mut &wire[..], 7, &mut |_, _, _| panic!())
-                .unwrap_err()
-                .to_string(),
-            "bad query"
-        );
     }
 
     #[test]
@@ -508,7 +313,9 @@ mod tests {
                 let mut body = vec![0; u64::from_le_bytes(len) as usize];
                 stream.read_exact(&mut body).unwrap();
                 match Request::decode(&body).unwrap() {
-                    Request::Query(q) => {
+                    Request::StreamQuery(request) => {
+                        assert_eq!(request.order, StreamOrder::Index);
+                        let q = request.query;
                         assert_eq!(q.id, 7);
                         assert_eq!(q.raw, "ext:pdf");
                         assert_eq!(q.max_results, usize::MAX);
@@ -519,11 +326,11 @@ mod tests {
                 if response_id == 7 {
                     thread::sleep(STATUS_TIMEOUT + Duration::from_millis(100));
                 }
-                let response = Response::Results(ResultsResponse {
+                let response = StreamEvent::Done(StreamSummary {
                     id: response_id,
                     total_count: 0,
                     total_size: 0,
-                    rows: vec![],
+                    returned_count: 0,
                 })
                 .encode();
                 stream
@@ -534,6 +341,218 @@ mod tests {
             let result = query(&path, 7, "ext:pdf", 0);
             assert_eq!(result.is_ok(), response_id == 7);
             server.join().unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod stream_tests {
+    use super::tests::result_rows;
+    use super::*;
+    use std::os::unix::net::UnixListener;
+    use toge_core::ipc::{ResultRow, StreamEvent, StreamSummary};
+
+    fn send(socket: &mut UnixStream, event: StreamEvent) -> io::Result<()> {
+        let bytes = event.encode();
+        socket.write_all(&(bytes.len() as u64).to_le_bytes())?;
+        socket.write_all(&bytes)
+    }
+    fn request(socket: &mut UnixStream) -> StreamQueryRequest {
+        let mut length = [0; 8];
+        socket.read_exact(&mut length).unwrap();
+        let mut bytes = vec![0; u64::from_le_bytes(length) as usize];
+        socket.read_exact(&mut bytes).unwrap();
+        let Request::StreamQuery(request) = Request::decode(&bytes).unwrap() else {
+            panic!("expected daemon stream request")
+        };
+        assert_eq!(request.order, StreamOrder::Index);
+        request
+    }
+
+    #[test]
+    fn publishes_rows_before_completion_and_totals_only_after_done() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let rows = result_rows(300);
+        let expected = rows.clone();
+        let (published, wait) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let request = request(&mut socket);
+            assert_eq!(request.query.raw, "foo");
+            assert_eq!(request.query.offset, 5);
+            send(
+                &mut socket,
+                StreamEvent::Rows {
+                    id: 7,
+                    rows: rows[..128].to_vec(),
+                },
+            )
+            .unwrap();
+            // The first rows must reach the UI before later rows or totals exist.
+            wait.recv_timeout(Duration::from_secs(2)).unwrap();
+            for batch in rows[128..].chunks(128) {
+                send(
+                    &mut socket,
+                    StreamEvent::Rows {
+                        id: 7,
+                        rows: batch.to_vec(),
+                    },
+                )
+                .unwrap();
+            }
+            send(
+                &mut socket,
+                StreamEvent::Done(StreamSummary {
+                    id: 7,
+                    total_count: 305,
+                    total_size: 42,
+                    returned_count: 300,
+                }),
+            )
+            .unwrap();
+        });
+        let mut collected = Vec::<ResultRow>::new();
+        let mut flags = vec![];
+        query_stream(
+            &path,
+            7,
+            "foo",
+            5,
+            |_| Ok(()),
+            |batch, first, done| {
+                if first {
+                    published.send(()).unwrap();
+                }
+                assert_eq!(batch.total_count, if done { 305 } else { 0 });
+                assert_eq!(batch.total_size, if done { 42 } else { 0 });
+                flags.push((batch.rows.len(), first, done));
+                collected.extend(batch.rows);
+                Ok(())
+            },
+        )
+        .unwrap();
+        server.join().unwrap();
+        assert_eq!(collected, expected);
+        assert_eq!(
+            flags,
+            [
+                (128, true, false),
+                (128, false, false),
+                (44, false, false),
+                (0, false, true)
+            ]
+        );
+    }
+
+    #[test]
+    fn streams_all_rows_beyond_the_old_display_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            let request = request(&mut socket);
+            let rows = result_rows(25_003);
+            for batch in rows.chunks(128) {
+                send(
+                    &mut socket,
+                    StreamEvent::Rows {
+                        id: request.query.id,
+                        rows: batch.to_vec(),
+                    },
+                )
+                .unwrap();
+            }
+            send(
+                &mut socket,
+                StreamEvent::Done(StreamSummary {
+                    id: request.query.id,
+                    total_count: rows.len(),
+                    total_size: 42,
+                    returned_count: rows.len(),
+                }),
+            )
+            .unwrap();
+        });
+        let result = query(&path, 7, "all", 0).unwrap();
+        server.join().unwrap();
+        assert_eq!(result.rows, result_rows(25_003));
+        assert_eq!(result.total_count, 25_003);
+    }
+
+    #[test]
+    fn incomplete_errors_empty_and_cancelled_streams_do_not_publish_false_completion() {
+        for scenario in ["empty", "truncated", "error", "legacy", "cancel"] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("daemon.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let server = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                request(&mut socket);
+                match scenario {
+                    "empty" => send(
+                        &mut socket,
+                        StreamEvent::Done(StreamSummary {
+                            id: 7,
+                            total_count: 0,
+                            total_size: 0,
+                            returned_count: 0,
+                        }),
+                    )
+                    .unwrap(),
+                    "error" | "legacy" => send(
+                        &mut socket,
+                        StreamEvent::Error(
+                            if scenario == "legacy" {
+                                "unknown request type"
+                            } else {
+                                "bad query"
+                            }
+                            .into(),
+                        ),
+                    )
+                    .unwrap(),
+                    _ => send(
+                        &mut socket,
+                        StreamEvent::Rows {
+                            id: 7,
+                            rows: result_rows(128),
+                        },
+                    )
+                    .unwrap(),
+                }
+            });
+            let mut done = false;
+            let result = query_stream(
+                &path,
+                7,
+                "test",
+                0,
+                |_| Ok(()),
+                |batch, first, complete| {
+                    done = complete;
+                    if scenario == "empty" {
+                        assert!(first && complete && batch.rows.is_empty());
+                    }
+                    if scenario == "cancel" {
+                        return Err(io::Error::other("superseded"));
+                    }
+                    Ok(())
+                },
+            );
+            server.join().unwrap();
+            assert_eq!(result.is_ok(), scenario == "empty");
+            assert_eq!(done, scenario == "empty");
+            if scenario == "legacy" {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Restart or rebuild")
+                );
+            }
         }
     }
 }

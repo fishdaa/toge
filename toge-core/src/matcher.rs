@@ -38,7 +38,58 @@ fn compile_terms(terms: &[TextTerm]) -> CompiledTerms {
     CompiledTerms { items }
 }
 
+/// A reusable matcher for incremental scans, without a result-ID buffer.
+/// Sorting and result limits are the caller's responsibility.
+pub struct QueryMatcher {
+    query: Query,
+    compiled: CompiledTerms,
+}
+
+impl QueryMatcher {
+    pub fn new(query: Query) -> Self {
+        let compiled = compile_terms(&query.terms);
+        Self { query, compiled }
+    }
+
+    pub fn matches(&self, entry: &Entry) -> bool {
+        if let Some(exts) = &self.query.ext
+            && (entry.is_dir || !exts.iter().any(|ext| ext == entry.extension()))
+        {
+            return false;
+        }
+        entry_matches(entry, &self.query, &self.compiled)
+    }
+}
+
+/// Lazily yield matching IDs in index order, using memory independent of index size.
+/// This scans entries rather than materializing trigram candidates. Dropping the
+/// iterator cancels the scan. Metadata is read as stored in the index.
+pub fn iter_query<'a>(index: &'a Index, query: &Query) -> impl Iterator<Item = u32> + 'a {
+    let matcher = QueryMatcher::new(query.clone());
+    index
+        .entries
+        .iter()
+        .enumerate()
+        .filter(move |(_, entry)| matcher.matches(entry))
+        .map(|(id, _)| id as u32)
+}
+
 pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
+    // Seed directly from the trigram index so a selective filename query does
+    // not first allocate an ID vector for every entry in the filesystem.
+    // The full matcher below still enforces every query option.
+    let seed = if query.match_path {
+        None
+    } else {
+        query
+            .terms
+            .iter()
+            .filter_map(|term| match term {
+                TextTerm::Substring(value) if value.len() >= 3 => Some(value.as_str()),
+                _ => None,
+            })
+            .max_by_key(|value| value.len())
+    };
     let mut ids = if let Some(exts) = &query.ext {
         let mut ext_ids: Vec<u32> = Vec::new();
         for ext in exts {
@@ -48,37 +99,24 @@ pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
         }
         ext_ids.sort_unstable();
         ext_ids.dedup();
-        ext_ids
+        if let Some(seed) = seed {
+            intersect_sorted_ids(&ext_ids, &index.search_substring(seed))
+        } else {
+            ext_ids
+        }
+    } else if let Some(seed) = seed {
+        index.search_substring(seed)
     } else {
         (0..index.count() as u32).collect()
     };
 
-    // Filename substring queries of three or more bytes can use the trigram
-    // postings already maintained by Index. The full matcher still runs below,
-    // so case-sensitive, whole-word, and additional filters keep their exact
-    // semantics; this only removes entries that cannot possibly match.
-    if !query.match_path
-        && let Some(seed) = query
-            .terms
-            .iter()
-            .filter_map(|term| match term {
-                TextTerm::Substring(value) if value.len() >= 3 => Some(value.as_str()),
-                _ => None,
-            })
-            .max_by_key(|value| value.len())
-    {
-        let substring_ids = index.search_substring(seed);
-        ids = intersect_sorted_ids(&ids, &substring_ids);
-    }
-
     let compiled = compile_terms(&query.terms);
 
-    ids.into_iter()
-        .filter(|id| {
-            let entry = &index.entries[*id as usize];
-            entry_matches(entry, query, &compiled)
-        })
-        .collect()
+    ids.retain(|&id| {
+        let entry = &index.entries[id as usize];
+        entry_matches(entry, query, &compiled)
+    });
+    ids
 }
 
 fn intersect_sorted_ids(left: &[u32], right: &[u32]) -> Vec<u32> {

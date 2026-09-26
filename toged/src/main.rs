@@ -10,14 +10,15 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 use toge_core::config::Config;
 use toge_core::index::Index;
 use toge_core::ipc::{
-    DaemonStatus, MAX_IPC_MESSAGE_SIZE, QueryRequest, Request, Response, ResultRow,
-    ResultsResponse, StatusResponse,
+    DaemonStatus, MAX_IPC_MESSAGE_SIZE, MAX_STREAM_FRAME_SIZE, QueryRequest, Request, Response,
+    ResultRow, ResultsResponse, STREAM_BATCH_SIZE, StatusResponse, StreamEvent, StreamOrder,
+    StreamQueryRequest, StreamSummary,
 };
-use toge_core::matcher::match_query;
+use toge_core::matcher::{QueryMatcher, match_query};
 use toge_core::query::Query;
 use toge_core::sort::{SortKey, sort_ids};
 use toge_core::sys::FsWatcher;
@@ -177,6 +178,7 @@ fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>
             st.status_message = format!("Reconciling {} cached entries", index.count());
         }
         reconcile(&roots, &mut index, &excludes, fetch_metadata);
+        index.compact();
         return (index, start.elapsed().as_millis() as u64);
     }
 
@@ -191,6 +193,7 @@ fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>
         walk(root, &mut index, &excludes, fetch_metadata);
     }
 
+    index.compact();
     let duration_ms = start.elapsed().as_millis() as u64;
     (index, duration_ms)
 }
@@ -394,6 +397,9 @@ fn handle_request(
             }
             handle_query(&mut st.index, &q, config.index_size)
         }
+        Request::StreamQuery(_) => {
+            Response::Error("stream request requires a streaming connection".into())
+        }
         Request::Quit => unreachable!(),
     }
 }
@@ -404,6 +410,29 @@ fn handle_query(index: &mut Index, q: &QueryRequest, index_size: bool) -> Respon
         Err(e) => return Response::Error(e.to_string()),
     };
 
+    let ids = prepare_query_ids(index, &query, index_size);
+
+    let total = ids.len();
+    let total_size: u64 = ids.iter().map(|id| index.entries[*id as usize].size).sum();
+
+    let offset = q.offset.min(total);
+    let end = offset.saturating_add(q.max_results).min(total);
+    let page = &ids[offset..end];
+
+    let rows = page
+        .iter()
+        .map(|id| result_row(&index.entries[*id as usize], &query, q.highlight))
+        .collect();
+
+    Response::Results(ResultsResponse {
+        id: q.id,
+        total_count: total,
+        total_size,
+        rows,
+    })
+}
+
+fn prepare_query_ids(index: &mut Index, query: &Query, index_size: bool) -> Vec<u32> {
     let (sort_key, ascending) = sort_params(query.sort);
 
     // Metadata tiers may be disabled while a query still explicitly asks for
@@ -414,29 +443,20 @@ fn handle_query(index: &mut Index, q: &QueryRequest, index_size: bool) -> Respon
         || query.date_created.is_some()
         || query.date_accessed.is_some();
     if needs_all_metadata {
-        let paths: Vec<String> = index
-            .entries
-            .iter()
-            .map(|entry| entry.path.clone())
-            .collect();
-        for path in paths {
-            index.update_metadata(&path);
+        for id in 0..index.count() as u32 {
+            index.update_metadata_by_id(id);
         }
     }
 
-    let mut ids = match_query(index, &query);
+    let mut ids = match_query(index, query);
 
     if matches!(
         sort_key,
         SortKey::Modified | SortKey::Created | SortKey::Accessed
     ) && !needs_all_metadata
     {
-        let paths: Vec<String> = ids
-            .iter()
-            .map(|id| index.entries[*id as usize].path.clone())
-            .collect();
-        for path in paths {
-            index.update_metadata(&path);
+        for &id in &ids {
+            index.update_metadata_by_id(id);
         }
     } else if index_size {
         for id in &ids {
@@ -444,57 +464,180 @@ fn handle_query(index: &mut Index, q: &QueryRequest, index_size: bool) -> Respon
             if entry.is_dir || entry.size != 0 {
                 continue;
             }
-            let path = entry.path.clone();
-            index.update_metadata(&path);
+            index.update_metadata_by_id(*id);
         }
     }
 
     sort_ids(index, &mut ids, sort_key, ascending);
 
-    let total = ids.len();
-    let total_size: u64 = ids.iter().map(|id| index.entries[*id as usize].size).sum();
+    ids
+}
 
-    let offset = q.offset.min(total);
-    let end = offset.saturating_add(q.max_results).min(total);
-    let page = &ids[offset..end];
+fn result_row(entry: &toge_core::index::Entry, query: &Query, highlight: bool) -> ResultRow {
+    let display_path = if highlight && !query.terms.is_empty() {
+        highlight_path(&entry.path, query)
+    } else {
+        entry.path.clone()
+    };
+    let name = entry.name().to_string();
+    let parent_end = entry.name_off as usize;
+    let parent = if parent_end > 0 {
+        entry.path[..parent_end.saturating_sub(1)].to_string()
+    } else {
+        String::new()
+    };
+    ResultRow {
+        path: display_path,
+        name,
+        parent,
+        extension: entry.extension().to_string(),
+        is_dir: entry.is_dir,
+        size: entry.size,
+        modified_unix: entry.modified,
+        created_unix: entry.created,
+        accessed_unix: entry.accessed,
+    }
+}
 
-    let rows: Vec<ResultRow> = page
-        .iter()
-        .map(|id| {
-            let entry = &index.entries[*id as usize];
-            let path = entry.path.clone();
-            let display_path = if q.highlight && !query.terms.is_empty() {
-                highlight_path(&path, &query)
-            } else {
-                path.clone()
-            };
-            let name = entry.name().to_string();
-            let parent_end = entry.name_off as usize;
-            let parent = if parent_end > 0 {
-                path[..parent_end.saturating_sub(1)].to_string()
-            } else {
-                String::new()
-            };
-            ResultRow {
-                path: display_path,
-                name,
-                parent,
-                extension: entry.extension().to_string(),
-                is_dir: entry.is_dir,
-                size: entry.size,
-                modified_unix: entry.modified,
-                created_unix: entry.created,
-                accessed_unix: entry.accessed,
+// A consistent stream holds the index lock, avoiding an O(N) snapshot copy.
+// Bound the duration so disconnected or stalled consumers cannot pin it indefinitely.
+fn write_stream_event(
+    stream: &mut UnixStream,
+    event: &StreamEvent,
+    deadline: Instant,
+) -> io::Result<()> {
+    let bytes = event.encode();
+    if bytes.len() > MAX_STREAM_FRAME_SIZE {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stream frame too large",
+        ));
+    }
+    let length = (bytes.len() as u64).to_le_bytes();
+    for mut pending in [length.as_slice(), bytes.as_slice()] {
+        while !pending.is_empty() {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .filter(|duration| !duration.is_zero())
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::TimedOut, "stream deadline exceeded")
+                })?;
+            stream.set_write_timeout(Some(remaining.min(Duration::from_secs(5))))?;
+            match stream.write(pending) {
+                Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "stream closed")),
+                Ok(written) => pending = &pending[written..],
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
             }
-        })
-        .collect();
+        }
+    }
+    Ok(())
+}
 
-    Response::Results(ResultsResponse {
-        id: q.id,
-        total_count: total,
-        total_size,
-        rows,
-    })
+fn stream_results(
+    stream: &mut UnixStream,
+    request: &StreamQueryRequest,
+    index: &mut Index,
+    index_size: bool,
+) -> io::Result<()> {
+    let query = match Query::parse(&request.query.raw) {
+        Ok(query) => query,
+        Err(error) => {
+            return write_stream_event(
+                stream,
+                &StreamEvent::Error(error.to_string()),
+                Instant::now() + Duration::from_secs(5),
+            );
+        }
+    };
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let matcher = QueryMatcher::new(query.clone());
+    let needs_dates = query.date_modified.is_some()
+        || query.date_created.is_some()
+        || query.date_accessed.is_some();
+    // Sorted streams retain IDs, but still serialize only one batch at a time.
+    let sorted = if request.order == StreamOrder::Sorted {
+        Some(prepare_query_ids(index, &query, index_size))
+    } else {
+        None
+    };
+    let count = sorted.as_ref().map_or(index.count(), Vec::len);
+    let mut summary = StreamSummary {
+        id: request.query.id,
+        total_count: 0,
+        total_size: 0,
+        returned_count: 0,
+    };
+    let mut rows = Vec::with_capacity(STREAM_BATCH_SIZE);
+    for position in 0..count {
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "stream deadline exceeded",
+            ));
+        }
+        let id = sorted.as_ref().map_or(position as u32, |ids| ids[position]);
+        if sorted.is_none() && needs_dates {
+            index.update_metadata_by_id(id);
+        }
+        if sorted.is_none() && !matcher.matches(&index.entries[id as usize]) {
+            continue;
+        }
+        if sorted.is_none() && index_size {
+            let entry = &index.entries[id as usize];
+            if !entry.is_dir && entry.size == 0 {
+                index.update_metadata_by_id(id);
+            }
+        }
+        let entry = &index.entries[id as usize];
+        let ordinal = summary.total_count;
+        summary.total_count += 1;
+        summary.total_size = summary.total_size.saturating_add(entry.size);
+        if ordinal < request.query.offset || summary.returned_count >= request.query.max_results {
+            continue;
+        }
+        rows.push(result_row(entry, &query, request.query.highlight));
+        summary.returned_count += 1;
+        if rows.len() == STREAM_BATCH_SIZE {
+            write_stream_event(
+                stream,
+                &StreamEvent::Rows {
+                    id: summary.id,
+                    rows: std::mem::take(&mut rows),
+                },
+                deadline,
+            )?;
+            rows = Vec::with_capacity(STREAM_BATCH_SIZE);
+        }
+    }
+    if !rows.is_empty() {
+        write_stream_event(
+            stream,
+            &StreamEvent::Rows {
+                id: summary.id,
+                rows,
+            },
+            deadline,
+        )?;
+    }
+    write_stream_event(stream, &StreamEvent::Done(summary), deadline)
+}
+
+fn handle_stream_request(
+    stream: &mut UnixStream,
+    request: &StreamQueryRequest,
+    config: &Config,
+    state: &Arc<Mutex<DaemonState>>,
+) -> io::Result<()> {
+    let mut st = state.lock().unwrap();
+    if st.status != DaemonStatus::Ready {
+        return write_stream_event(
+            stream,
+            &StreamEvent::Error("daemon not ready".into()),
+            Instant::now() + Duration::from_secs(5),
+        );
+    }
+    stream_results(stream, request, &mut st.index, config.index_size)
 }
 
 fn highlight_path(path: &str, query: &Query) -> String {
@@ -670,8 +813,14 @@ fn serve(
         let config = config.clone();
         let state = state.clone();
         workers.push(thread::spawn(move || {
-            let resp = handle_request(req, &state_dir, &config, &state);
-            let _ = write_response(&mut s, &resp);
+            if let Request::StreamQuery(request) = req {
+                // Transport failures close the connection. EOF without Done
+                // lets clients distinguish an interrupted stream from success.
+                let _ = handle_stream_request(&mut s, &request, &config, &state);
+            } else {
+                let resp = handle_request(req, &state_dir, &config, &state);
+                let _ = write_response(&mut s, &resp);
+            }
         }));
         workers.retain(|h: &thread::JoinHandle<()>| !h.is_finished());
     }

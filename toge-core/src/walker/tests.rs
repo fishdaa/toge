@@ -255,3 +255,42 @@ fn test_walk_skips_symlink_entries() {
     assert!(idx.search_substring("linked-file").is_empty());
     assert!(!idx.search_substring("inside.txt").is_empty());
 }
+
+#[test]
+fn reconcile_tracks_seen_entries_when_file_types_change_and_ids_move() {
+    let (_dir, root) = visible_root();
+    let changed = root.join("changed");
+    let kept = root.join("kept.txt");
+    fs::create_dir(&changed).unwrap();
+    fs::write(&kept, "keep").unwrap();
+    // Deliberately put the kept entry last, so replacing changed moves its ID.
+    let mut idx = Index::new();
+    idx.insert(changed.to_str().unwrap(), false);
+    idx.insert(root.join("stale.txt").to_str().unwrap(), false);
+    idx.insert(kept.to_str().unwrap(), false);
+    reconcile(&[root.clone(), root], &mut idx, &Excludes::new(), false);
+    assert_eq!(idx.count(), 2);
+    assert!(idx.entries[idx.id_by_path(changed.to_str().unwrap()).unwrap() as usize].is_dir);
+    assert_eq!(idx.search_substring("kept").len(), 1);
+    assert!(idx.search_substring("stale").is_empty());
+}
+
+#[test]
+fn reconcile_preserves_already_seen_entry_swapped_by_a_type_change() {
+    let (_dir, root) = visible_root();
+    let first = root.join("first");
+    let second = root.join("second");
+    fs::create_dir(&first).unwrap();
+    fs::create_dir(&second).unwrap();
+    let kept = first.join("kept.txt");
+    let changed = second.join("changed");
+    fs::write(&kept, "keep").unwrap();
+    fs::write(&changed, "now a file").unwrap();
+    let mut idx = Index::new();
+    idx.insert(changed.to_str().unwrap(), true);
+    idx.insert(kept.to_str().unwrap(), false);
+    reconcile(&[first, second], &mut idx, &Excludes::new(), false);
+    assert_eq!(idx.count(), 2);
+    assert_eq!(idx.search_substring("kept").len(), 1);
+    assert!(!idx.entries[idx.id_by_path(changed.to_str().unwrap()).unwrap() as usize].is_dir);
+}
