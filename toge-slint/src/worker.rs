@@ -58,6 +58,9 @@ impl Mailbox {
     pub fn sort(&self) -> Option<(i32, bool)> {
         self.state.lock().unwrap().sort
     }
+    pub fn closed(&self) -> bool {
+        self.state.lock().unwrap().closed
+    }
     pub fn current(&self, id: u64) -> bool {
         let s = self.state.lock().unwrap();
         !s.closed && s.generation == id
@@ -123,8 +126,8 @@ pub fn start(mailbox: Arc<Mailbox>, ui: slint::Weak<crate::AppWindow>) {
     // it mid-flight, the way a single shared worker thread would.
     let daemon_start = Arc::new(Mutex::new(()));
     {
-        let (ui, socket) = (ui.clone(), crate::client::socket_path());
-        std::thread::spawn(move || poll_index_status(ui, socket));
+        let (ui, socket, mailbox) = (ui.clone(), crate::client::socket_path(), mailbox.clone());
+        std::thread::spawn(move || poll_index_status(ui, socket, &mailbox));
     }
     std::thread::spawn(move || {
         let socket = crate::client::socket_path();
@@ -440,9 +443,14 @@ fn status_text(state: SessionState, size_indexed: bool) -> String {
 }
 
 /// Keep the status bar's index summary current, as toge-gui does every 3s.
-/// Only reads daemon status; searches are what start the daemon.
-fn poll_index_status(ui: slint::Weak<crate::AppWindow>, socket: std::path::PathBuf) {
-    loop {
+/// Only reads daemon status; searches are what start the daemon. Stops when
+/// the window closes.
+fn poll_index_status(
+    ui: slint::Weak<crate::AppWindow>,
+    socket: std::path::PathBuf,
+    mailbox: &Mailbox,
+) {
+    while !mailbox.closed() {
         let text = match crate::client::status(&socket) {
             Ok(status) => crate::format::index_status(&status),
             Err(_) => "Index unavailable".to_string(),

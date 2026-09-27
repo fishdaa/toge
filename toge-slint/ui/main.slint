@@ -80,6 +80,11 @@ export component AppWindow inherits Window {
     in property <bool> busy: true;
     in property <bool> has-error: false;
     in-out property <int> selected: -1;
+    // Where a Shift+arrow range started; -1 when only the current row is highlighted.
+    in-out property <int> selection-anchor: -1;
+    private property <int> range-start: min(root.selection-anchor, root.selected);
+    private property <int> range-end: min(root.rows.length - 1, max(root.selection-anchor, root.selected));
+    private property <bool> has-range: root.selection-anchor >= 0 && root.selected >= 0 && root.range-end > root.range-start;
     in-out property <int> hovered-row: -1;
     in-out property <bool> context-menu-open: false;
     in-out property <length> context-menu-x: 0px;
@@ -91,9 +96,10 @@ export component AppWindow inherits Window {
     in-out property <string> rename-name;
     in-out property <bool> rename-working: false;
     private property <int> rename-selection-end;
-    // Path awaiting Shift+Delete confirmation; the dialog is open while non-empty.
+    // Paths awaiting Shift+Delete confirmation; the dialog is open while non-empty.
     in-out property <string> delete-path;
     in-out property <string> delete-name;
+    in-out property <int> delete-count;
     callback delete-confirmed();
     callback column-widths-changed(float, float, float);
     callback rename-commit(string);
@@ -103,11 +109,24 @@ export component AppWindow inherits Window {
     callback action(string);
     callback row-clicked(int);
     callback about();
+    callback new-window();
     forward-focus: search;
     public function select-row(index: int) {
+        root.selection-anchor = -1;
         root.selected = index;
         selection-scroll.start();
     }
+    // Move the current row while keeping the range anchored where it started.
+    function extend-selection(index: int) {
+        if (root.selection-anchor < 0) { root.selection-anchor = max(0, root.selected); }
+        root.selected = index;
+        selection-scroll.start();
+    }
+    // Select Home/End/Page targets, extending the range when Shift is held.
+    function move-to(index: int, extend: bool) {
+        if (extend) { root.extend-selection(index); } else { root.select-row(index); }
+    }
+    changed rows => { root.selection-anchor = -1; }
     public function apply-sort(column: int, ascending: bool) {
         root.cancel-rename(false);
         root.context-menu-open = false;
@@ -133,11 +152,12 @@ export component AppWindow inherits Window {
         table.columns[1].width = path * 1px;
         table.columns[2].width = size * 1px;
     }
-    public function confirm-delete(path: string, name: string) {
+    public function confirm-delete(path: string, name: string, count: int) {
         root.cancel-rename(false);
         root.context-menu-open = false;
         root.delete-path = path;
         root.delete-name = name;
+        root.delete-count = count;
         delete-focus.start();
     }
     public function close-delete-confirm() {
@@ -226,13 +246,13 @@ export component AppWindow inherits Window {
         // window, including the search field, without moving keyboard focus.
         capture-key-pressed(event) => {
             if (root.rename-row >= 0 || root.context-menu-open || root.delete-path != "" || root.rows.length == 0) { return reject; }
-            if (event.modifiers.control || event.modifiers.alt || event.modifiers.shift) { return reject; }
+            if (event.modifiers.control || event.modifiers.alt) { return reject; }
             if (event.text == Key.DownArrow) {
-                root.select-row(min(root.rows.length - 1, root.selected + 1));
+                root.move-to(min(root.rows.length - 1, root.selected + 1), event.modifiers.shift);
                 return accept;
             }
             if (event.text == Key.UpArrow) {
-                if (root.selected > 0) { root.select-row(root.selected - 1); }
+                if (root.selected > 0) { root.move-to(root.selected - 1, event.modifiers.shift); }
                 return accept;
             }
             return reject;
@@ -242,6 +262,7 @@ export component AppWindow inherits Window {
             if (event.modifiers.control && event.text == "l") {
                 root.cancel-rename(false); search.focus(); search.select-all(); return accept;
             }
+            if (event.modifiers.control && event.text == "n") { root.new-window(); return accept; }
             return reject;
         }
         VerticalLayout {
@@ -292,14 +313,14 @@ export component AppWindow inherits Window {
                     if (event.text == Key.Escape) { root.context-menu-open = false; return accept; }
                     // StandardTableView handles only Up/Down itself.
                     if (root.rows.length > 0) {
-                        if (event.text == Key.Home) { root.select-row(0); return accept; }
-                        if (event.text == Key.End) { root.select-row(root.rows.length - 1); return accept; }
+                        if (event.text == Key.Home) { root.move-to(0, event.modifiers.shift); return accept; }
+                        if (event.text == Key.End) { root.move-to(root.rows.length - 1, event.modifiers.shift); return accept; }
                         if (event.text == Key.PageDown) {
-                            root.select-row(min(root.rows.length - 1, max(0, root.selected) + self.page-rows));
+                            root.move-to(min(root.rows.length - 1, max(0, root.selected) + self.page-rows), event.modifiers.shift);
                             return accept;
                         }
                         if (event.text == Key.PageUp) {
-                            root.select-row(max(0, root.selected - self.page-rows));
+                            root.move-to(max(0, root.selected - self.page-rows), event.modifiers.shift);
                             return accept;
                         }
                     }
@@ -325,6 +346,7 @@ export component AppWindow inherits Window {
                         if (event.kind == PointerEventKind.move) { root.hovered-row = index; }
                         if (event.kind == PointerEventKind.down) { root.cancel-rename(false); }
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                            if (!root.has-range || index < root.range-start || index > root.range-end) { root.selection-anchor = -1; }
                             root.selected = index;
                             table.focus();
                             root.context-menu-x = position.x;
@@ -336,6 +358,7 @@ export component AppWindow inherits Window {
                             // Move keyboard focus off the search field so arrow keys,
                             // Enter and shortcuts act on the clicked row.
                             table.focus();
+                            root.selection-anchor = -1;
                             root.selected = index; root.row-clicked(index);
                         }
                     }
@@ -351,6 +374,20 @@ export component AppWindow inherits Window {
                         height: table.viewport-height / max(1, root.rows.length);
                         background: Palette.selection-background;
                         opacity: 0.16;
+                    }
+                }
+                // Shift+arrow range, drawn beneath the stronger current-row tint.
+                if root.has-range: Rectangle {
+                    x: 0px; y: table.height - table.visible-height;
+                    width: table.visible-width; height: table.visible-height;
+                    clip: true;
+                    property <length> row-height: table.viewport-height / max(1, root.rows.length);
+                    Rectangle {
+                        y: table.viewport-y + root.range-start * parent.row-height;
+                        width: parent.width;
+                        height: (root.range-end - root.range-start + 1) * parent.row-height;
+                        background: Palette.selection-background;
+                        opacity: 0.20;
                     }
                 }
                 // StandardTableView's selection fill can match its row stripes.
@@ -552,7 +589,7 @@ export component AppWindow inherits Window {
                     dialog := VerticalLayout {
                         padding: 20px; spacing: 12px;
                         Text {
-                            text: "Delete “" + root.delete-name + "” permanently?";
+                            text: root.delete-count > 1 ? "Delete " + root.delete-count + " items permanently?" : "Delete “" + root.delete-name + "” permanently?";
                             font-size: 16px; font-weight: 700;
                             wrap: word-wrap; color: Palette.foreground;
                         }

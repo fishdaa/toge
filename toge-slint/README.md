@@ -44,8 +44,24 @@ cargo build --release -p toge-slint -p toged
 ```
 
 The app connects to `TOGE_SOCKET` or the usual XDG state socket, and starts `toged`
-from its executable directory or PATH if absent. The GUI exits when closed; an
-independent daemon continues running. Build requires Rust and Linux development
+from its executable directory or PATH if absent. An independent daemon keeps
+running after the GUI exits.
+
+One GUI process runs per daemon socket. It listens on `toge-slint.sock` beside the
+daemon socket, and later launches hand their request to it and exit:
+
+```bash
+toge-slint                # show the current window
+toge-slint --new-window   # open another search window
+toge-slint --toggle       # hide the current window, or show it again
+```
+
+With no GUI running, each form starts one. Bind these commands to compositor
+shortcuts (for example niri `spawn`) in place of global hotkeys. Ctrl+N opens a new
+window from inside the app. Each window has its own query, results, selection and
+daemon session; table sort and column widths are shared. Toggle acts on the most
+recently opened window and keeps its query and results while hidden. Closing a
+window discards it; the GUI exits when no window, including hidden ones, remains. Build requires Rust and Linux development
 libraries for Winit rendering (including fontconfig and xkbcommon).
 No Node, WebKit or Qt is needed for the Slint build. Runtime file actions use
 `xdg-open` and `gio trash`; the clipboard supports Wayland and X11 directly.
@@ -104,7 +120,7 @@ query. Session requests have a 30-second read timeout; status checks have a
 two-second timeout and retry while the daemon is busy, within the readiness
 deadline.
 
-This MVP does not implement tray/global shortcuts, autostart, settings editing,
+This MVP does not implement a tray, built-in global shortcuts, autostart, settings editing,
 diagnostics, or installer packages. Edit configuration with the existing GUI or configuration
 file. Keyboard bindings in this experimental shell are fixed.
 

@@ -1,16 +1,18 @@
 use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext};
 use slint::ComponentHandle;
+use std::cell::RefCell;
 use std::collections::HashSet;
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 const FILE_CLIPBOARD_TYPE: &str = "x-special/gnome-copied-files";
 
-fn clipboard_payload(path: &Path, cut: bool) -> io::Result<String> {
+fn file_uri(path: &Path) -> io::Result<String> {
     let path = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -25,15 +27,33 @@ fn clipboard_payload(path: &Path, cut: bool) -> io::Result<String> {
             write!(uri, "%{byte:02X}").unwrap();
         }
     }
-    Ok(format!("{}\n{uri}", if cut { "cut" } else { "copy" }))
+    Ok(uri)
 }
 
-fn file_clipboard(path: &Path, cut: bool) -> io::Result<Vec<ClipboardContent>> {
-    let payload = clipboard_payload(path, cut)?;
-    let uri = payload.split_once('\n').unwrap().1;
+fn clipboard_payload(paths: &[PathBuf], cut: bool) -> io::Result<String> {
+    let mut payload = String::from(if cut { "cut" } else { "copy" });
+    for path in paths {
+        payload.push('\n');
+        payload.push_str(&file_uri(path)?);
+    }
+    Ok(payload)
+}
+
+fn joined_paths(paths: &[PathBuf]) -> String {
+    let paths: Vec<_> = paths.iter().map(|path| path.to_string_lossy()).collect();
+    paths.join("\n")
+}
+
+fn file_clipboard(paths: &[PathBuf], cut: bool) -> io::Result<Vec<ClipboardContent>> {
+    let payload = clipboard_payload(paths, cut)?;
+    let mut uri_list = String::new();
+    for uri in payload.lines().skip(1) {
+        uri_list.push_str(uri);
+        uri_list.push_str("\r\n");
+    }
     Ok(vec![
-        ClipboardContent::Text(path.to_string_lossy().into_owned()),
-        ClipboardContent::Other("text/uri-list".into(), format!("{uri}\r\n").into_bytes()),
+        ClipboardContent::Text(joined_paths(paths)),
+        ClipboardContent::Other("text/uri-list".into(), uri_list.into_bytes()),
         ClipboardContent::Other(FILE_CLIPBOARD_TYPE.into(), payload.into_bytes()),
         ClipboardContent::Other(
             "application/x-kde-cutselection".into(),
@@ -118,33 +138,45 @@ pub fn delete_permanently(path: &Path) -> io::Result<()> {
     }
 }
 
-fn file_action(action: &str, path: &Path) -> io::Result<&'static str> {
+fn file_action(action: &str, paths: &[PathBuf]) -> io::Result<String> {
+    let count = paths.len();
     match action {
         "copy" | "cut" => {
-            write_clipboard(file_clipboard(path, action == "cut")?)?;
-            Ok(if action == "cut" {
-                "Cut file — paste in your file manager to move it"
-            } else {
-                "Copied file — paste in your file manager"
+            write_clipboard(file_clipboard(paths, action == "cut")?)?;
+            Ok(match (action == "cut", count) {
+                (true, 1) => "Cut file — paste in your file manager to move it".into(),
+                (true, _) => format!("Cut {count} files — paste in your file manager to move them"),
+                (false, 1) => "Copied file — paste in your file manager".into(),
+                (false, _) => format!("Copied {count} files — paste in your file manager"),
             })
         }
         "copy-path" => {
-            write_clipboard(vec![ClipboardContent::Text(
-                path.to_string_lossy().into_owned(),
-            )])?;
-            Ok("Copied path")
+            write_clipboard(vec![ClipboardContent::Text(joined_paths(paths))])?;
+            Ok(if count == 1 {
+                "Copied path".into()
+            } else {
+                format!("Copied {count} paths")
+            })
         }
         "open" | "parent" => {
-            let target = if action == "parent" {
-                path.parent().unwrap_or(path)
-            } else {
-                path
-            };
-            if Command::new("xdg-open").arg(target).status()?.success() {
-                Ok("Opened")
-            } else {
-                Err(io::Error::other("Could not open this location."))
+            // Open each highlighted folder once, even when several rows share it.
+            let mut targets: Vec<&Path> = Vec::new();
+            for path in paths {
+                let target = if action == "parent" {
+                    path.parent().unwrap_or(path)
+                } else {
+                    path
+                };
+                if !targets.contains(&target) {
+                    targets.push(target);
+                }
             }
+            for target in targets {
+                if !Command::new("xdg-open").arg(target).status()?.success() {
+                    return Err(io::Error::other("Could not open this location."));
+                }
+            }
+            Ok("Opened".into())
         }
         _ => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -165,18 +197,56 @@ pub fn place_rename(ui: &crate::AppWindow, position: Option<i32>) {
     }
 }
 
-/// Run a trash or permanent delete off the UI thread, then refresh the row.
+/// The highlighted range, or the current row alone. `Err` names why a range
+/// cannot be acted on yet.
+fn selected_paths(ui: &crate::AppWindow) -> Result<Vec<PathBuf>, &'static str> {
+    let results = crate::worker::results(ui);
+    let last = slint::Model::row_count(&*results) as i32 - 1;
+    let current = ui.get_selected().min(last);
+    let anchor = ui.get_selection_anchor().min(last);
+    if current < 0 {
+        return Ok(Vec::new());
+    }
+    let (start, end) = if anchor >= 0 {
+        (anchor.min(current), anchor.max(current))
+    } else {
+        (current, current)
+    };
+    // Acting on only the loaded part of a range would silently skip rows.
+    (start..=end)
+        .map(|index| results.path(index).map(PathBuf::from))
+        .collect::<Option<_>>()
+        .ok_or("Some highlighted rows are still loading — try again")
+}
+
+fn item_count(count: usize) -> String {
+    if count == 1 {
+        "1 item".into()
+    } else {
+        format!("{count} items")
+    }
+}
+
+/// Run a trash or permanent delete off the UI thread, then refresh the rows.
 fn remove(
     ui: &crate::AppWindow,
-    path: PathBuf,
+    paths: Vec<PathBuf>,
     permanent: bool,
     pending_deletes: &Arc<Mutex<HashSet<PathBuf>>>,
 ) {
-    // Ignore repeated key events while this item is being removed.
-    if !pending_deletes.lock().unwrap().insert(path.clone()) {
+    // Ignore repeated key events for items already being removed.
+    let paths: Vec<_> = {
+        let mut pending = pending_deletes.lock().unwrap();
+        paths
+            .into_iter()
+            .filter(|path| pending.insert(path.clone()))
+            .collect()
+    };
+    if paths.is_empty() {
         return;
     }
     ui.invoke_cancel_rename(false);
+    ui.set_selection_anchor(-1);
     ui.set_status(
         if permanent {
             "Deleting…"
@@ -188,48 +258,75 @@ fn remove(
     let pending = pending_deletes.clone();
     let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let outcome = if permanent {
-            delete_permanently(&path)
-                .map_err(|error| io::Error::other(format!("Could not delete: {error}")))
-        } else {
-            trash_with(&path, Path::new("gio"))
-        };
-        let _ = weak.upgrade_in_event_loop(move |ui| {
-            pending.lock().unwrap().remove(&path);
+        let mut removed = Vec::new();
+        let mut first_error = None;
+        for path in &paths {
+            let outcome = if permanent {
+                delete_permanently(path)
+                    .map_err(|error| io::Error::other(format!("Could not delete: {error}")))
+            } else {
+                trash_with(path, Path::new("gio"))
+            };
             match outcome {
-                Ok(()) => {
-                    crate::worker::results(&ui).send(crate::model::Command::Reconcile {
-                        paths: vec![path.to_string_lossy().into_owned()],
-                        select: None,
-                    });
-                    ui.set_status(
-                        if permanent {
-                            "Deleted permanently"
-                        } else {
-                            "Moved to Trash"
-                        }
-                        .into(),
-                    );
+                Ok(()) => removed.push(path.to_string_lossy().into_owned()),
+                Err(error) => {
+                    first_error.get_or_insert(error);
                 }
-                Err(error) => ui.set_status(error.to_string().into()),
             }
+        }
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            let mut pending = pending.lock().unwrap();
+            for path in &paths {
+                pending.remove(path);
+            }
+            drop(pending);
+            let (done, total) = (removed.len(), paths.len());
+            if done > 0 {
+                crate::worker::results(&ui).send(crate::model::Command::Reconcile {
+                    paths: removed,
+                    select: None,
+                });
+            }
+            ui.set_status(match first_error {
+                None if total == 1 && permanent => "Deleted permanently".into(),
+                None if total == 1 => "Moved to Trash".into(),
+                None if permanent => format!("Deleted {} permanently", item_count(total)).into(),
+                None => format!("Moved {} to Trash", item_count(total)).into(),
+                Some(error) if total == 1 => error.to_string().into(),
+                Some(error) => {
+                    format!("{error} ({} of {total} failed)", total - done).into()
+                }
+            });
         });
     });
 }
 
+/// Paths for the permanent-delete dialog, capped so a long range stays readable.
+fn delete_summary(paths: &[PathBuf]) -> String {
+    const SHOWN: usize = 5;
+    let mut summary = joined_paths(&paths[..paths.len().min(SHOWN)]);
+    if paths.len() > SHOWN {
+        summary.push_str(&format!("\n…and {} more", paths.len() - SHOWN));
+    }
+    summary
+}
+
 pub fn connect(ui: &crate::AppWindow) {
     let pending_deletes = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
+    // Paths listed in the permanent-delete dialog.
+    let confirming = Rc::new(RefCell::new(Vec::<PathBuf>::new()));
     let weak = ui.as_weak();
     let pending = pending_deletes.clone();
+    let to_delete = confirming.clone();
     ui.on_delete_confirmed(move || {
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        // Delete the path shown in the dialog, even if results refreshed meanwhile.
-        let path = ui.get_delete_path();
+        // Delete the paths shown in the dialog, even if results refreshed meanwhile.
+        let paths = to_delete.take();
         ui.invoke_close_delete_confirm();
-        if !path.is_empty() {
-            remove(&ui, PathBuf::from(path.as_str()), true, &pending);
+        if !paths.is_empty() {
+            remove(&ui, paths, true, &pending);
         }
     });
     let weak = ui.as_weak();
@@ -283,11 +380,20 @@ pub fn connect(ui: &crate::AppWindow) {
         if ui.get_rename_working() {
             return;
         }
-        let Some(path) = crate::worker::results(&ui).path(ui.get_selected()) else {
-            return;
+        let paths = match selected_paths(&ui) {
+            Ok(paths) if !paths.is_empty() => paths,
+            Ok(_) => return,
+            Err(message) => {
+                ui.set_status(message.into());
+                return;
+            }
         };
-        let path = PathBuf::from(path);
         if action == "rename" {
+            // Rename edits the current row, even within a highlighted range.
+            let Some(path) = crate::worker::results(&ui).path(ui.get_selected()) else {
+                return;
+            };
+            let path = PathBuf::from(path);
             let name = path.file_name().unwrap_or_default().to_string_lossy();
             let selection_end = if path.is_dir() {
                 name.len()
@@ -303,26 +409,33 @@ pub fn connect(ui: &crate::AppWindow) {
             return;
         }
         if action == "delete" {
-            remove(&ui, path, false, &pending_deletes);
+            remove(&ui, paths, false, &pending_deletes);
             return;
         }
         if action == "delete-permanently" {
-            if pending_deletes.lock().unwrap().contains(&path) {
+            let paths: Vec<_> = {
+                let pending = pending_deletes.lock().unwrap();
+                paths.into_iter().filter(|path| !pending.contains(path)).collect()
+            };
+            let Some(first) = paths.first() else {
                 return;
-            }
-            let name = path
+            };
+            let name = first
                 .file_name()
-                .unwrap_or(path.as_os_str())
-                .to_string_lossy();
+                .unwrap_or(first.as_os_str())
+                .to_string_lossy()
+                .into_owned();
             ui.invoke_confirm_delete(
-                path.to_string_lossy().into_owned().into(),
-                name.into_owned().into(),
+                delete_summary(&paths).into(),
+                name.into(),
+                paths.len() as i32,
             );
+            *confirming.borrow_mut() = paths;
             return;
         }
         let weak = ui.as_weak();
         std::thread::spawn(move || {
-            let result = file_action(&action, &path);
+            let result = file_action(&action, &paths);
             let _ = weak.upgrade_in_event_loop(move |ui| {
                 ui.set_status(match result {
                     Ok(message) => message.into(),
@@ -339,18 +452,23 @@ mod tests {
     #[test]
     fn clipboard_files_escape_special_characters_and_preserve_cut_intent() {
         assert_eq!(
-            clipboard_payload(Path::new("/tmp/a b#%\n.txt"), false).unwrap(),
+            clipboard_payload(&[PathBuf::from("/tmp/a b#%\n.txt")], false).unwrap(),
             "copy\nfile:///tmp/a%20b%23%25%0A.txt"
         );
         assert_eq!(
-            clipboard_payload(Path::new("/tmp/é.txt"), true).unwrap(),
+            clipboard_payload(&[PathBuf::from("/tmp/é.txt")], true).unwrap(),
             "cut\nfile:///tmp/%C3%A9.txt"
+        );
+        assert_eq!(
+            clipboard_payload(&[PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b c")], false)
+                .unwrap(),
+            "copy\nfile:///tmp/a\nfile:///tmp/b%20c"
         );
     }
     #[test]
     fn file_clipboard_offers_kde_and_gnome_copy_and_cut_formats() {
         for cut in [false, true] {
-            let contents = file_clipboard(Path::new("/tmp/a b.txt"), cut).unwrap();
+            let contents = file_clipboard(&[PathBuf::from("/tmp/a b.txt")], cut).unwrap();
             let formats: std::collections::HashMap<_, _> = contents
                 .into_iter()
                 .filter_map(|content| {
@@ -375,6 +493,22 @@ mod tests {
                 .as_bytes()
             );
         }
+    }
+    #[test]
+    fn file_clipboard_lists_every_highlighted_file() {
+        let paths = [PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")];
+        let contents = file_clipboard(&paths, false).unwrap();
+        assert!(matches!(&contents[0], ClipboardContent::Text(text) if text == "/tmp/a.txt\n/tmp/b.txt"));
+        assert!(matches!(
+            &contents[1],
+            ClipboardContent::Other(_, bytes) if bytes == b"file:///tmp/a.txt\r\nfile:///tmp/b.txt\r\n"
+        ));
+    }
+    #[test]
+    fn delete_summary_caps_long_ranges() {
+        let paths: Vec<_> = (1..=7).map(|n| PathBuf::from(format!("/r/{n}"))).collect();
+        assert_eq!(delete_summary(&paths[..1]), "/r/1");
+        assert_eq!(delete_summary(&paths), "/r/1\n/r/2\n/r/3\n/r/4\n/r/5\n…and 2 more");
     }
     #[test]
     fn rename_rejects_traversal_and_does_not_overwrite() {

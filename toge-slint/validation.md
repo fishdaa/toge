@@ -259,3 +259,37 @@ model state, preventing a temporary table of empty placeholders at the handoff.
   Artifacts are in `/tmp/toge-preview-visual/`. This uses injected Slint
   WindowEvents and controlled daemon timing; production watcher throughput and
   absence of fanotify overflow have not been measured in this fixture.
+
+## Multiple windows and toggle — 2026-09-27
+
+The GUI is now single-instance per daemon socket. `toge-slint --new-window` and
+`toge-slint --toggle` hand their request to the running process over
+`toge-slint.sock`; Ctrl+N opens a window in-app. Each window owns its worker,
+result session and status poller. The event loop now runs until the last window
+closes, so a toggled-away window stays alive.
+
+- All 35 Slint unit/IPC tests passed serially, including new handoff tests
+  (argument mapping, request delivery, a second instance not stealing the live
+  socket, and replacing a stale socket). Strict Clippy and formatting passed.
+- Native verification ran the debug `toge-slint` and `toged` in a nested niri
+  26.04 compositor (real Wayland tiling, only its output captured with grim)
+  against a 130-file fixture. Keys were typed with wtype; windows were closed
+  with niri's `close-window`, the same xdg close request as the title-bar
+  button. 22 assertions passed: first launch opens one window; `--new-window`
+  exits immediately and adds a second window in the same process; windows keep
+  independent queries (`report` 60, `mkv` 40); Ctrl+N adds a third; closing it
+  leaves two; `--toggle` hides and re-shows the same window with its query
+  intact, twice; a plain launch opens nothing new; closing the last windows
+  exits the process and removes the socket; `--toggle` with nothing running
+  starts the GUI.
+- Tailnet-only recording:
+  [multi-window.mp4](https://fedora.taila85941.ts.net:8924/multi-window.mp4).
+  Frames were captured at about 5 Hz, so the video runs near real time but is
+  choppy. Artifacts are in the gitignored
+  `visual-test-artifacts/multi-window-20260927/`.
+
+wtype's `-M ctrl` did not apply Ctrl under niri, so Ctrl chords are sent as
+Control_L presses. During probing, one injected sequence was read as Delete and
+trashed a fixture file (restored before the recorded run). Raising an already
+visible window depends on the compositor: Wayland does not let a client steal
+focus without an activation token.

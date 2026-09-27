@@ -2,11 +2,11 @@ mod access;
 mod actions;
 mod client;
 mod format;
+mod instance;
 mod model;
 mod preferences;
+mod windows;
 mod worker;
-use slint::ComponentHandle;
-use std::{rc::Rc, sync::Arc};
 slint::include_modules!();
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -20,71 +20,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         return access::request(std::path::Path::new(&args[1]));
     }
-    let ui = AppWindow::new()?;
-    ui.set_rows(slint::ModelRc::from(Rc::new(model::Results::default())));
-    let mailbox = Arc::new(worker::Mailbox::default());
-    preferences::connect(&ui, preferences::path(), mailbox.clone());
-    let about = Rc::new(std::cell::RefCell::new(None::<AboutWindow>));
-    ui.on_about(move || {
-        let mut window = about.borrow_mut();
-        if window.is_none() {
-            match AboutWindow::new() {
-                Ok(ui) => *window = Some(ui),
-                Err(error) => {
-                    eprintln!("Could not open About: {error}");
-                    return;
-                }
-            }
-        }
-        if let Some(ui) = window.as_ref() {
-            let _ = ui.show();
-        }
-    });
-    ui.window().on_close_requested(|| {
-        let _ = slint::quit_event_loop();
-        slint::CloseRequestResponse::HideWindow
-    });
-    ui.show()?;
-    worker::start(mailbox.clone(), ui.as_weak());
-    mailbox.submit(String::new(), true);
-    for immediate in [false, true] {
-        let m = mailbox.clone();
-        let weak = ui.as_weak();
-        let callback = move |text: slint::SharedString| {
-            m.submit(text.to_string(), immediate);
-            if let Some(ui) = weak.upgrade() {
-                ui.set_busy(true);
-                ui.set_has_error(false);
-                ui.set_status("Searching…".into());
-            }
-        };
-        if immediate {
-            ui.on_submit(callback);
-        } else {
-            ui.on_query_edited(callback);
-        }
+    let request = match args.as_slice() {
+        [] => instance::Request::from_arg(None),
+        [arg] => instance::Request::from_arg(arg.to_str()),
+        _ => None,
     }
-    let weak = ui.as_weak();
-    let last_click = std::cell::RefCell::new(None::<(String, std::time::Instant)>);
-    ui.on_row_clicked(move |index| {
-        if let Some(ui) = weak.upgrade() {
-            let Some(path) = worker::results(&ui).path(index) else {
-                return;
-            };
-            let now = std::time::Instant::now();
-            let previous = last_click.borrow_mut().take();
-            if previous.is_some_and(|(p, at)| {
-                p == path && now.duration_since(at) < std::time::Duration::from_millis(400)
-            }) {
-                ui.invoke_action("open".into());
-            } else {
-                *last_click.borrow_mut() = Some((path, now));
-            }
-        }
-    });
-    actions::connect(&ui);
-    let result = ui.run();
-    mailbox.close();
+    .ok_or("Usage: toge-slint [--new-window | --toggle]")?;
+    let socket = instance::socket_path();
+    match instance::send(&socket, request) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(error) => eprintln!("Could not reach the running Toge instance: {error}"),
+    }
+    // Without the socket this process still works, but later launches start
+    // their own instance instead of opening or toggling a window here.
+    let listener = instance::bind(&socket)
+        .inspect_err(|error| eprintln!("Toge single-instance socket unavailable: {error}"))
+        .ok();
+    windows::open()?;
+    let owns_socket = listener.is_some();
+    if let Some(listener) = listener {
+        instance::serve(listener, |request| {
+            let _ = slint::invoke_from_event_loop(move || windows::handle(request));
+        });
+    }
+    // Hidden (toggled) windows keep the GUI running; closing the last window quits.
+    let result = slint::run_event_loop_until_quit();
+    windows::shutdown();
+    if owns_socket {
+        let _ = std::fs::remove_file(&socket);
+    }
     result?;
     Ok(())
 }

@@ -130,19 +130,29 @@ impl UiState {
     }
 }
 
-pub fn connect(ui: &crate::AppWindow, path: PathBuf, mailbox: Arc<crate::worker::Mailbox>) {
-    let state = UiState::load(&path).unwrap_or_else(|error| {
+pub fn load(path: &Path) -> UiState {
+    UiState::load(path).unwrap_or_else(|error| {
         eprintln!("Could not restore table settings: {error}");
         UiState::default()
-    });
-    if let Some(sort) = state.sort {
+    })
+}
+
+/// Windows share `state`, so a new window opens with the latest sort and widths
+/// and one window's save never reverts another's.
+pub fn connect(
+    ui: &crate::AppWindow,
+    path: PathBuf,
+    state: Rc<RefCell<UiState>>,
+    mailbox: Arc<crate::worker::Mailbox>,
+) {
+    let current = *state.borrow();
+    if let Some(sort) = current.sort {
         mailbox.set_sort(Some((sort.column, sort.ascending)));
         ui.invoke_apply_sort(sort.column, sort.ascending);
     }
-    if let Some([name, path, size]) = state.column_widths {
+    if let Some([name, path, size]) = current.column_widths {
         ui.invoke_apply_column_widths(name, path, size);
     }
-    let state = Rc::new(RefCell::new(state));
     let weak = slint::ComponentHandle::as_weak(ui);
     let (sort_state, sort_path) = (state.clone(), path.clone());
     ui.on_sort_results(move |column, ascending| {
