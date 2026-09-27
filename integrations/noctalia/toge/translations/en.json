@@ -9,6 +9,8 @@
     "missing": "toge not found",
     "missing_subtitle": "Install toge or set the toge command in the plugin settings",
     "no_results": "No matches",
+    "outdated": "toge is too old for this plugin",
+    "outdated_subtitle": "Update toge to {version} or newer",
     "reindex_started": "Rebuilding the toge index",
     "reindex_subtitle": "Rescan every indexed folder",
     "reindex_title": "Rebuild index",

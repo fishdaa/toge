@@ -32,6 +32,9 @@ local ctx = {
         if subst and subst.count then
             return key .. "(" .. subst.count .. ")"
         end
+        if subst and subst.version then
+            return key .. "(" .. subst.version .. ")"
+        end
         return key
     end,
     decode = function(text)
@@ -75,6 +78,13 @@ do
     check("missing binary", rows[1].title == "launcher.missing")
     rows = results.fromCommand(run(1, "", "query failed: invalid regex: (foo\n"), ctx)
     check("error subtitle strips prefix", rows[1].subtitle == "invalid regex: (foo", rows[1].subtitle)
+    rows = results.fromCommand(run(2, "", "toge: unknown flag: --json\n"), ctx)
+    check("old toge is reported as outdated", rows[1].title == "launcher.outdated", rows[1].title)
+    check("outdated row names the minimum version", rows[1].subtitle == "launcher.outdated_subtitle(" .. results.MIN_TOGE_VERSION .. ")", rows[1].subtitle)
+    rows = results.fromCommand(run(2, "", "toge: missing max-results value\n"), ctx)
+    check("other bad-args errors stay generic", rows[1].title == "launcher.error")
+    local statusOld = results.statusRow(run(2, "", "toge: unknown flag: --json\n"), ctx)
+    check("status on old toge is outdated", statusOld.title == "launcher.outdated")
     rows = results.fromCommand(run(-1, "", "", true), ctx)
     check("timeout row", rows[1].title == "launcher.timed_out")
     for _, row in ipairs(rows) do

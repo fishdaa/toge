@@ -29,8 +29,9 @@ of results. The provider retries once a second until the index is ready.
 ## Requirements
 
 - Noctalia v5 with plugin API 24 or newer.
-- A `toge` CLI that supports `--json`, `--no-wait` and `--`. `toged` must be on
-  `PATH` or next to `toge`. The CLI starts the daemon on first use in its own
+- toge 0.3.0 or newer, the first release whose CLI has `--json`, `--no-wait`
+  and `--`. With an older `toge`, the launcher shows "toge is too old for this
+  plugin" instead of results. `toged` must be on `PATH` or next to `toge`. The CLI starts the daemon on first use in its own
   process group, so launcher timeouts don't stop it.
 - `xdg-open`, used to open results.
 - `sleep`, used as a timer for the not-ready retry.

@@ -11,6 +11,9 @@ M.EXIT_NO_RESULTS = 9
 M.EXIT_NOT_READY = 10
 M.EXIT_NOT_FOUND = 127
 
+-- First toge release with --json, --no-wait and `--`.
+M.MIN_TOGE_VERSION = "0.3.0"
+
 local EXT_GLYPHS = {
     pdf = "file-type-pdf",
     txt = "file-text",
@@ -91,6 +94,21 @@ local function firstLine(text)
     return line
 end
 
+-- Older toge releases reject the flags this plugin relies on (--json,
+-- --no-wait, --) with exit code 2 and "unknown flag".
+function M.isOutdated(result)
+    return result.exitCode == M.EXIT_BAD_ARGS and string.find(result.stderr or "", "unknown flag", 1, true) ~= nil
+end
+
+local function outdatedRow(tr)
+    return {
+        id = "noop",
+        title = tr("launcher.outdated"),
+        subtitle = tr("launcher.outdated_subtitle", { version = M.MIN_TOGE_VERSION }),
+        glyph = "alert-triangle",
+    }
+end
+
 local function infoRow(id, title, subtitle, glyph)
     return { id = id, title = title, subtitle = subtitle, glyph = glyph or "info-circle" }
 end
@@ -116,6 +134,9 @@ function M.fromCommand(result, ctx)
     end
     if code == M.EXIT_NOT_FOUND then
         return { infoRow("noop", tr("launcher.missing"), tr("launcher.missing_subtitle"), "alert-triangle") }, false
+    end
+    if M.isOutdated(result) then
+        return { outdatedRow(tr) }, false
     end
     if code ~= M.EXIT_OK then
         return { infoRow("noop", tr("launcher.error"), firstLine(result.stderr), "alert-triangle") }, false
@@ -154,6 +175,9 @@ function M.statusRow(result, ctx)
     if result.timedOut or result.exitCode ~= M.EXIT_OK then
         if result.exitCode == M.EXIT_NOT_FOUND then
             return infoRow("noop", tr("launcher.missing"), tr("launcher.missing_subtitle"), "alert-triangle"), false
+        end
+        if M.isOutdated(result) then
+            return outdatedRow(tr), false
         end
         return infoRow("noop", tr("launcher.error"), firstLine(result.stderr), "alert-triangle"), false
     end
