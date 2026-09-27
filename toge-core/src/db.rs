@@ -88,7 +88,7 @@ fn create_save_temp(path: &Path) -> io::Result<(SaveTemp, fs::File)> {
         }
         match options.open(&temporary) {
             Ok(file) => return Ok((SaveTemp(temporary), file)),
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(error),
         }
     }

@@ -500,8 +500,8 @@ fn stalled_preview_reader_does_not_hold_the_index_lock() {
                 server.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_SNDBUF,
-                (&buffer as *const libc::c_int).cast(),
-                std::mem::size_of_val(&buffer) as libc::socklen_t,
+                (&raw const buffer).cast(),
+                libc::socklen_t::try_from(std::mem::size_of_val(&buffer)).unwrap(),
             )
         },
         0
