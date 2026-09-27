@@ -109,6 +109,7 @@ export component AppWindow inherits Window {
     callback submit(string);
     callback sort-results(int, bool);
     callback action(string);
+    callback resolved-action(string, [string]);
     callback row-clicked(int);
     callback about();
     callback new-window();
@@ -385,9 +386,11 @@ export component AppWindow inherits Window {
                     clip: true;
                     property <length> row-height: table.viewport-height / max(1, root.rows.length);
                     Rectangle {
-                        y: table.viewport-y + root.range-start * parent.row-height;
+                        // Keep geometry within the viewport: very large ranges
+                        // exceed the software renderer's rectangle coordinate limits.
+                        y: max(0px, min(parent.height, table.viewport-y + root.range-start * parent.row-height));
                         width: parent.width;
-                        height: (root.range-end - root.range-start + 1) * parent.row-height;
+                        height: max(0px, min(parent.height, table.viewport-y + (root.range-end + 1) * parent.row-height) - self.y);
                         background: Palette.selection-background;
                         opacity: 0.20;
                     }

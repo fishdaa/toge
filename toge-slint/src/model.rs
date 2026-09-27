@@ -27,6 +27,13 @@ pub enum Focus {
 #[derive(Clone, Debug, PartialEq)]
 pub enum Command {
     Fetch(usize),
+    /// Resolve a selection without retaining its pages in the display cache.
+    Action {
+        generation: u64,
+        offset: usize,
+        len: usize,
+        action: String,
+    },
     /// Table column and direction, or `None` for the query's own order.
     Resort(Option<(i32, bool)>),
     Locate {
@@ -128,6 +135,10 @@ impl Results {
             .borrow()
             .as_ref()
             .is_some_and(|session| session.send(command).is_ok())
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.get()
     }
 
     pub fn total(&self) -> usize {

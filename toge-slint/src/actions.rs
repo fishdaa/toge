@@ -197,26 +197,20 @@ pub fn place_rename(ui: &crate::AppWindow, position: Option<i32>) {
     }
 }
 
-/// The highlighted range, or the current row alone. `Err` names why a range
-/// cannot be acted on yet.
-fn selected_paths(ui: &crate::AppWindow) -> Result<Vec<PathBuf>, &'static str> {
-    let results = crate::worker::results(ui);
-    let last = slint::Model::row_count(&*results) as i32 - 1;
+/// Snapshot the selected indices; paths can be resolved by the session worker.
+fn selected_range(ui: &crate::AppWindow) -> Option<(usize, usize)> {
+    let last = crate::worker::results(ui).total() as i32 - 1;
     let current = ui.get_selected().min(last);
     let anchor = ui.get_selection_anchor().min(last);
     if current < 0 {
-        return Ok(Vec::new());
+        return None;
     }
     let (start, end) = if anchor >= 0 {
         (anchor.min(current), anchor.max(current))
     } else {
         (current, current)
     };
-    // Acting on only the loaded part of a range would silently skip rows.
-    (start..=end)
-        .map(|index| results.path(index).map(PathBuf::from))
-        .collect::<Option<_>>()
-        .ok_or("Some highlighted rows are still loading — try again")
+    Some((start as usize, (end - start + 1) as usize))
 }
 
 fn item_count(count: usize) -> String {
@@ -293,9 +287,7 @@ fn remove(
                 None if permanent => format!("Deleted {} permanently", item_count(total)).into(),
                 None => format!("Moved {} to Trash", item_count(total)).into(),
                 Some(error) if total == 1 => error.to_string().into(),
-                Some(error) => {
-                    format!("{error} ({} of {total} failed)", total - done).into()
-                }
+                Some(error) => format!("{error} ({} of {total} failed)", total - done).into(),
             });
         });
     });
@@ -373,6 +365,20 @@ pub fn connect(ui: &crate::AppWindow) {
         });
     });
     let weak = ui.as_weak();
+    let pending = pending_deletes.clone();
+    let to_delete = confirming.clone();
+    ui.on_resolved_action(move |action, paths| {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        use slint::Model;
+        let paths = paths
+            .iter()
+            .map(|path| PathBuf::from(path.as_str()))
+            .collect();
+        perform_action(&ui, action, paths, &pending, &to_delete);
+    });
+    let weak = ui.as_weak();
     ui.on_action(move |action| {
         let Some(ui) = weak.upgrade() else {
             return;
@@ -380,14 +386,6 @@ pub fn connect(ui: &crate::AppWindow) {
         if ui.get_rename_working() {
             return;
         }
-        let paths = match selected_paths(&ui) {
-            Ok(paths) if !paths.is_empty() => paths,
-            Ok(_) => return,
-            Err(message) => {
-                ui.set_status(message.into());
-                return;
-            }
-        };
         if action == "rename" {
             // Rename edits the current row, even within a highlighted range.
             let Some(path) = crate::worker::results(&ui).path(ui.get_selected()) else {
@@ -408,39 +406,73 @@ pub fn connect(ui: &crate::AppWindow) {
             );
             return;
         }
-        if action == "delete" {
-            remove(&ui, paths, false, &pending_deletes);
+        let Some((offset, len)) = selected_range(&ui) else {
             return;
+        };
+        let results = crate::worker::results(&ui);
+        let paths: Option<Vec<_>> = (offset..offset + len)
+            .map(|index| results.path(index as i32).map(PathBuf::from))
+            .collect();
+        if let Some(paths) = paths {
+            perform_action(&ui, action, paths, &pending_deletes, &confirming);
+        } else if results.send(crate::model::Command::Action {
+            generation: results.generation(),
+            offset,
+            len,
+            action: action.to_string(),
+        }) {
+            ui.set_status("Loading selection…".into());
+        } else {
+            ui.set_status("Selection unavailable — retry after reconnecting".into());
         }
-        if action == "delete-permanently" {
-            let paths: Vec<_> = {
-                let pending = pending_deletes.lock().unwrap();
-                paths.into_iter().filter(|path| !pending.contains(path)).collect()
-            };
-            let Some(first) = paths.first() else {
-                return;
-            };
-            let name = first
-                .file_name()
-                .unwrap_or(first.as_os_str())
-                .to_string_lossy()
-                .into_owned();
-            ui.invoke_confirm_delete(
-                delete_summary(&paths).into(),
-                name.into(),
-                paths.len() as i32,
-            );
-            *confirming.borrow_mut() = paths;
+    });
+}
+
+fn perform_action(
+    ui: &crate::AppWindow,
+    action: slint::SharedString,
+    paths: Vec<PathBuf>,
+    pending_deletes: &Arc<Mutex<HashSet<PathBuf>>>,
+    confirming: &RefCell<Vec<PathBuf>>,
+) {
+    if paths.is_empty() || ui.get_rename_working() {
+        return;
+    }
+    if action == "delete" {
+        remove(ui, paths, false, pending_deletes);
+        return;
+    }
+    if action == "delete-permanently" {
+        let paths: Vec<_> = {
+            let pending = pending_deletes.lock().unwrap();
+            paths
+                .into_iter()
+                .filter(|path| !pending.contains(path))
+                .collect()
+        };
+        let Some(first) = paths.first() else {
             return;
-        }
-        let weak = ui.as_weak();
-        std::thread::spawn(move || {
-            let result = file_action(&action, &paths);
-            let _ = weak.upgrade_in_event_loop(move |ui| {
-                ui.set_status(match result {
-                    Ok(message) => message.into(),
-                    Err(error) => format!("Action failed: {error}").into(),
-                });
+        };
+        let name = first
+            .file_name()
+            .unwrap_or(first.as_os_str())
+            .to_string_lossy()
+            .into_owned();
+        ui.invoke_confirm_delete(
+            delete_summary(&paths).into(),
+            name.into(),
+            paths.len() as i32,
+        );
+        *confirming.borrow_mut() = paths;
+        return;
+    }
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let result = file_action(action.as_str(), &paths);
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            ui.set_status(match result {
+                Ok(message) => message.into(),
+                Err(error) => format!("Action failed: {error}").into(),
             });
         });
     });
@@ -498,7 +530,9 @@ mod tests {
     fn file_clipboard_lists_every_highlighted_file() {
         let paths = [PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")];
         let contents = file_clipboard(&paths, false).unwrap();
-        assert!(matches!(&contents[0], ClipboardContent::Text(text) if text == "/tmp/a.txt\n/tmp/b.txt"));
+        assert!(
+            matches!(&contents[0], ClipboardContent::Text(text) if text == "/tmp/a.txt\n/tmp/b.txt")
+        );
         assert!(matches!(
             &contents[1],
             ClipboardContent::Other(_, bytes) if bytes == b"file:///tmp/a.txt\r\nfile:///tmp/b.txt\r\n"
@@ -508,7 +542,10 @@ mod tests {
     fn delete_summary_caps_long_ranges() {
         let paths: Vec<_> = (1..=7).map(|n| PathBuf::from(format!("/r/{n}"))).collect();
         assert_eq!(delete_summary(&paths[..1]), "/r/1");
-        assert_eq!(delete_summary(&paths), "/r/1\n/r/2\n/r/3\n/r/4\n/r/5\n…and 2 more");
+        assert_eq!(
+            delete_summary(&paths),
+            "/r/1\n/r/2\n/r/3\n/r/4\n/r/5\n…and 2 more"
+        );
     }
     #[test]
     fn rename_rejects_traversal_and_does_not_overwrite() {

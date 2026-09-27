@@ -293,3 +293,33 @@ Control_L presses. During probing, one injected sequence was read as Delete and
 trashed a fixture file (restored before the recorded run). Raising an already
 visible window depends on the compositor: Wayland does not let a client steal
 focus without an activation token.
+
+
+## Review fixes: instance isolation and large selection actions (2026-09-27)
+
+- Instance sockets now use a daemon-filename hash within the daemon socket's
+  directory. Missing parent directories are created with mode 0700 without
+  changing existing directory permissions.
+- Uncached range actions fetch paths in bounded batches on the session worker,
+  independently of the display page cache. A changed result generation or
+  superseding query cancels resolution before any file action executes.
+- The range highlight is bounded to the visible viewport. Native verification
+  exposed a software-renderer coordinate overflow for a 5,000-row highlight;
+  the final run verified that this no longer crashes.
+- All 42 `toge-slint` tests passed with `--test-threads=1`; Clippy passed with
+  `--all-targets -- -D warnings`. An existing access-capability test failed once
+  in a parallel run and passed on the serial rerun.
+- Native shared `ui/main.slint` verification used the actual `toge-slint` binary
+  and daemon on a nested headless Wayland compositor, with keyboard input from
+  `wtype` and window capture from `grim`. It tested new-directory startup,
+  search focus, End/Shift+Home scrolling and a 5,000-row selection, confirmation
+  and cancellation, permanent deletion of only generated temporary fixture
+  files, reconciliation to No matches, toggle handoff, and two daemon sockets
+  in one directory with independent GUI processes.
+- Captured frames were inspected for layout, clipping, focus, scroll position
+  and visible errors. This is a native Slint window recording on a headless
+  compositor; live fanotify updates and the user's desktop compositor were
+  not verified. Artifacts are outside version control in
+  `/tmp/toge-fix-visual/`.
+- Tailnet-only recording:
+  https://fedora.taila85941.ts.net:8938/recording.mp4

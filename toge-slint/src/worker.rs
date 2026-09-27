@@ -341,6 +341,44 @@ fn serve_commands(
                 return Ok(());
             }
             match command {
+                Command::Action {
+                    generation,
+                    offset,
+                    len,
+                    action,
+                } => {
+                    let outcome =
+                        selection_paths(session, generation, offset, len, || mailbox.current(q.id));
+                    let state = session.state();
+                    let m = mailbox.clone();
+                    let id = q.id;
+                    ui.upgrade_in_event_loop(move |ui| {
+                        if !m.current(id) {
+                            return;
+                        }
+                        match outcome {
+                            Ok(paths) if results(&ui).generation() == generation => {
+                                ui.set_status(
+                                    status_text(state, results(&ui).size_indexed.get()).into(),
+                                );
+                                ui.invoke_resolved_action(
+                                    action.into(),
+                                    slint::ModelRc::new(slint::VecModel::from(
+                                        paths
+                                            .into_iter()
+                                            .map(slint::SharedString::from)
+                                            .collect::<Vec<_>>(),
+                                    )),
+                                );
+                            }
+                            Ok(_) => ui.set_status(
+                                "Results changed — select the items again and retry".into(),
+                            ),
+                            Err(error) => ui.set_status(format!("Action failed: {error}").into()),
+                        }
+                    })
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                }
                 Command::Fetch(page) => {
                     let request = SessionRequest::Fetch {
                         offset: page * PAGE,
@@ -387,6 +425,52 @@ fn serve_commands(
             }
         }
     }
+}
+
+/// Collect only the action's paths, leaving the bounded display cache alone.
+/// Abort if any batch belongs to a rebuilt order; mixing generations could
+/// otherwise rename, open or delete items the user did not select.
+fn selection_paths<S: std::io::Read + std::io::Write>(
+    session: &mut toge_core::ipc::session::SessionClient<S>,
+    generation: u64,
+    offset: usize,
+    len: usize,
+    current: impl Fn() -> bool,
+) -> std::io::Result<Vec<String>> {
+    use toge_core::ipc::session::MAX_SESSION_FETCH;
+    let end = offset
+        .checked_add(len)
+        .filter(|&end| end <= session.state().total_count)
+        .ok_or_else(|| std::io::Error::other("Selection is no longer available"))?;
+    let mut paths = Vec::new();
+    let mut start = offset;
+    while start < end {
+        if !current() || session.state().generation != generation {
+            return Err(std::io::Error::other(
+                "Results changed — select the items again and retry",
+            ));
+        }
+        let count = (end - start).min(MAX_SESSION_FETCH);
+        match session.request(&SessionRequest::Fetch {
+            offset: start,
+            len: count,
+        })? {
+            SessionResponse::Rows {
+                state,
+                offset,
+                rows,
+            } if state.generation == generation && offset == start && rows.len() == count => {
+                paths.extend(rows.into_iter().map(|row| row.path));
+            }
+            _ => {
+                return Err(std::io::Error::other(
+                    "Results changed — select the items again and retry",
+                ));
+            }
+        }
+        start += count;
+    }
+    Ok(paths)
 }
 
 /// Keep a single UI action within the wire protocol's per-request path limit.
@@ -582,6 +666,79 @@ fn config_size_indexed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selection_spans_more_pages_than_the_display_cache_and_rejects_rebuilds() {
+        use toge_core::ipc::session::{
+            MAX_SESSION_FRAME_SIZE, SessionClient, SessionRow, read_frame, write_frame,
+        };
+        for rebuild in [false, true] {
+            let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+            let daemon = std::thread::spawn(move || {
+                read_frame(&mut server, MAX_SESSION_FRAME_SIZE)
+                    .unwrap()
+                    .unwrap();
+                let mut state = SessionState {
+                    generation: 1,
+                    total_count: 6000,
+                    total_size: 0,
+                };
+                write_frame(&mut server, &SessionResponse::State(state).encode()).unwrap();
+                let mut batches = 0;
+                while let Some(bytes) = read_frame(&mut server, MAX_SESSION_FRAME_SIZE).unwrap() {
+                    let SessionRequest::Fetch { offset, len } =
+                        SessionRequest::decode(&bytes).unwrap()
+                    else {
+                        panic!("expected fetch");
+                    };
+                    assert!(len <= toge_core::ipc::session::MAX_SESSION_FETCH);
+                    batches += 1;
+                    if rebuild && batches == 2 {
+                        state.generation += 1;
+                    }
+                    let rows = (offset..offset + len)
+                        .map(|i| SessionRow {
+                            path: format!("/fixture/{i}.txt"),
+                            is_dir: false,
+                            size: 0,
+                            modified_unix: 0,
+                        })
+                        .collect();
+                    write_frame(
+                        &mut server,
+                        &SessionResponse::Rows {
+                            state,
+                            offset,
+                            rows,
+                        }
+                        .encode(),
+                    )
+                    .unwrap();
+                }
+                batches
+            });
+            let mut session = SessionClient::open(
+                client,
+                SessionOpen {
+                    raw: String::new(),
+                    sort: None,
+                },
+            )
+            .unwrap();
+            let paths = selection_paths(&mut session, 1, 17, 5000, || true);
+            if rebuild {
+                assert!(paths.unwrap_err().to_string().contains("Results changed"));
+            } else {
+                let paths = paths.unwrap();
+                assert_eq!(paths.len(), 5000);
+                assert_eq!(paths.first().unwrap(), "/fixture/17.txt");
+                assert_eq!(paths.last().unwrap(), "/fixture/5016.txt");
+                assert!(selection_paths(&mut session, 1, 0, 1, || false).is_err());
+            }
+            drop(session);
+            assert_eq!(daemon.join().unwrap(), if rebuild { 2 } else { 5 });
+        }
+    }
+
     #[test]
     fn large_reconciliation_keeps_the_session_usable() {
         use toge_core::ipc::session::{

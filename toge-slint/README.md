@@ -47,7 +47,7 @@ The app connects to `TOGE_SOCKET` or the usual XDG state socket, and starts `tog
 from its executable directory or PATH if absent. An independent daemon keeps
 running after the GUI exits.
 
-One GUI process runs per daemon socket. It listens on `toge-slint.sock` beside the
+One GUI process runs per daemon socket. It listens on `toge-slint-<socket-id>.sock` beside the
 daemon socket, and later launches hand their request to it and exit:
 
 ```bash
@@ -84,7 +84,10 @@ row for Open, Copy path, Open folder, Copy, Cut, Rename, Delete, and Delete
 permanently. Ctrl+C copies
 the file, Ctrl+X cuts it, and Ctrl+Shift+C copies its path. Paste files in your file
 manager; Cut moves the source only when pasted. File clipboard formats support
-GNOME and KDE file managers. F2 or Rename edits the Name cell in place; Enter
+GNOME and KDE file managers. Shift+arrow, Shift+Home/End and Shift+PageUp/PageDown
+highlight a range. Actions resolve uncached rows from the daemon, including ranges
+larger than the display cache; if the result order changes while loading the
+selection, select the items again and retry. F2 or Rename edits the Name cell in place; Enter
 saves and Escape cancels. Clicking elsewhere cancels an uncommitted rename.
 Delete moves the selected item straight to Trash without confirmation. Restore
 it from your file manager’s Trash if needed. Shift+Delete (or **Delete
