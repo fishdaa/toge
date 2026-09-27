@@ -126,6 +126,16 @@ pub fn request(binary: &Path) -> Result<(), Box<dyn std::error::Error>> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// Serializes tests that write fake tools and then execute them. A child
+    /// forked by a parallel test can briefly inherit a script's write handle,
+    /// which makes executing that script fail with ETXTBSY.
+    static EXEC_LOCK: Mutex<()> = Mutex::new(());
+
+    fn exec_lock() -> MutexGuard<'static, ()> {
+        EXEC_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     fn tool(dir: &Path, name: &str, body: &str) -> PathBuf {
         let path = dir.join(name);
@@ -136,6 +146,7 @@ mod tests {
 
     #[test]
     fn approval_uses_fixed_arguments_and_verifies_capabilities() {
+        let _guard = exec_lock();
         let dir = tempfile::tempdir().unwrap();
         let binary = dir.path().join("daemon with spaces");
         let pkexec = tool(
@@ -164,6 +175,7 @@ mod tests {
 
     #[test]
     fn cancelled_or_denied_authentication_never_counts_as_approval() {
+        let _guard = exec_lock();
         for code in [126, 127] {
             let dir = tempfile::tempdir().unwrap();
             let pkexec = tool(dir.path(), "pkexec", &format!("exit {code}"));
@@ -187,6 +199,7 @@ mod tests {
 
     #[test]
     fn successful_command_without_capabilities_is_rejected() {
+        let _guard = exec_lock();
         let dir = tempfile::tempdir().unwrap();
         let pkexec = tool(dir.path(), "pkexec", "exit 0");
         let getcap = tool(dir.path(), "getcap", "exit 0");
