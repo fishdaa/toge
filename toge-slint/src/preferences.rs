@@ -35,11 +35,9 @@ pub struct UiState {
 }
 
 pub fn path() -> PathBuf {
-    let root = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    let root = std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| {
             PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        });
+        }, PathBuf::from);
     root.join("toge/slint-ui.toml")
 }
 

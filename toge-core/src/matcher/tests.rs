@@ -60,7 +60,7 @@ fn test_match_path_includes_parent_directories() {
     let mut q = substring_query("docs");
     q.match_path = true;
     let mut ids = match_query(&idx, &q);
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![0, 1, 2]);
 }
 
@@ -90,7 +90,7 @@ fn test_file_modifier_skips_dirs() {
     let mut q = substring_query("");
     q.require_file = true;
     let mut ids = match_query(&idx, &q);
-    ids.sort();
+    ids.sort_unstable();
     // dir1 excluded.
     assert_eq!(ids, vec![0, 1, 3, 4]);
 }
@@ -123,7 +123,7 @@ fn test_not_term() {
     let mut q = substring_query("");
     q.terms = vec![TextTerm::Not(Box::new(TextTerm::Substring("foo".into())))];
     let mut ids = match_query(&idx, &q);
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![1, 2, 3, 4]);
 }
 
@@ -136,7 +136,7 @@ fn test_or_term_matches_either_side() {
         TextTerm::Substring("bar".into()),
     ])];
     let mut ids = match_query(&idx, &q);
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![0, 1]);
 }
 

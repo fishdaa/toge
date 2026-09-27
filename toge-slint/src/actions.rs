@@ -396,7 +396,7 @@ pub fn connect(ui: &crate::AppWindow) {
             let selection_end = if path.is_dir() {
                 name.len()
             } else {
-                path.file_stem().map_or(name.len(), |stem| stem.len())
+                path.file_stem().map_or(name.len(), std::ffi::OsStr::len)
             };
             ui.set_rename_path(path.to_string_lossy().into_owned().into());
             ui.invoke_begin_rename(

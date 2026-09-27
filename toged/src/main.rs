@@ -89,8 +89,8 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
             fd,
             libc::SOL_SOCKET,
             libc::SO_PEERCRED,
-            &mut cred as *mut _ as *mut libc::c_void,
-            &mut len,
+            (&raw mut cred).cast::<libc::c_void>(),
+            &raw mut len,
         )
     };
     if rc != 0 {
@@ -133,22 +133,18 @@ fn version() {
 }
 
 fn default_state_dir() -> PathBuf {
-    env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    env::var_os("XDG_STATE_HOME").map_or_else(|| {
             let home = env::var_os("HOME").expect("HOME not set");
             PathBuf::from(home).join(".local/state")
-        })
+        }, PathBuf::from)
         .join("toge")
 }
 
 fn default_config_dir() -> PathBuf {
-    env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    env::var_os("XDG_CONFIG_HOME").map_or_else(|| {
             let home = env::var_os("HOME").expect("HOME not set");
             PathBuf::from(home).join(".config")
-        })
+        }, PathBuf::from)
         .join("toge")
 }
 
@@ -336,11 +332,10 @@ fn is_ignored_path(path: &str, state_dir: &Path, config_dir: &Path, is_dir: bool
         || (is_dir
             && path
                 .file_name()
-                .map(|name| {
+                .is_some_and(|name| {
                     let bytes = name.as_encoded_bytes();
                     bytes.len() > 1 && bytes.starts_with(b".")
-                })
-                .unwrap_or(false))
+                }))
 }
 
 fn is_within_roots(path: &str, roots: &[PathBuf]) -> bool {
@@ -366,8 +361,7 @@ fn metadata_snapshot(path: &str) -> (u64, i64, i64, i64) {
         value
             .ok()
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(now)
+            .map_or(now, |d| d.as_secs() as i64)
     };
 
     (
@@ -730,7 +724,7 @@ fn stream_results(
             );
         }
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     let matcher = QueryMatcher::new(query.clone());
     let needs_dates = query.date_modified.is_some()
         || query.date_created.is_some()
@@ -850,10 +844,10 @@ fn highlight_path(path: &str, query: &Query) -> String {
     }
 
     let highlighted = apply_highlight_ranges(name, &mut ranges);
-    if highlighted != name {
-        format!("{}{}", parent, highlighted)
-    } else {
+    if highlighted == name {
         path.to_string()
+    } else {
+        format!("{parent}{highlighted}")
     }
 }
 
@@ -1108,9 +1102,7 @@ fn main() {
     }
 
     let config = config_path
-        .as_deref()
-        .map(Config::load)
-        .unwrap_or_else(|| Config::load(&config_dir.join("config.toml")))
+        .as_deref().map_or_else(|| Config::load(&config_dir.join("config.toml")), Config::load)
         .unwrap_or_else(|_| Config::default_config());
 
     {
@@ -1143,12 +1135,12 @@ fn main() {
                 &index_config,
                 &index_state,
                 watcher_failure.as_deref(),
-            )
+            );
         }
     });
 
     if let Err(err) = spawn_result {
-        eprintln!("background indexing unavailable: {}", err);
+        eprintln!("background indexing unavailable: {err}");
         start_index(&state_dir, &config, &state, watcher_failure.as_deref());
     }
 
@@ -1366,11 +1358,11 @@ fn apply_change(
             index_created_path_with(st, path, *is_dir, *metadata, config);
         }
         IndexChange::Delete { path } => {
-            append_watcher_log(st, format!("delete {}", path));
+            append_watcher_log(st, format!("delete {path}"));
             remove_deleted_path(&mut st.index, path, roots);
         }
         IndexChange::Modify { path, metadata } => {
-            append_watcher_log(st, format!("modify {}", path));
+            append_watcher_log(st, format!("modify {path}"));
             // Refresh only entries already indexed, with the same type.
             if let Some(id) = st.index.id_by_path(path) {
                 let entry = &st.index.entries[id as usize];
@@ -1383,7 +1375,7 @@ fn apply_change(
             }
         }
         IndexChange::Move { from, to } => {
-            append_watcher_log(st, format!("move {} -> {}", from, to));
+            append_watcher_log(st, format!("move {from} -> {to}"));
             remove_deleted_path(&mut st.index, from, roots);
             index_created_path(st, to, Path::new(to).is_dir(), config);
         }
@@ -1423,7 +1415,7 @@ fn start_watcher(
             let mut watcher = match FanotifyWatcher::new() {
                 Ok(watcher) => watcher,
                 Err(e) => {
-                    eprintln!("Failed to create fanotify watcher: {}", e);
+                    eprintln!("Failed to create fanotify watcher: {e}");
                     mark_watcher_unavailable(&state, &format!("initialization error: {e}"));
                     return;
                 }
@@ -1459,7 +1451,7 @@ fn start_watcher(
                             thread::sleep(std::time::Duration::from_millis(100));
                             continue;
                         }
-                        eprintln!("fanotify poll error: {}", e);
+                        eprintln!("fanotify poll error: {e}");
                         thread::sleep(std::time::Duration::from_secs(1));
                         continue;
                     }

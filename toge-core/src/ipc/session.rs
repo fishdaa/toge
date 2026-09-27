@@ -115,7 +115,7 @@ pub(super) fn push_sort(buf: &mut Vec<u8>, sort: Option<(SortKey, bool)>) {
         None => buf.push(0xff),
         Some((key, ascending)) => {
             buf.push(sort_key_to_u8(key));
-            buf.push(ascending as u8);
+            buf.push(u8::from(ascending));
         }
     }
 }
@@ -237,7 +237,7 @@ impl SessionResponse {
                 push_usize(&mut buf, rows.len());
                 for row in rows {
                     push_string(&mut buf, &row.path);
-                    buf.push(row.is_dir as u8);
+                    buf.push(u8::from(row.is_dir));
                     push_u64(&mut buf, row.size);
                     push_u64(&mut buf, row.modified_unix as u64);
                 }
@@ -385,7 +385,7 @@ impl<S: Read + Write> SessionClient<S> {
                     && state.total_count == rows.len()
                     && rows.len() <= SESSION_PREVIEW_ROWS =>
                 {
-                    preview(rows)?
+                    preview(rows)?;
                 }
                 _ => {
                     return Err(io::Error::new(

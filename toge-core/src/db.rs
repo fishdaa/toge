@@ -134,7 +134,7 @@ impl Index {
         for entry in &self.entries {
             data.write_all(&entry.name_off.to_le_bytes())?;
             data.write_all(&entry.ext_off.to_le_bytes())?;
-            data.write_all(&[if entry.is_dir { 1 } else { 0 }])?;
+            data.write_all(&[u8::from(entry.is_dir)])?;
         }
         // Section 2b: optional metadata fields (size, modified, created, accessed).
         for entry in &self.entries {
@@ -160,7 +160,7 @@ impl Index {
         let bytes_written = data.bytes_written;
         let checksum = data.checksum;
         data.flush()?;
-        let mut file = data.inner.into_inner().map_err(|err| err.into_error())?;
+        let mut file = data.inner.into_inner().map_err(std::io::IntoInnerError::into_error)?;
         file.seek(SeekFrom::Start(12))?;
         file.write_all(&checksum.to_le_bytes())?;
         file.sync_all()?;

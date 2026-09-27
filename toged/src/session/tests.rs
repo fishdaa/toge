@@ -464,14 +464,14 @@ fn date_sessions_use_indexed_metadata_and_sync_watcher_changes() {
     assert_eq!(session.ids[0], st.index.id_by_path(a).unwrap());
     // The watcher updates an existing entry rather than adding/removing it.
     st.index.insert_with_metadata(b, false, 2, 50, 20, 30);
-    session.built_at = Instant::now() - Duration::from_secs(2);
+    session.built_at = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
     session.handle(&mut st, SessionRequest::Sync, &env);
     assert_eq!(session.ids[0], st.index.id_by_path(b).unwrap());
     let before = st.index.entries[st.index.id_by_path(a).unwrap() as usize].modified;
     Session::open_preview(
         &mut st,
         &SessionOpen {
-            raw: "".into(),
+            raw: String::new(),
             sort: Some((SortKey::Modified, true)),
         },
         true,

@@ -327,10 +327,10 @@ fn serve_commands(
         let Some(first) = first else {
             let before = session.state();
             session.request(&SessionRequest::Sync)?;
-            let rows = if session.state() != before {
-                Some(first_page(session)?)
-            } else {
+            let rows = if session.state() == before {
                 None
+            } else {
+                Some(first_page(session)?)
             };
             post(mailbox, ui, q.id, session.state(), Reply::Synced { rows })?;
             continue;
@@ -632,7 +632,7 @@ fn apply(ui: &crate::AppWindow, state: SessionState, reply: Reply) {
             let position = position.map(|p| p as i32);
             match focus {
                 Focus::Scroll => {
-                    ui.invoke_select_row(position.unwrap_or(if total > 0 { 0 } else { -1 }))
+                    ui.invoke_select_row(position.unwrap_or(if total > 0 { 0 } else { -1 }));
                 }
                 Focus::Keep => match position {
                     Some(position) => ui.set_selected(position),
@@ -654,11 +654,9 @@ fn apply(ui: &crate::AppWindow, state: SessionState, reply: Reply) {
 }
 
 fn config_size_indexed() -> bool {
-    let root = std::env::var_os("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| {
+    let root = std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| {
             std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        });
+        }, std::path::PathBuf::from);
     toge_core::config::Config::load(&root.join("toge/config.toml"))
         .unwrap_or_else(|_| toge_core::config::Config::default_config())
         .index_size
@@ -745,7 +743,7 @@ mod tests {
             MAX_SESSION_FRAME_SIZE, MAX_SESSION_RECONCILE, SessionClient, read_frame, write_frame,
         };
         let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
-        let paths: Vec<_> = (0..MAX_SESSION_RECONCILE * 2 + 1)
+        let paths: Vec<_> = (0..=(MAX_SESSION_RECONCILE * 2))
             .map(|i| format!("/fixture/{i}.txt"))
             .collect();
         let expected = paths.clone();

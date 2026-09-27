@@ -561,7 +561,7 @@ fn disconnected_stream_and_expired_write_stop_promptly() {
     let request = toge_core::ipc::StreamQueryRequest {
         query: QueryRequest {
             id: 1,
-            raw: "".into(),
+            raw: String::new(),
             max_results: usize::MAX,
             offset: 0,
             format: OutputFormat::Default,

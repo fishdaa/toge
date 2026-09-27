@@ -304,7 +304,7 @@ fn parse_sort(value: &str) -> Result<Sort, ParseError> {
         "accessed-desc" | "date-accessed-desc" => Ok(Sort::AccessedDesc),
         "extension" | "ext" | "extension-asc" | "ext-asc" => Ok(Sort::ExtensionAsc),
         "extension-desc" | "ext-desc" => Ok(Sort::ExtensionDesc),
-        other => Err(ParseError(format!("unknown sort: {}", other))),
+        other => Err(ParseError(format!("unknown sort: {other}"))),
     }
 }
 
@@ -318,7 +318,7 @@ fn apply_macro(query: &mut Query, name: &str) -> Result<(), ParseError> {
         "zip" => "7z;cab;bz2;gz;rar;tar;tgz;zip",
         _ => return Ok(()),
     };
-    let list: Vec<String> = exts.split(';').map(|s| s.to_string()).collect();
+    let list: Vec<String> = exts.split(';').map(std::string::ToString::to_string).collect();
     query.ext = Some(list);
     Ok(())
 }
@@ -436,7 +436,7 @@ fn parse_size_value(s: &str) -> Result<u64, ParseError> {
         .0
         .parse::<u64>()
         .map(|n| n * multiplier.1)
-        .map_err(|_| ParseError(format!("invalid size: {}", s)))
+        .map_err(|_| ParseError(format!("invalid size: {s}")))
 }
 
 fn parse_date(value: &str) -> Result<RangeFilter<i64>, ParseError> {
@@ -460,25 +460,25 @@ fn parse_explicit_date(value: &str) -> Result<(i64, i64), ParseError> {
     let mut parts = value.split('-');
     let year = parts
         .next()
-        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?
+        .ok_or_else(|| ParseError(format!("invalid date: {value}")))?
         .parse::<i32>()
-        .map_err(|_| ParseError(format!("invalid date: {}", value)))?;
+        .map_err(|_| ParseError(format!("invalid date: {value}")))?;
     let month = parts
         .next()
-        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?
+        .ok_or_else(|| ParseError(format!("invalid date: {value}")))?
         .parse::<u32>()
-        .map_err(|_| ParseError(format!("invalid date: {}", value)))?;
+        .map_err(|_| ParseError(format!("invalid date: {value}")))?;
     let day = parts
         .next()
-        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?
+        .ok_or_else(|| ParseError(format!("invalid date: {value}")))?
         .parse::<u32>()
-        .map_err(|_| ParseError(format!("invalid date: {}", value)))?;
+        .map_err(|_| ParseError(format!("invalid date: {value}")))?;
     if parts.next().is_some() {
-        return Err(ParseError(format!("invalid date: {}", value)));
+        return Err(ParseError(format!("invalid date: {value}")));
     }
 
     let days = days_since_unix_epoch(year, month, day)
-        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?;
+        .ok_or_else(|| ParseError(format!("invalid date: {value}")))?;
     let start = days * 86400;
     Ok((start, start + 86400 - 1))
 }
@@ -492,7 +492,7 @@ fn days_since_unix_epoch(year: i32, month: u32, day: u32) -> Option<i64> {
         return None;
     }
 
-    let adjust = if month <= 2 { 1 } else { 0 };
+    let adjust = i32::from(month <= 2);
     let y = i64::from(year - adjust);
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -593,19 +593,17 @@ fn validate_regex(pattern: &str) -> Result<(), ParseError> {
     }
     if max_group_depth > MAX_REGEX_GROUP_DEPTH {
         return Err(ParseError(format!(
-            "regex too complex: group nesting exceeds {}",
-            MAX_REGEX_GROUP_DEPTH
+            "regex too complex: group nesting exceeds {MAX_REGEX_GROUP_DEPTH}"
         )));
     }
     if alternations > MAX_REGEX_ALTERNATIONS {
         return Err(ParseError(format!(
-            "regex too complex: alternations exceed {}",
-            MAX_REGEX_ALTERNATIONS
+            "regex too complex: alternations exceed {MAX_REGEX_ALTERNATIONS}"
         )));
     }
     regex::Regex::new(pattern)
         .map(|_| ())
-        .map_err(|e| ParseError(format!("invalid regex: {}", e)))
+        .map_err(|e| ParseError(format!("invalid regex: {e}")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

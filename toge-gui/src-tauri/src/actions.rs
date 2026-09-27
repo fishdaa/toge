@@ -11,9 +11,7 @@ pub fn open_path(path: &str) {
 
 pub fn reveal_in_folder(path: &str) {
     let parent = Path::new(path)
-        .parent()
-        .map(|p| p.as_os_str().to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string());
+        .parent().map_or_else(|| path.to_string(), |p| p.as_os_str().to_string_lossy().to_string());
     let _ = Command::new("xdg-open")
         .arg(parent)
         .stdout(Stdio::null())
@@ -33,7 +31,7 @@ pub fn trash_path(path: &str) -> Result<(), String> {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
-        .map_err(|e| format!("failed to run gio trash: {}", e))?;
+        .map_err(|e| format!("failed to run gio trash: {e}"))?;
 
     if output.status.success() {
         Ok(())
@@ -50,7 +48,7 @@ pub fn delete_path(path: &str) -> Result<(), String> {
     } else {
         std::fs::remove_file(p)
     };
-    result.map_err(|e| format!("delete failed: {}", e))
+    result.map_err(|e| format!("delete failed: {e}"))
 }
 
 fn try_copy(text: &str, program: &str, args: &[&str]) -> std::io::Result<()> {

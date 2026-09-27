@@ -16,3 +16,6 @@ slint-build = "=1.17.1"
 
 [dev-dependencies]
 tempfile = "3"
+
+[lints]
+workspace = true

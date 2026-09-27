@@ -112,7 +112,7 @@ impl NdlOptions {
                 "r" | "regex" => {
                     let value = iter.next().ok_or("missing regex value")?;
                     opts.regex = Some(value.clone());
-                    positional.push(format!("regex:{}", value));
+                    positional.push(format!("regex:{value}"));
                 }
                 "i" | "case" => opts.case = true,
                 "w" | "ww" | "whole-word" => opts.whole_word = true,
@@ -129,7 +129,7 @@ impl NdlOptions {
                 "path" => {
                     let value = iter.next().ok_or("missing path value")?;
                     opts.path_filter = Some(value.clone());
-                    positional.push(format!("path:{}", value));
+                    positional.push(format!("path:{value}"));
                 }
                 "size" => opts.show_size = true,
                 "dm" | "date-modified" => opts.show_modified = true,
@@ -187,7 +187,7 @@ impl NdlOptions {
                     let value = iter.next().ok_or("missing config path")?;
                     opts.config_path = Some(value);
                 }
-                _ => return Err(format!("unknown flag: {}", arg)),
+                _ => return Err(format!("unknown flag: {arg}")),
             }
         }
 
@@ -207,11 +207,11 @@ impl NdlOptions {
             let sort_str = if has_direction {
                 sort.clone()
             } else if opts.sort_ascending {
-                format!("{}-asc", sort)
+                format!("{sort}-asc")
             } else {
-                format!("{}-desc", sort)
+                format!("{sort}-desc")
             };
-            search_parts.push(format!("sort:{}", sort_str));
+            search_parts.push(format!("sort:{sort_str}"));
         }
         search_parts.extend(positional);
 
@@ -222,7 +222,7 @@ impl NdlOptions {
 
 fn parse_usize(s: &str) -> Result<usize, String> {
     s.parse::<usize>()
-        .map_err(|_| format!("invalid number: {}", s))
+        .map_err(|_| format!("invalid number: {s}"))
 }
 
 fn parse_windows_flag(arg: &str, positional: &mut Vec<String>) -> Result<(), String> {
@@ -252,11 +252,11 @@ fn parse_windows_flag(arg: &str, positional: &mut Vec<String>) -> Result<(), Str
             "-E" => positional.push("sort:extension-desc".to_string()),
             "D" => positional.push("sort:date-modified-desc".to_string()),
             "-D" => positional.push("sort:date-modified-asc".to_string()),
-            _ => return Err(format!("unknown sort flag: /o{}", sort)),
+            _ => return Err(format!("unknown sort flag: /o{sort}")),
         }
         return Ok(());
     }
-    Err(format!("unknown windows flag: {}", arg))
+    Err(format!("unknown windows flag: {arg}"))
 }
 
 #[cfg(test)]

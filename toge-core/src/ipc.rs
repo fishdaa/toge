@@ -241,7 +241,7 @@ impl Request {
                 push_usize(&mut buf, q.max_results);
                 push_usize(&mut buf, q.offset);
                 buf.push(q.format.to_u8());
-                buf.push(if q.highlight { 1 } else { 0 });
+                buf.push(u8::from(q.highlight));
             }
             Request::StreamQuery(stream) => {
                 buf = Request::Query(stream.query.clone()).encode();
@@ -343,7 +343,7 @@ fn encode_results(id: u64, total_count: usize, total_size: u64, rows: &[ResultRo
         push_string(&mut buf, &row.name);
         push_string(&mut buf, &row.parent);
         push_string(&mut buf, &row.extension);
-        buf.push(if row.is_dir { 1 } else { 0 });
+        buf.push(u8::from(row.is_dir));
         push_u64(&mut buf, row.size);
         push_u64(&mut buf, row.modified_unix as u64);
         push_u64(&mut buf, row.created_unix as u64);
@@ -364,7 +364,7 @@ impl Response {
                 push_usize(&mut buf, s.indexed_count);
                 buf.push(s.status.to_u8());
                 push_string(&mut buf, &s.status_message);
-                buf.push(if s.watcher_healthy { 1 } else { 0 });
+                buf.push(u8::from(s.watcher_healthy));
                 push_usize(&mut buf, s.watched_dir_count);
                 push_usize(&mut buf, s.watch_failure_count);
                 push_u64(&mut buf, s.watch_overflow_count);

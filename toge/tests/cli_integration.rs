@@ -22,9 +22,7 @@ fn needled_binary() -> PathBuf {
 }
 
 fn ndl_binary() -> PathBuf {
-    std::env::var_os("CARGO_BIN_EXE_toge")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| sibling_binary("toge"))
+    std::env::var_os("CARGO_BIN_EXE_toge").map_or_else(|| sibling_binary("toge"), PathBuf::from)
 }
 
 fn sibling_binary(name: &str) -> PathBuf {
@@ -133,7 +131,7 @@ fn cleanup(dir: &PathBuf, child: &mut Child) {
 }
 
 fn uds_available(name: &str) -> bool {
-    let dir = test_dir(&format!("probe-{}", name));
+    let dir = test_dir(&format!("probe-{name}"));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let sock = dir.join("probe.sock");
@@ -171,7 +169,7 @@ fn ndl_status_recovers_from_stale_socket_by_starting_daemon() {
     );
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("status:"), "unexpected stdout: {}", stdout);
+    assert!(stdout.contains("status:"), "unexpected stdout: {stdout}");
 
     let mut stream = UnixStream::connect(&sock).unwrap();
     send_request(&mut stream, &Request::Quit);

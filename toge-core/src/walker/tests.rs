@@ -42,8 +42,7 @@ fn test_walk_indexes_all_files_and_dirs() {
     let count = walk(dir.path(), &mut idx, &Excludes::new(), false);
     assert!(
         count >= 6,
-        "expected at least 4 files + 2 dirs, got {}",
-        count
+        "expected at least 4 files + 2 dirs, got {count}"
     );
     assert_eq!(idx.count(), count);
 

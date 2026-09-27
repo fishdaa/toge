@@ -25,7 +25,7 @@ use toge_core::sort::{OrderCache, SortKey};
 use toge_core::walker::{Excludes, excluded_under_roots};
 
 /// Clients poll with `Sync`; a session left silent this long is abandoned.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const IDLE_TIMEOUT: Duration = Duration::from_mins(2);
 /// Live refreshes re-run the whole query, so pace them by its cost.
 const SYNC_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -333,7 +333,7 @@ fn reconcile_path(st: &mut DaemonState, path: &str, env: &SessionEnv) {
         return;
     }
     let metadata = std::fs::symlink_metadata(path).ok();
-    let is_dir = metadata.as_ref().is_some_and(|metadata| metadata.is_dir());
+    let is_dir = metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
     if is_ignored_path(path, env.state_dir, env.config_dir, is_dir) {
         return;
     }
@@ -353,7 +353,7 @@ fn client_gone(stream: &UnixStream) -> bool {
     let received = unsafe {
         libc::recv(
             stream.as_raw_fd(),
-            (&mut byte as *mut u8).cast(),
+            (&raw mut byte).cast(),
             1,
             libc::MSG_PEEK | libc::MSG_DONTWAIT,
         )

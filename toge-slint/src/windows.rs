@@ -170,7 +170,7 @@ pub fn shutdown() {
 }
 
 pub fn show_about() {
-    let about = match APP.with_borrow(|app| app.about.as_ref().map(|ui| ui.clone_strong())) {
+    let about = match APP.with_borrow(|app| app.about.as_ref().map(slint::ComponentHandle::clone_strong)) {
         Some(ui) => ui,
         None => match AboutWindow::new() {
             Ok(ui) => {

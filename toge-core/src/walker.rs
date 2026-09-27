@@ -38,8 +38,7 @@ impl Excludes {
         if self.skip_hidden
             && path
                 .file_name()
-                .map(|n| n.as_encoded_bytes().starts_with(b"."))
-                .unwrap_or(false)
+                .is_some_and(|n| n.as_encoded_bytes().starts_with(b"."))
         {
             return true;
         }
@@ -80,11 +79,10 @@ pub fn is_hidden_dir_path(path: &Path, is_dir: bool) -> bool {
         || (is_dir
             && path
                 .file_name()
-                .map(|n| {
+                .is_some_and(|n| {
                     let name = n.as_encoded_bytes();
                     name.len() > 1 && name.starts_with(b".")
-                })
-                .unwrap_or(false))
+                }))
 }
 
 /// Walk a directory tree and insert entries into the index.
@@ -280,25 +278,22 @@ fn visit(
 
             let metadata = if fetch_metadata {
                 let metadata = fs::symlink_metadata(&path).ok();
-                let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                let size = metadata.as_ref().map_or(0, std::fs::Metadata::len);
                 let modified = metadata
                     .as_ref()
                     .and_then(|m| m.modified().ok())
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
+                    .map_or(0, |d| d.as_secs() as i64);
                 let created = metadata
                     .as_ref()
                     .and_then(|m| m.created().ok())
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
+                    .map_or(0, |d| d.as_secs() as i64);
                 let accessed = metadata
                     .as_ref()
                     .and_then(|m| m.accessed().ok())
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or(0);
+                    .map_or(0, |d| d.as_secs() as i64);
 
                 (size, modified, created, accessed)
             } else {

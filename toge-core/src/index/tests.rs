@@ -36,11 +36,11 @@ fn test_get_path() {
 fn test_search_substring_case_insensitive() {
     let idx = sample_index();
     let mut ids = idx.search_substring("foo");
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![0]);
 
     let mut ids = idx.search_substring("TXT");
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![0]);
 }
 
@@ -56,7 +56,7 @@ fn test_search_substring_matches_filename_only_by_default() {
 fn test_search_substring_multiple_matches() {
     let idx = sample_index();
     let mut ids = idx.search_substring("o");
-    ids.sort();
+    ids.sort_unstable();
     // foo.txt and song.mp3 contain 'o' in their filenames; README does not.
     assert_eq!(ids, vec![0, 3]);
 }
@@ -65,11 +65,11 @@ fn test_search_substring_multiple_matches() {
 fn test_search_prefix() {
     let idx = sample_index();
     let mut ids = idx.search_prefix("foo");
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![0]);
 
     let mut ids = idx.search_prefix("bar");
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![1]);
 }
 
@@ -77,7 +77,7 @@ fn test_search_prefix() {
 fn test_search_prefix_empty_matches_all_entries() {
     let idx = sample_index();
     let mut ids = idx.search_prefix("");
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![0, 1, 2, 3, 4]);
 }
 
@@ -144,8 +144,7 @@ fn test_remove_swapped_entry_can_be_removed_after_prior_delete() {
         .expect("cobra trigram bucket exists");
     assert!(
         list.windows(2).all(|w| w[0] < w[1]),
-        "trigram posting list must remain sorted after swap_remove, got {:?}",
-        list
+        "trigram posting list must remain sorted after swap_remove, got {list:?}"
     );
     assert!(
         idx.remove("/tmp/cobra-d.log"),
@@ -213,7 +212,7 @@ fn test_remove_after_duplicate_insert_clears_search_results() {
     assert!(idx.remove("/tmp/video.mkv"));
     assert_eq!(idx.count(), 0);
     assert!(idx.search_substring("video").is_empty());
-    assert!(idx.by_extension("mkv").is_none_or(|ids| ids.is_empty()));
+    assert!(idx.by_extension("mkv").is_none_or(<[u32]>::is_empty));
 }
 
 #[test]

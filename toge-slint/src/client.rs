@@ -10,18 +10,14 @@ use toge_core::ipc::session::{SessionClient, SessionOpen};
 use toge_core::ipc::{MAX_IPC_MESSAGE_SIZE, Request, Response, StatusResponse};
 
 pub fn socket_path() -> PathBuf {
-    env::var_os("TOGE_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default_state_dir().join("toged.sock"))
+    env::var_os("TOGE_SOCKET").map_or_else(|| default_state_dir().join("toged.sock"), PathBuf::from)
 }
 
 fn default_state_dir() -> PathBuf {
-    env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    env::var_os("XDG_STATE_HOME").map_or_else(|| {
             let home = env::var_os("HOME").expect("HOME not set");
             PathBuf::from(home).join(".local/state")
-        })
+        }, PathBuf::from)
         .join("toge")
 }
 

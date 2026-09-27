@@ -26,8 +26,7 @@ fn test_save_and_load_roundtrip() {
         assert_eq!(
             loaded.get_path(id),
             original.get_path(id),
-            "path mismatch at id {}",
-            id
+            "path mismatch at id {id}"
         );
     }
 }

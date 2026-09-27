@@ -40,19 +40,15 @@ fn version() {
 }
 
 fn default_state_dir() -> PathBuf {
-    env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
+    env::var_os("XDG_STATE_HOME").map_or_else(|| {
             let home = env::var_os("HOME").expect("HOME not set");
             PathBuf::from(home).join(".local/state")
-        })
+        }, PathBuf::from)
         .join("toge")
 }
 
 fn socket_path() -> PathBuf {
-    env::var_os("TOGE_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default_state_dir().join("toged.sock"))
+    env::var_os("TOGE_SOCKET").map_or_else(|| default_state_dir().join("toged.sock"), PathBuf::from)
 }
 
 fn ensure_daemon_running(sock: &Path) -> io::Result<()> {
@@ -296,7 +292,7 @@ fn main() {
     let opts = match NdlOptions::parse(args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("toge: {}", e);
+            eprintln!("toge: {e}");
             process::exit(2);
         }
     };
@@ -312,7 +308,7 @@ fn main() {
 
     let sock = socket_path();
     if let Err(e) = ensure_daemon_running(&sock) {
-        eprintln!("failed to start daemon: {}", e);
+        eprintln!("failed to start daemon: {e}");
         process::exit(1);
     }
 
@@ -343,7 +339,7 @@ fn main() {
             }
             Ok(_) => eprintln!("unexpected response"),
             Err(e) => {
-                eprintln!("failed to get status: {}", e);
+                eprintln!("failed to get status: {e}");
                 process::exit(1);
             }
         }
@@ -354,7 +350,7 @@ fn main() {
         match send_simple(&sock, Request::Flush) {
             Ok(Response::Ok) => {}
             Ok(Response::Error(e)) => {
-                eprintln!("error: {}", e);
+                eprintln!("error: {e}");
                 process::exit(1);
             }
             _ => {
@@ -369,7 +365,7 @@ fn main() {
         match send_simple(&sock, Request::Reindex) {
             Ok(Response::Ok) => {}
             Ok(Response::Error(e)) => {
-                eprintln!("error: {}", e);
+                eprintln!("error: {e}");
                 process::exit(1);
             }
             _ => {
@@ -425,7 +421,7 @@ fn main() {
             Ok(_) => return,
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return,
             Err(error) => {
-                eprintln!("stream query failed: {}", error);
+                eprintln!("stream query failed: {error}");
                 process::exit(1);
             }
         }
@@ -433,7 +429,7 @@ fn main() {
 
     if opts.get_result_count {
         if let Err(e) = wait_for_ready(&sock, Duration::from_secs(30)) {
-            eprintln!("query failed: {}", e);
+            eprintln!("query failed: {e}");
             process::exit(1);
         }
         match run_query(
@@ -446,7 +442,7 @@ fn main() {
         ) {
             Ok(results) => println!("{}", results.total_count),
             Err(e) => {
-                eprintln!("query failed: {}", e);
+                eprintln!("query failed: {e}");
                 process::exit(1);
             }
         }
@@ -455,7 +451,7 @@ fn main() {
 
     if opts.get_total_size {
         if let Err(e) = wait_for_ready(&sock, Duration::from_secs(30)) {
-            eprintln!("query failed: {}", e);
+            eprintln!("query failed: {e}");
             process::exit(1);
         }
         match run_query(
@@ -468,7 +464,7 @@ fn main() {
         ) {
             Ok(results) => println!("{}", results.total_size),
             Err(e) => {
-                eprintln!("query failed: {}", e);
+                eprintln!("query failed: {e}");
                 process::exit(1);
             }
         }
@@ -476,7 +472,7 @@ fn main() {
     }
 
     if let Err(e) = wait_for_ready(&sock, Duration::from_secs(30)) {
-        eprintln!("query failed: {}", e);
+        eprintln!("query failed: {e}");
         process::exit(1);
     }
 
@@ -490,7 +486,7 @@ fn main() {
     ) {
         Ok(results) => results,
         Err(e) => {
-            eprintln!("query failed: {}", e);
+            eprintln!("query failed: {e}");
             process::exit(1);
         }
     };
@@ -513,15 +509,15 @@ fn main() {
 
     if let Some(path) = &opts.export_file {
         if let Err(e) = fs::write(path, &output) {
-            eprintln!("failed to write export: {}", e);
+            eprintln!("failed to write export: {e}");
             process::exit(1);
         }
         return;
     }
 
-    print!("{}", output);
+    print!("{output}");
     if let Err(e) = io::stdout().flush() {
-        eprintln!("query failed: {}", e);
+        eprintln!("query failed: {e}");
         process::exit(1);
     }
 }

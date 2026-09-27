@@ -15,7 +15,7 @@
 //! `CAP_DAC_READ_SEARCH` (for `open_by_handle_at`).
 //!
 //! Grant both capabilities with:
-//!   sudo setcap cap_sys_admin,cap_dac_read_search+ep /path/to/toged
+//!   sudo setcap `cap_sys_admin,cap_dac_read_search+ep` /path/to/toged
 
 use super::{FsWatcher, WatchEvent};
 use std::env;
@@ -111,7 +111,7 @@ struct FileHandleBuf {
 
 /// A filesystem that has been marked with fanotify.
 struct MarkedFs {
-    /// fd to a directory on this filesystem, for open_by_handle_at
+    /// fd to a directory on this filesystem, for `open_by_handle_at`
     handle_fd: OwnedFd,
     /// For btrfs: prefix in the btrfs root mount → real mount point
     /// e.g. /mnt/btrfs-root/home → /home
@@ -246,10 +246,8 @@ impl FanotifyWatcher {
     /// Mount the btrfs toplevel (subvolid=5) at a private mount point.
     fn mount_btrfs_root(device: &str) -> io::Result<PathBuf> {
         let pid = std::process::id();
-        let base = env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"));
-        let mount_dir = base.join(format!("toge-btrfs-root-{}", pid));
+        let base = env::var_os("XDG_RUNTIME_DIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        let mount_dir = base.join(format!("toge-btrfs-root-{pid}"));
         let mount_dir_str = mount_dir.to_string_lossy().into_owned();
 
         let cdir = CString::new(mount_dir_str.as_str()).unwrap();
@@ -319,12 +317,12 @@ impl FanotifyWatcher {
             let fd = unsafe {
                 open_by_handle_at(
                     marked.handle_fd.as_raw_fd(),
-                    &mut fh as *mut _ as *mut FileHandle,
+                    (&raw mut fh).cast::<FileHandle>(),
                     O_RDONLY | O_CLOEXEC,
                 )
             };
             if fd >= 0 {
-                let path = fs::read_link(format!("/proc/self/fd/{}", fd)).ok();
+                let path = fs::read_link(format!("/proc/self/fd/{fd}")).ok();
                 let _ = unsafe { OwnedFd::from_raw_fd(fd) };
                 if let Some(p) = path {
                     // Translate btrfs root paths to real mount point paths
@@ -565,31 +563,26 @@ impl FsWatcher for FanotifyWatcher {
             let is_dir = mask & FAN_ONDIR != 0;
 
             // For FAN_MODIFY events, the fd points to the modified file
-            let path_opt = if fd != FAN_NOFD {
-                let p = fs::read_link(format!("/proc/self/fd/{}", fd)).ok();
+            let path_opt = if fd == FAN_NOFD {
+                None
+            } else {
+                let p = fs::read_link(format!("/proc/self/fd/{fd}")).ok();
                 let _ = unsafe { OwnedFd::from_raw_fd(fd) };
                 p
-            } else {
-                None
             };
 
             // For dir events (CREATE, DELETE, MOVE), use DFID_NAME info records
             let path = if let Some(p) = path_opt {
                 p
-            } else {
-                match self.extract_dir_and_name(offset, event_len as u32) {
-                    Some((parent, name)) => {
-                        if name.is_empty() {
-                            parent
-                        } else {
-                            parent.join(&name)
-                        }
-                    }
-                    None => {
-                        offset += event_len;
-                        continue;
-                    }
+            } else if let Some((parent, name)) = self.extract_dir_and_name(offset, event_len as u32) {
+                if name.is_empty() {
+                    parent
+                } else {
+                    parent.join(&name)
                 }
+            } else {
+                offset += event_len;
+                continue;
             };
 
             let path_str = path.to_string_lossy().to_string();

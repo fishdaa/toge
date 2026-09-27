@@ -234,24 +234,24 @@ pub fn run_watcher_self_test() -> Result<WatcherSelfTestResult, String> {
     #[cfg(target_os = "linux")]
     {
         let mut watcher =
-            FanotifyWatcher::new().map_err(|e| format!("watcher init failed: {}", e))?;
+            FanotifyWatcher::new().map_err(|e| format!("watcher init failed: {e}"))?;
 
-        let test_dir = make_watcher_test_dir().map_err(|e| format!("temp dir failed: {}", e))?;
+        let test_dir = make_watcher_test_dir().map_err(|e| format!("temp dir failed: {e}"))?;
         let test_file = test_dir.join("watcher-self-test.mkv");
         let test_file_str = test_file.to_string_lossy().to_string();
 
         let outcome = (|| -> Result<WatcherSelfTestResult, String> {
             watcher
                 .watch(&test_dir)
-                .map_err(|e| format!("watch failed: {}", e))?;
+                .map_err(|e| format!("watch failed: {e}"))?;
 
-            fs::write(&test_file, b"self-test").map_err(|e| format!("create failed: {}", e))?;
+            fs::write(&test_file, b"self-test").map_err(|e| format!("create failed: {e}"))?;
             let create_events = wait_for_events(&mut watcher, Duration::from_secs(2))
-                .map_err(|e| format!("create poll failed: {}", e))?;
+                .map_err(|e| format!("create poll failed: {e}"))?;
 
-            fs::remove_file(&test_file).map_err(|e| format!("delete failed: {}", e))?;
+            fs::remove_file(&test_file).map_err(|e| format!("delete failed: {e}"))?;
             let delete_events = wait_for_events(&mut watcher, Duration::from_secs(2))
-                .map_err(|e| format!("delete poll failed: {}", e))?;
+                .map_err(|e| format!("delete poll failed: {e}"))?;
 
             let mut event_lines = Vec::new();
             let mut saw_create = false;
@@ -278,8 +278,7 @@ pub fn run_watcher_self_test() -> Result<WatcherSelfTestResult, String> {
                 "Watcher self-test passed: create and delete events observed".to_string()
             } else {
                 format!(
-                    "Watcher self-test failed: create seen = {}, delete seen = {}",
-                    saw_create, saw_delete
+                    "Watcher self-test failed: create seen = {saw_create}, delete seen = {saw_delete}"
                 )
             };
 
@@ -339,10 +338,10 @@ fn format_watch_event(event: &WatchEvent) -> String {
         WatchEvent::Create { path, is_dir } => {
             format!("create {}{}", path, if *is_dir { " (dir)" } else { "" })
         }
-        WatchEvent::Delete { path } => format!("delete {}", path),
-        WatchEvent::Modify { path } => format!("modify {}", path),
-        WatchEvent::Move { from, to } => format!("move {} -> {}", from, to),
-        WatchEvent::Overflow { path } => format!("overflow {}", path),
+        WatchEvent::Delete { path } => format!("delete {path}"),
+        WatchEvent::Modify { path } => format!("modify {path}"),
+        WatchEvent::Move { from, to } => format!("move {from} -> {to}"),
+        WatchEvent::Overflow { path } => format!("overflow {path}"),
     }
 }
 

@@ -24,7 +24,7 @@ const DEFAULT_PROFILE_ITERATIONS: usize = 100;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let scenario = args.get(1).map(|s| s.as_str()).unwrap_or("all");
+    let scenario = args.get(1).map_or("all", std::string::String::as_str);
     let size = parse_usize(args.get(2), DEFAULT_SIZE);
     let iterations = parse_usize(args.get(3), default_iterations_for(scenario));
 
@@ -34,9 +34,9 @@ fn main() {
     }
 
     println!("{:=^72}", " NEEDLE PROFILER ");
-    println!("scenario   : {}", scenario);
-    println!("size       : {}", size);
-    println!("iterations : {}", iterations);
+    println!("scenario   : {scenario}");
+    println!("size       : {size}");
+    println!("iterations : {iterations}");
     println!();
 
     match scenario {
@@ -69,8 +69,7 @@ fn print_help() {
     println!("  cargo run --release --example profile -- <scenario> [size] [iterations]");
     println!();
     println!(
-        "Defaults: size={} and scenario-specific iterations ({} for profiling-focused substring runs, {} otherwise)",
-        DEFAULT_SIZE, DEFAULT_PROFILE_ITERATIONS, DEFAULT_ITERATIONS
+        "Defaults: size={DEFAULT_SIZE} and scenario-specific iterations ({DEFAULT_PROFILE_ITERATIONS} for profiling-focused substring runs, {DEFAULT_ITERATIONS} otherwise)"
     );
     println!();
     println!("Scenarios:");

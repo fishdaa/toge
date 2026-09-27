@@ -41,7 +41,7 @@ pub(crate) fn fnv1a_64(data: &[u8]) -> u64 {
 pub(crate) fn fnv1a_extend(mut hash: u64, data: &[u8]) -> u64 {
     const FNV_PRIME: u64 = 0x000_0100_0000_01b3;
     for &b in data {
-        hash ^= b as u64;
+        hash ^= u64::from(b);
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
@@ -56,7 +56,7 @@ pub(crate) fn lowered_bytes(s: &str) -> Vec<u8> {
 /// Pack 3 ASCII bytes into a u32 trigram key.
 #[inline]
 pub(crate) fn pack_trigram(a: u8, b: u8, c: u8) -> u32 {
-    (a as u32) << 16 | (b as u32) << 8 | (c as u32)
+    u32::from(a) << 16 | u32::from(b) << 8 | u32::from(c)
 }
 
 /// Extract trigram keys from a lowercased byte slice.
@@ -270,14 +270,13 @@ impl Index {
 
         let id = self.entries.len() as u32;
         self.revision += 1;
-        let name_off = path.rfind('/').map(|i| i + 1).unwrap_or(0) as u16;
+        let name_off = path.rfind('/').map_or(0, |i| i + 1) as u16;
         let name = &path[name_off as usize..];
         let ext_off = if is_dir {
             0
         } else {
             name.rfind('.')
-                .map(|i| name_off as usize + i + 1)
-                .unwrap_or(0) as u16
+                .map_or(0, |i| name_off as usize + i + 1) as u16
         };
 
         let entry = Entry {
@@ -340,10 +339,10 @@ impl Index {
 
         let is_dir = entry.is_dir;
         let name_lower = lowered_bytes(entry.name());
-        let ext = if !is_dir {
-            entry.extension().to_string()
-        } else {
+        let ext = if is_dir {
             String::new()
+        } else {
+            entry.extension().to_string()
         };
 
         // Remove from trigram index.
@@ -530,7 +529,7 @@ impl Index {
                 .map(|e| e.path.capacity())
                 .sum::<usize>()
             + self.by_ext.capacity() * std::mem::size_of::<(String, Vec<u32>)>()
-            + self.by_ext.keys().map(|ext| ext.capacity()).sum::<usize>()
+            + self.by_ext.keys().map(std::string::String::capacity).sum::<usize>()
             + self.path_to_id.capacity() * std::mem::size_of::<(u64, u32)>()
             + self.trigrams.capacity() * std::mem::size_of::<(u32, Vec<u32>)>()
             + self.prefix_first_byte.capacity() * std::mem::size_of::<(u8, Vec<u32>)>()
@@ -569,7 +568,7 @@ impl Index {
 
     /// Look up entries by extension (used by the matcher).
     pub fn by_extension(&self, ext: &str) -> Option<&[u32]> {
-        self.by_ext.get(ext).map(|v| v.as_slice())
+        self.by_ext.get(ext).map(std::vec::Vec::as_slice)
     }
 
     /// Look up an entry id by full path.
