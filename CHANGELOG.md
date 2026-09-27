@@ -10,9 +10,11 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ### Added
 
-- Experimental Slint Linux desktop client with paged search results, keyboard navigation, file actions, preferences, multiple windows, and tray integration.
+- Experimental Slint Linux desktop client with paged search results, keyboard navigation, file actions (including trash and permanent delete), preferences, multiple windows, and tray integration.
 - Daemon result sessions with progressive previews, bounded page fetching, cancellation, and reconciliation after filesystem changes.
 - Slint binary and usage guide in x86_64 and ARM64 release archives, alongside the matching CLI and daemon.
+- CLI `--stream` for streaming results in index or sorted order with final totals.
+- Live-updates access prompt and `scripts/setcap-toged.sh` for granting the daemon's fanotify capabilities.
 
 ### Fixed
 
@@ -80,7 +82,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 - chore(release): update version to 0.1.8 and adjust release workflow (#14)
 
 
-## [0.1.11] - 2026-07-06
+## [0.1.11] - 2026-07-10
 
 ### Fixed
 
@@ -212,10 +214,7 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 - chore(deps): Bump softprops/action-gh-release from 2 to 3 (#2)
 - chore(deps): Bump actions/checkout from 4 to 7 (#1)
 
-
-- Initial open source project scaffolding
-
-## [0.1.1] - 2026-07-05
+### Fixed
 
 - Fixed `needled` readiness semantics so queries fail until the initial index is ready, and taught `ndl` to wait for daemon readiness before issuing search requests
 - Moved daemon reindex work out of the global state mutex to avoid blocking all requests during full rebuilds
@@ -227,3 +226,19 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 ## [0.1.0] - 2026-07-03
 
 - Initial public workspace structure for `needle-core`, `needled`, and `ndl`
+- Initial open source project scaffolding
+
+[Unreleased]: https://github.com/fishdaa/needle/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/fishdaa/needle/compare/v0.1.16...v0.2.0
+[0.1.16]: https://github.com/fishdaa/needle/compare/v0.1.15...v0.1.16
+[0.1.15]: https://github.com/fishdaa/needle/compare/v0.1.14...v0.1.15
+[0.1.14]: https://github.com/fishdaa/needle/compare/v0.1.13...v0.1.14
+[0.1.13]: https://github.com/fishdaa/needle/compare/v0.1.11...v0.1.13
+[0.1.11]: https://github.com/fishdaa/needle/compare/v0.1.10...v0.1.11
+[0.1.10]: https://github.com/fishdaa/needle/compare/v0.1.9...v0.1.10
+[0.1.9]: https://github.com/fishdaa/needle/compare/v0.1.7...v0.1.9
+[0.1.7]: https://github.com/fishdaa/needle/compare/v0.1.6...v0.1.7
+[0.1.6]: https://github.com/fishdaa/needle/compare/v0.1.5...v0.1.6
+[0.1.5]: https://github.com/fishdaa/needle/compare/v0.1.4...v0.1.5
+[0.1.4]: https://github.com/fishdaa/needle/compare/v0.1.3...v0.1.4
+[0.1.3]: https://github.com/fishdaa/needle/releases/tag/v0.1.3

@@ -1,8 +1,10 @@
 ### Added
 
-- Experimental Slint Linux desktop client with paged search results, keyboard navigation, file actions, preferences, multiple windows, and tray integration.
+- Experimental Slint Linux desktop client with paged search results, keyboard navigation, file actions (including trash and permanent delete), preferences, multiple windows, and tray integration.
 - Daemon result sessions with progressive previews, bounded page fetching, cancellation, and reconciliation after filesystem changes.
 - Slint binary and usage guide in x86_64 and ARM64 release archives, alongside the matching CLI and daemon.
+- CLI `--stream` for streaming results in index or sorted order with final totals.
+- Live-updates access prompt and `scripts/setcap-toged.sh` for granting the daemon's fanotify capabilities.
 
 ### Fixed
 

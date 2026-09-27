@@ -13,13 +13,11 @@ Toge is an open source project for indexing local files and querying them throug
 
 ## Status
 
-Toge is pre-release software and still under active development.
+Toge is under active development. Tagged releases publish Linux binary archives
+for the daemon, CLI, and Slint desktop client, along with beta and nightly
+prerelease channels.
 
-- The workspace structure, architecture, and automation are in place
-- Core modules and tests are being built out in the open
 - Public interfaces may still change before `1.0`
-
-If you are evaluating the project today, think of it as an early open source build rather than a finished end-user release.
 
 ## Workspace
 
@@ -38,7 +36,8 @@ Repository layout:
 ├── toged/         # daemon binary sources
 ├── toge/          # CLI binary sources
 ├── toge-slint/    # desktop GUI sources
-├── needle-docs/   # architecture and design notes
+├── docs/          # design notes and plans
+├── scripts/       # dev launcher, benchmarks, profiling, and release helpers
 └── .github/       # CI, release, and repo automation
 ```
 
@@ -50,14 +49,18 @@ The intended runtime model is:
 2. `toge-core` maintains the in-memory index and query engine
 3. `toge` sends search requests over a Unix domain socket and prints results
 
-The broader design and indexing strategy are documented in [needle-docs/architecture.md](needle-docs/architecture.md).
+Each crate's README documents its part of this flow: [toge-core](toge-core/README.md), [toged](toged/README.md), [toge](toge/README.md), and [toge-slint](toge-slint/README.md).
 
 ## Getting Started
 
 ### Requirements
 
 - Linux
-- Rust stable toolchain
+- Rust stable toolchain (edition 2024, so Rust 1.85 or newer)
+- Font and keyboard development headers for the Slint client, for example
+  `libfontconfig1-dev` and `libxkbcommon-dev` on Debian/Ubuntu
+- `python3` and the libcap tools (`getcap`/`setcap`) for `make gui` and the
+  launcher tests
 
 The repository includes `rust-toolchain.toml` so the expected toolchain components are installed consistently for contributors.
 
@@ -112,39 +115,36 @@ directory for all development profiles.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
+python3 -m unittest discover -s scripts/tests
 ```
-
-Note: parts of the implementation are still stubbed, so some tests currently fail until those modules are completed.
 
 ### Benchmarks And Profiling
 
 ```bash
 cargo run --release --example bench -p toge-core
 cargo run --release --example profile -p toge-core -- insert
-bash scripts/perf.sh run substring-miss substring-miss
-bash scripts/perf.sh run substring-hit substring-hit
+bash scripts/perf.sh run perf substring-miss substring-miss
+bash scripts/perf.sh run perf substring-hit substring-hit
 bash scripts/bench.sh run baseline
 bash scripts/bench.sh compare 5
-bash scripts/perf.sh compare substring-hit 5
+bash scripts/perf.sh compare perf substring-hit 5
 ```
 
 The `bench` example prints quick timing summaries. The `profile` example keeps each hot path busy for longer so external profilers can capture useful samples. `substring`, `substring-miss`, and `substring-hit` default to more iterations than the other scenarios so the commands above produce denser captures without extra flags.
 
-`bash scripts/perf.sh run ...` stores both the binary capture and a text report in `perf-results/`, which is ignored by git:
+`bash scripts/perf.sh run <backend> ...` accepts the `perf`, `time`, and `heaptrack` backends and stores its output under `perf-results/<backend>/`, which is ignored by git. A `perf` run keeps both the binary capture and a text report:
 
 ```text
-perf-results/substring-miss.data
-perf-results/substring-miss.report.txt
+perf-results/perf/substring-miss.data
+perf-results/perf/substring-miss.report.txt
 ```
 
 Both helpers also keep a local timestamped history so you can compare the last `x` runs while iterating on performance work:
 
 ```text
 bench-results/history/*.tsv
-perf-results/history/<label>/*.summary.tsv
+perf-results/history/<backend>/<label>/*.summary.tsv
 ```
-
-The current perf takeaways and optimization notes live in `needle-docs/findings.md`.
 
 ## Project Goals
 
@@ -165,7 +165,7 @@ Toge follows Semantic Versioning.
 - Pull requests must carry exactly one of `release:major`, `release:minor`, `release:patch`, or `release:none`
 - Merging the automated release PR on `main` creates the matching stable tag and triggers release publishing
 - GitHub Actions runs reusable checks on pull requests, `main`, `release/*`, and release tags
-- `main` also publishes nightly prerelease artifacts automatically
+- Nightly prerelease artifacts are built from `main` on a daily schedule
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and release checklist.
 
@@ -173,11 +173,9 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and release
 
 Near-term priorities:
 
-- complete the unfinished `toge-core` implementations
-- bring the current test suite to green
-- define the first usable daemon/client interaction flow
-- stabilize basic indexing and search behavior
-- publish the first pre-release binaries
+- stabilize public interfaces ahead of `1.0`
+- desktop integration for the Slint client: global shortcuts, autostart, and a settings UI
+- installer packages for the Slint client
 
 ## Contributing
 
@@ -186,7 +184,7 @@ Contributions, bug reports, and design feedback are welcome.
 If you want to help:
 
 - read [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow
-- review [needle-docs/architecture.md](needle-docs/architecture.md) for project direction
+- review the crate READMEs and [docs/](docs/) for project direction
 - open an issue or pull request for focused, well-scoped changes
 
 ## Security

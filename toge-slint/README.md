@@ -85,7 +85,7 @@ Type the existing query syntax (`ext:pdf`, `folder:`, `path:src`, etc.). Search 
 initially debounced by 100 ms; Enter in the search field submits immediately.
 The initial empty query lists indexed entries. Use Up/Down in the table, Enter
 or double-click to open, and Ctrl+L to return to the search field. Right-click a
-row for Open, Copy path, Open folder, Copy, Cut, Rename, Delete, and Delete
+row for Open, Copy path, Open folder, Cut, Copy, Rename, Delete, and Delete
 permanently. Ctrl+C copies
 the file, Ctrl+X cuts it, and Ctrl+Shift+C copies its path. Paste files in your file
 manager; Cut moves the source only when pasted. File clipboard formats support
@@ -94,13 +94,13 @@ highlight a range. Actions resolve uncached rows from the daemon, including rang
 larger than the display cache; if the result order changes while loading the
 selection, select the items again and retry. F2 or Rename edits the Name cell in place; Enter
 saves and Escape cancels. Clicking elsewhere cancels an uncommitted rename.
-Delete moves the selected item straight to Trash without confirmation. Restore
-it from your file manager’s Trash if needed. Shift+Delete (or **Delete
+Delete moves the selected items straight to Trash without confirmation. Restore
+them from your file manager’s Trash if needed. Shift+Delete (or **Delete
 permanently…**) skips the Trash: it asks for confirmation first, then removes the
 file, or a folder with all its contents. Enter confirms and Escape cancels. A
 symlink is removed itself, never its target. Rename never replaces an existing
 destination, and a successful rename keeps the renamed item selected. After a
-rename or trash, the daemon re-reads the affected paths, so the list updates even
+rename, trash, or permanent delete, the daemon re-reads the affected paths, so the list updates even
 without the filesystem watcher. Click **toge** at the top left to open About.
 
 Clicking a row moves keyboard focus to the table. Up/Down, PageUp/PageDown and

@@ -4,6 +4,31 @@ Status: implemented. `toge-slint` has replaced the Tauri GUI, which has been
 removed; references to Tauri and `make gui` below describe the plan as written.
 See [`toge-slint/validation.md`](../toge-slint/validation.md) for completed checks.
 
+### Where the implementation differs from this plan
+
+- **Windows and exit.** The client supports multiple windows (Ctrl+N or
+  `toge-slint --new-window`) with single-instance activation. Closing the last
+  window exits only when no tray icon is registered.
+- **Results.** There is no 10,000-row cap. Results live in a daemon result
+  session (`toge_core::ipc::session`); the daemon sorts globally, and the client
+  keeps a paged cache of 256-row pages (at most 16 pages) in `model.rs`, not one
+  canonical collection with a sorted index mapping.
+- **Modules.** There is no `controller.rs`. The latest-query mailbox lives in
+  `worker.rs`, and the crate's modules are `access`, `actions`, `client`,
+  `format`, `instance`, `model`, `preferences`, `tray`, `windows`, and `worker`.
+- **IPC limit.** The shared IPC message limit is 256 MiB, and session frames are
+  limited to 4 MiB, not the 10 MiB limit mentioned below.
+- **Deferred items now implemented.** Tray icon (StatusNotifierItem), multiple
+  windows, trash and permanent delete, rename, and saved column widths.
+- **Still deferred.** Global shortcuts, autostart, the Options editor, the
+  Diagnostics window, custom keybinding editing, and installer packages.
+- **Developer commands.** `make slint` and `make slint-release` exist and are
+  aliases for `make gui` and `make gui-release`, which now launch the Slint
+  client. The launcher keeps persistent per-profile configuration and state and
+  removes only its temporary socket directory.
+- **Step 4.** No go/no-go decision or matched Tauri baseline comparison was
+  recorded before the Tauri GUI was removed.
+
 ## Objective
 
 Deliver an experimental Linux `toge-slint` application that searches the existing

@@ -49,9 +49,18 @@ results. No claim of 50% RAM savings or 30% faster startup is established yet.
 - Interactive keyboard, clipboard, double-click, About dialog and resize checks
   on both Wayland and X11; current native smoke coverage is Wayland rendering and
   real daemon result loading only.
-- Tray, global shortcuts, autostart, settings UI and packaging are outside the MVP.
+- Global shortcuts, autostart, the settings UI and installer packages are outside
+  the MVP. Release archives ship `toge-slint`.
+- Tray icon behaviour (StatusNotifierItem registration, the menu's window and
+  quit actions, and staying resident after the last window closes) has only
+  unit coverage (`menu_offers_window_requests_about_and_quit`); it has no
+  native desktop validation entry yet.
 
 ## Daemon stream integration — 2026-09-27
+
+> Superseded by the daemon-held result sessions entry below: the client now
+> opens a result session (`OpenSessionPreview`) and loads bounded pages instead
+> of consuming a `StreamQuery`.
 
 - All 26 Slint unit/IPC tests passed with `--test-threads=1`; strict Clippy,
   formatting, and native app/daemon builds passed. An unrelated temporary-script
@@ -267,6 +276,10 @@ The GUI is now single-instance per daemon socket. `toge-slint --new-window` and
 `toge-slint.sock`; Ctrl+N opens a window in-app. Each window owns its worker,
 result session and status poller. The event loop now runs until the last window
 closes, so a toggled-away window stays alive.
+
+> Superseded: the instance socket is now `toge-slint-<hash>.sock` (see the
+> instance isolation entry below), and with the tray icon registered, closing
+> the last window no longer exits the process.
 
 - All 35 Slint unit/IPC tests passed serially, including new handoff tests
   (argument mapping, request delivery, a second instance not stealing the live
