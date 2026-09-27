@@ -19,6 +19,12 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 - Instance isolation for multiple daemon sockets and large selection actions beyond the display cache.
 - Search and sorting performance, metadata refresh, and daemon readiness handling.
 
+### Changed
+
+- Updated serde to 1.0.229 (#28), serde_json to 1.0.151 (#29), libc to 0.2.189 (#30), time to 0.3.55 (#33), and Tauri to 2.11.6 (#34).
+- Updated the stale-issue action to v11 (#32).
+- CLI and daemon version output now follows the compiled workspace version.
+
 ### Notes
 
 - Tauri installer packages remain available; the Slint client is distributed in the binary archive.
