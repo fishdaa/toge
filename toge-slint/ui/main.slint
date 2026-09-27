@@ -1,4 +1,4 @@
-import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette, ScrollView } from "std-widgets.slint";
+import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette, ScrollView, Spinner } from "std-widgets.slint";
 
 component ContextMenuItem {
     in property <string> label;
@@ -76,6 +76,7 @@ export component AppWindow inherits Window {
     background: Palette.background;
     in property <[[StandardListViewItem]]> rows;
     in property <string> status: "Connecting to index…";
+    in property <string> index-status: "Index unavailable";
     in property <bool> busy: true;
     in property <bool> has-error: false;
     in-out property <int> selected: -1;
@@ -173,6 +174,21 @@ export component AppWindow inherits Window {
 
     FocusScope {
         width: 100%; height: 100%;
+        // Like toge-gui, Up/Down step through results from anywhere in the
+        // window, including the search field, without moving keyboard focus.
+        capture-key-pressed(event) => {
+            if (root.rename-row >= 0 || root.context-menu-open || root.rows.length == 0) { return reject; }
+            if (event.modifiers.control || event.modifiers.alt || event.modifiers.shift) { return reject; }
+            if (event.text == Key.DownArrow) {
+                root.select-row(min(root.rows.length - 1, root.selected + 1));
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                if (root.selected > 0) { root.select-row(root.selected - 1); }
+                return accept;
+            }
+            return reject;
+        }
         key-pressed(event) => {
             if (event.modifiers.control && event.text == "l") {
                 root.cancel-rename(false); search.focus(); search.select-all(); return accept;
@@ -401,15 +417,62 @@ export component AppWindow inherits Window {
                 }
             }
             Rectangle { height: 1px; background: Palette.foreground; opacity: 0.10; }
+            // Mirrors toge-gui's StatusBar: search and index state, or the
+            // selected row's details once its page has loaded.
             Rectangle {
-                height: 36px;
+                height: 26px;
+                background: Palette.alternate-background;
+                property <bool> show-details: root.selected >= 0 && root.selected < root.rows.length
+                    && root.rows[root.selected][1].text != "";
                 HorizontalLayout {
-                    padding-left: 12px; padding-right: 12px;
-                    padding-top: 5px; padding-bottom: 5px;
-                    Text {
-                        text: root.status; overflow: elide;
-                        horizontal-stretch: 1; font-size: 12px;
+                    padding-left: 8px; padding-right: 8px;
+                    padding-top: 3px; padding-bottom: 3px; spacing: 16px;
+                    if parent.show-details: Text {
+                        text: "Size: " + (root.rows[root.selected][2].text == "—" ? "size unavailable" : root.rows[root.selected][2].text)
+                            + ", Date Modified: " + (root.rows[root.selected][3].text == "" ? "unknown" : root.rows[root.selected][3].text)
+                            + ", Path: " + root.rows[root.selected][1].text;
+                        overflow: elide; horizontal-stretch: 1;
+                        font-size: 12px; vertical-alignment: center;
                         color: Palette.foreground; opacity: 0.65;
+                    }
+                    if parent.show-details: Text {
+                        text: (root.selected + 1) + " of " + root.rows.length;
+                        horizontal-alignment: right;
+                        font-size: 12px; vertical-alignment: center;
+                        color: Palette.foreground; opacity: 0.65;
+                    }
+                    if !parent.show-details: HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: "Search"; font-size: 11px; font-weight: 600;
+                            vertical-alignment: center;
+                            color: Palette.foreground; opacity: 0.45;
+                        }
+                        Text {
+                            text: root.status; overflow: elide;
+                            font-size: 12px; vertical-alignment: center;
+                            color: Palette.foreground; opacity: 0.65;
+                        }
+                        // Reserve the spinner's space so the text does not shift.
+                        Spinner {
+                            width: 12px; height: 12px; y: (parent.height - self.height) / 2;
+                            indeterminate: true;
+                            opacity: root.busy ? 1 : 0;
+                            animate opacity { duration: 120ms; }
+                        }
+                    }
+                    if !parent.show-details: HorizontalLayout {
+                        horizontal-stretch: 1; alignment: end; spacing: 8px;
+                        Text {
+                            text: "Index"; font-size: 11px; font-weight: 600;
+                            vertical-alignment: center;
+                            color: Palette.foreground; opacity: 0.45;
+                        }
+                        Text {
+                            text: root.index-status; overflow: elide;
+                            font-size: 12px; vertical-alignment: center;
+                            color: Palette.foreground; opacity: 0.65;
+                        }
                     }
                 }
             }

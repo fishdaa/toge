@@ -13,9 +13,16 @@ Cargo, including custom target directories. It prints both paths before launchin
 and requires Python 3 to read Cargo's build messages.
 
 The launcher keeps settings in `${XDG_CONFIG_HOME:-$HOME/.config}/toge-dev/slint/toge`
-(with `TOGE_DEV_PROFILE` and `TOGE_DEV_CONFIG_ROOT` overrides). Index/socket state is
-removed on exit, and only the launcher's daemon is stopped. After building, the
-launcher checks the daemon's fanotify capabilities before starting it. If they
+(with `TOGE_DEV_PROFILE` and `TOGE_DEV_CONFIG_ROOT` overrides). The saved index
+persists in `${XDG_STATE_HOME:-$HOME/.local/state}/toge-dev/slint/toge/index.bin`;
+`TOGE_DEV_STATE_ROOT` overrides the `toge-dev` root. Debug and release launches
+share the index within each profile. Cached results are loaded on subsequent
+launches while filesystem changes are reconciled in the background. Only the
+temporary socket directory is removed on exit, and only the launcher's daemon
+is stopped. One launch can use each profile at a time; use a different
+`TOGE_DEV_PROFILE` for a concurrent session. The launcher requires `flock`.
+After building, the launcher checks the daemon's fanotify capabilities before
+starting it. If they
 are missing, a native Slint dialog asks whether to enable live updates. Clicking
 **Enable live updates** opens the system's Polkit authentication dialog; Toge does
 not collect passwords. The launcher verifies access before starting the daemon.

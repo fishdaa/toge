@@ -69,12 +69,22 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 DEV_CONFIG_ROOT="${TOGE_DEV_CONFIG_ROOT:-${XDG_CONFIG_HOME:-$HOME/.config}/toge-dev}"
+DEV_STATE_ROOT="${TOGE_DEV_STATE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/toge-dev}"
 export XDG_CONFIG_HOME="$DEV_CONFIG_ROOT/$DEV_PROFILE"
-export XDG_STATE_HOME="$DEV_RUNTIME_DIR/state"
+export XDG_STATE_HOME="$DEV_STATE_ROOT/$DEV_PROFILE"
 export TOGE_SOCKET="$DEV_RUNTIME_DIR/toged.sock"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
+chmod 700 "$XDG_STATE_HOME"
+# Separate launches use temporary sockets but share this profile's saved index.
+# Prevent concurrent daemons from writing that index at the same time.
+exec 9>"$XDG_STATE_HOME/launcher.lock"
+if ! flock -n 9; then
+  echo "Slint development profile '$DEV_PROFILE' is already running; use another TOGE_DEV_PROFILE." >&2
+  exit 1
+fi
+echo "Slint development index: $XDG_STATE_HOME/toge/index.bin"
 echo "Slint development configuration: $XDG_CONFIG_HOME/toge/config.toml"
-"$DAEMON_BIN" --socket "$TOGE_SOCKET" &
+"$DAEMON_BIN" --socket "$TOGE_SOCKET" 9>&- &
 PID_DAEMON=$!
 # Wait for socket creation so the GUI does not launch a second daemon.
 for ((attempt=0; attempt<100; attempt++)); do
@@ -83,4 +93,4 @@ for ((attempt=0; attempt<100; attempt++)); do
   sleep 0.05
 done
 [ -S "$TOGE_SOCKET" ] || { echo "Daemon socket did not appear" >&2; exit 1; }
-"$SLINT_BIN"
+"$SLINT_BIN" 9>&-

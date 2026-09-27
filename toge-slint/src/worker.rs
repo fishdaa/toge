@@ -10,6 +10,8 @@ use toge_core::sort::SortKey;
 const SYNC_INTERVAL: Duration = Duration::from_secs(1);
 /// Fetches queued behind a fast scroll are dropped except for the latest few.
 const FETCH_BACKLOG: usize = 4;
+/// How often the status bar refreshes the daemon's index summary.
+const INDEX_STATUS_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Clone, Debug)]
 pub struct Query {
@@ -120,6 +122,10 @@ pub fn start(mailbox: Arc<Mailbox>, ui: slint::Weak<crate::AppWindow>) {
     // scan that takes ~1s server-side) can't stall a fresher one that supersedes
     // it mid-flight, the way a single shared worker thread would.
     let daemon_start = Arc::new(Mutex::new(()));
+    {
+        let (ui, socket) = (ui.clone(), crate::client::socket_path());
+        std::thread::spawn(move || poll_index_status(ui, socket));
+    }
     std::thread::spawn(move || {
         let socket = crate::client::socket_path();
         while let Some(q) = mailbox.next() {
@@ -429,10 +435,23 @@ pub fn results(ui: &crate::AppWindow) -> impl std::ops::Deref<Target = Results> 
     Handle(ui.get_rows())
 }
 
-fn status_text(total: usize) -> String {
-    match total {
-        1 => "1 match".into(),
-        n => format!("{n} matches"),
+fn status_text(state: SessionState, size_indexed: bool) -> String {
+    crate::format::search_status(state.total_count, state.total_size, size_indexed)
+}
+
+/// Keep the status bar's index summary current, as toge-gui does every 3s.
+/// Only reads daemon status; searches are what start the daemon.
+fn poll_index_status(ui: slint::Weak<crate::AppWindow>, socket: std::path::PathBuf) {
+    loop {
+        let text = match crate::client::status(&socket) {
+            Ok(status) => crate::format::index_status(&status),
+            Err(_) => "Index unavailable".to_string(),
+        };
+        let posted = ui.upgrade_in_event_loop(move |ui| ui.set_index_status(text.into()));
+        if posted.is_err() {
+            return;
+        }
+        std::thread::sleep(INDEX_STATUS_INTERVAL);
     }
 }
 
@@ -458,7 +477,7 @@ fn opened(
     }
     ui.set_has_error(false);
     ui.set_busy(false);
-    ui.set_status(status_text(state.total_count).into());
+    ui.set_status(status_text(state, size_indexed).into());
     match previous {
         // The previously selected path may still match; keep it selected.
         Some(path) => {
@@ -490,7 +509,7 @@ fn apply(ui: &crate::AppWindow, state: SessionState, reply: Reply) {
         // Explicit rebuilds (sort, rename, delete) set the selection themselves
         // and keep the action's status message.
         if !matches!(reply, Reply::Rebuilt { .. }) {
-            ui.set_status(status_text(state.total_count).into());
+            ui.set_status(status_text(state, results.size_indexed.get()).into());
             if let Some(path) = selected {
                 results.send(Command::Locate {
                     path,

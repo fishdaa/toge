@@ -3,6 +3,8 @@
 Run: python3 -m unittest discover -s scripts/tests -v
 No root access or capability changes are used.
 """
+import fcntl
+import json
 import os
 from pathlib import Path
 import shutil
@@ -23,11 +25,15 @@ class SlintLauncherTests(unittest.TestCase):
             shutil.copy(REPO / "scripts" / name, self.root / "scripts" / name)
         self.trace = self.root / "trace"
         self.capabilities = self.root / "capabilities"
+        self.details = self.root / "launch-details"
+        self.state_root = self.root / "state"
         mock_bin = self.root / "bin"
         mock_bin.mkdir()
         self.env = dict(os.environ, PATH=f"{mock_bin}:{os.environ['PATH']}",
                         TRACE=str(self.trace), CAPS=str(self.capabilities),
-                        TOGE_DEV_CONFIG_ROOT=str(self.root / "config"))
+                        TOGE_DEV_CONFIG_ROOT=str(self.root / "config"),
+                        TOGE_DEV_STATE_ROOT=str(self.state_root),
+                        LAUNCH_DETAILS=str(self.details))
         self.env.pop("TOGE_DEV_PROFILE", None)
         self.env.pop("CARGO_TARGET_DIR", None)
         self.write_executable(mock_bin / "cargo", '''
@@ -54,7 +60,14 @@ if pathlib.Path(os.environ['CAPS']).exists(): print(sys.argv[1] + ' cap_dac_read
             directory = self.root / "target" / profile
             directory.mkdir(parents=True)
             self.write_executable(directory / "toged", '''
-import os, socket, sys, time
+import json, os, pathlib, socket, sys, time
+state = pathlib.Path(os.environ['XDG_STATE_HOME']) / 'toge'
+index = state / 'index.bin'
+with open(os.environ['LAUNCH_DETAILS'], 'a') as f:
+ f.write(json.dumps({'state': str(state), 'cached': index.exists(),
+                     'inherited_lock': os.path.exists('/proc/self/fd/9')}) + '\\n')
+state.mkdir(parents=True, exist_ok=True)
+index.write_bytes(b'saved development index')
 with open(os.environ['TRACE'], 'a') as f: f.write('daemon\\n')
 s = socket.socket(socket.AF_UNIX); s.bind(sys.argv[sys.argv.index('--socket') + 1]); s.listen()
 while True: time.sleep(1)
@@ -94,7 +107,7 @@ with open(os.environ['TRACE'], 'a') as f: f.write('gui ' + os.environ['TOGE_SOCK
         self.assertTrue(self.events()[1].startswith("access "))
         self.assertEqual(len(self.events()), 2)
 
-    def test_verified_build_launches_and_cleans_runtime_state(self):
+    def test_verified_build_keeps_index_and_cleans_runtime_socket(self):
         self.capabilities.touch()
         result = self.launch()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -102,6 +115,73 @@ with open(os.environ['TRACE'], 'a') as f: f.write('gui ' + os.environ['TOGE_SOCK
         self.assertEqual(events[3], "daemon")
         self.assertTrue(events[4].startswith("gui "))
         self.assertFalse(Path(events[4][4:]).parent.exists())
+        self.assertTrue((self.state_root / "slint/toge/index.bin").exists())
+        self.assertFalse(self.launches()[0]["inherited_lock"])
+
+    def launches(self):
+        return [json.loads(line) for line in self.details.read_text().splitlines()]
+
+    def test_second_release_launch_reuses_saved_index_with_a_new_socket(self):
+        self.capabilities.touch()
+        sockets = []
+        for _ in range(2):
+            result = self.launch("--release")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            sockets.append(Path(self.events()[-1][4:]))
+        launches = self.launches()
+        self.assertEqual([launch["cached"] for launch in launches], [False, True])
+        self.assertEqual(launches[0]["state"], launches[1]["state"])
+        self.assertNotEqual(sockets[0], sockets[1])
+        self.assertTrue(all(not socket.parent.exists() for socket in sockets))
+
+    def test_debug_and_release_share_state_within_a_profile(self):
+        self.capabilities.touch()
+        for args in [(), ("--release",)]:
+            result = self.launch(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual([launch["cached"] for launch in self.launches()], [False, True])
+
+    def test_profiles_keep_separate_saved_indexes(self):
+        self.capabilities.touch()
+        for profile in ["slint", "other", "slint"]:
+            self.env["TOGE_DEV_PROFILE"] = profile
+            result = self.launch()
+            self.assertEqual(result.returncode, 0, result.stderr)
+        launches = self.launches()
+        self.assertEqual([launch["cached"] for launch in launches], [False, False, True])
+        self.assertNotEqual(launches[0]["state"], launches[1]["state"])
+        self.assertEqual(launches[0]["state"], launches[2]["state"])
+
+    def test_state_defaults_to_xdg_state_home(self):
+        self.capabilities.touch()
+        self.env.pop("TOGE_DEV_STATE_ROOT")
+        self.env["XDG_STATE_HOME"] = str(self.root / "xdg-state")
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path(self.launches()[0]["state"]),
+                         self.root / "xdg-state/toge-dev/slint/toge")
+
+    def test_state_falls_back_to_home_when_xdg_state_home_is_unset(self):
+        self.capabilities.touch()
+        self.env.pop("TOGE_DEV_STATE_ROOT")
+        self.env.pop("XDG_STATE_HOME", None)
+        self.env["HOME"] = str(self.root / "home")
+        result = self.launch()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(Path(self.launches()[0]["state"]),
+                         self.root / "home/.local/state/toge-dev/slint/toge")
+
+    def test_busy_profile_stops_before_starting_a_second_daemon(self):
+        self.capabilities.touch()
+        state = self.state_root / "slint"
+        state.mkdir(parents=True)
+        with (state / "launcher.lock").open("w") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            result = self.launch()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("already running", result.stderr)
+        self.assertNotIn("daemon", self.events())
+        self.assertFalse(self.details.exists())
 
     def test_release_checks_release_executable(self):
         result = self.launch("--release")

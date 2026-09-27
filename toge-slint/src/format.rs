@@ -12,6 +12,42 @@ pub fn format_size(size: u64) -> String {
     format!("{:.1} {}", value, units[unit_idx])
 }
 
+/// Search summary shown in the status bar, as in toge-gui.
+pub fn search_status(total_count: usize, total_size: u64, size_indexed: bool) -> String {
+    if size_indexed {
+        format!("{total_count} results | {}", format_size(total_size))
+    } else {
+        format!("{total_count} results | size unavailable")
+    }
+}
+
+/// Daemon summary shown in the status bar, as in toge-gui.
+pub fn index_status(status: &toge_core::ipc::StatusResponse) -> String {
+    let count = format!("{} indexed", group_digits(status.indexed_count));
+    if !status.watcher_healthy && status.watch_failure_count > 0 {
+        return format!("Live updates unavailable | {count}");
+    }
+    let state = format!("{:?}", status.status);
+    let message = status.status_message.trim();
+    if message.is_empty() || message == state {
+        format!("{state} | {count}")
+    } else {
+        format!("{state} | {message} | {count}")
+    }
+}
+
+fn group_digits(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub fn format_time(unix: i64) -> String {
     if unix <= 0 {
         return String::new();
@@ -96,5 +132,41 @@ mod tests {
     #[test]
     fn format_time_returns_empty_for_zero() {
         assert_eq!(format_time(0), "");
+    }
+
+    #[test]
+    fn search_status_matches_gui_format() {
+        assert_eq!(search_status(3, 2048, true), "3 results | 2.0 KB");
+        assert_eq!(search_status(1, 0, false), "1 results | size unavailable");
+    }
+
+    #[test]
+    fn index_status_matches_gui_format() {
+        let mut status = toge_core::ipc::StatusResponse {
+            indexed_count: 1_234_567,
+            status: toge_core::ipc::DaemonStatus::Ready,
+            status_message: "Ready".into(),
+            watcher_healthy: true,
+            watched_dir_count: 0,
+            watch_failure_count: 0,
+            watch_overflow_count: 0,
+            watcher_log: Vec::new(),
+            last_updated_unix: 0,
+            build_duration_ms: 0,
+        };
+        assert_eq!(index_status(&status), "Ready | 1,234,567 indexed");
+        status.status = toge_core::ipc::DaemonStatus::Indexing;
+        status.status_message = "Scanning /home".into();
+        status.indexed_count = 999;
+        assert_eq!(
+            index_status(&status),
+            "Indexing | Scanning /home | 999 indexed"
+        );
+        status.watcher_healthy = false;
+        status.watch_failure_count = 2;
+        assert_eq!(
+            index_status(&status),
+            "Live updates unavailable | 999 indexed"
+        );
     }
 }
