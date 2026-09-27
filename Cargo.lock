@@ -6719,7 +6719,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "toge"
-version = "0.1.16"
+version = "0.2.0"
 dependencies = [
  "tempfile",
  "toge-core",
@@ -6727,7 +6727,7 @@ dependencies = [
 
 [[package]]
 name = "toge-core"
-version = "0.1.16"
+version = "0.2.0"
 dependencies = [
  "libc",
  "regex",
@@ -6736,7 +6736,7 @@ dependencies = [
 
 [[package]]
 name = "toge-gui-lib"
-version = "0.1.16"
+version = "0.2.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -6750,7 +6750,7 @@ dependencies = [
 
 [[package]]
 name = "toge-slint"
-version = "0.1.16"
+version = "0.2.0"
 dependencies = [
  "clipboard-rs",
  "ksni",
@@ -6763,7 +6763,7 @@ dependencies = [
 
 [[package]]
 name = "toged"
-version = "0.1.16"
+version = "0.2.0"
 dependencies = [
  "libc",
  "tempfile",

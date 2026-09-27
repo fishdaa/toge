@@ -54,6 +54,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            libfontconfig1-dev \
+            libxkbcommon-dev \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
@@ -110,4 +112,16 @@ jobs:
       ref: ${{ inputs.tag || github.ref_name }}
       version: ${{ inputs.tag || github.ref_name }}
       tag_name: ${{ inputs.tag || github.ref_name }}
+    secrets: inherit
+
+  package-binaries-arm64:
+    if: ${{ !contains(inputs.tag || github.ref_name, '-') }}
+    needs: build-release
+    uses: ./.github/workflows/package-binaries.yml
+    with:
+      ref: ${{ inputs.tag || github.ref_name }}
+      version: ${{ inputs.tag || github.ref_name }}
+      tag_name: ${{ inputs.tag || github.ref_name }}
+      target_triple: linux-aarch64
+      channel: stable
     secrets: inherit

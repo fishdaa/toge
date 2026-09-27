@@ -350,7 +350,12 @@ fn regex_matches(re: &Regex, text: &str, whole_word: bool) -> bool {
 
 fn glob_match_word(text: &str, pattern: &str, fold: bool) -> bool {
     word_spans(text).into_iter().any(|(start, end)| {
-        glob_match_from(&text.as_bytes()[start..end], pattern.as_bytes(), false, fold)
+        glob_match_from(
+            &text.as_bytes()[start..end],
+            pattern.as_bytes(),
+            false,
+            fold,
+        )
     })
 }
 

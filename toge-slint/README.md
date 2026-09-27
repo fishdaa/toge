@@ -1,7 +1,12 @@
 # Toge Slint MVP
 
 Experimental Linux desktop client for the existing `toged` daemon. Uses Rust,
-Slint 1.17.1, Winit and the software renderer. Tauri remains the supported release.
+Slint 1.17.1, Winit and the software renderer. Release archives include `toge-slint` alongside the CLI and daemon; Tauri
+installer packages remain available separately.
+
+Download the archive for your Linux architecture from GitHub Releases, extract
+it, and run `./toge-slint` from the extracted directory. Keep the bundled `toged`
+next to it so the client uses a daemon with the matching session protocol.
 
 ```bash
 make slint                # isolated development daemon and settings
