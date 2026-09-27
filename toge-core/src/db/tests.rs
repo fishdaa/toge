@@ -67,6 +67,32 @@ fn test_save_is_atomic() {
 }
 
 #[test]
+fn test_save_removes_temp_files_of_dead_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead_pid = child.id();
+    child.wait().unwrap();
+    let dead = dir.path().join(format!("index.bin.{dead_pid}.0.tmp"));
+    let legacy = dir.path().join("index.bin.tmp");
+    // Another live save in this process, and an unrelated file.
+    let live = dir
+        .path()
+        .join(format!("index.bin.{}.99.tmp", std::process::id()));
+    let other = dir.path().join("notes.1.2.tmp");
+    for file in [&dead, &legacy, &live, &other] {
+        fs::write(file, b"partial").unwrap();
+    }
+
+    sample_index().save(&path).unwrap();
+
+    assert!(!dead.exists(), "a dead save's temp file was kept");
+    assert!(!legacy.exists(), "the legacy temp file was kept");
+    assert!(live.exists(), "a live save's temp file was removed");
+    assert!(other.exists(), "an unrelated file was removed");
+}
+
+#[test]
 fn test_metadata_size_reported_by_saved_index() {
     let idx = sample_index();
     assert!(idx.metadata_size() > 0);

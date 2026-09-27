@@ -66,6 +66,54 @@ impl Drop for SaveTemp {
     }
 }
 
+/// Remove temporary files left by saves from processes that no longer run,
+/// such as a daemon killed mid-save. Saves in progress elsewhere are kept.
+fn remove_stale_save_temps(path: &Path) {
+    let (Some(dir), Some(filename)) = (path.parent(), path.file_name()) else {
+        return;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let filename = filename.to_string_lossy();
+    let prefix = format!("{filename}.");
+    // Releases before 0.2.0 saved through one fixed temporary name.
+    let legacy = format!("{filename}.tmp");
+    let own_pid = std::process::id();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let stale = name == legacy
+            || name
+                .strip_prefix(&prefix)
+                .and_then(|rest| rest.strip_suffix(".tmp"))
+                .and_then(|rest| rest.split_once('.'))
+                .is_some_and(|(pid, counter)| {
+                    counter.parse::<u64>().is_ok()
+                        && pid
+                            .parse::<u32>()
+                            .is_ok_and(|pid| pid != own_pid && !process_running(pid))
+                });
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// Whether `pid` names a running process. Assumes it does when that cannot
+/// be checked, so a live save is never disturbed.
+fn process_running(pid: u32) -> bool {
+    let proc = Path::new("/proc");
+    !proc.is_dir() || proc.join(pid.to_string()).exists()
+}
+
 fn create_save_temp(path: &Path) -> io::Result<(SaveTemp, fs::File)> {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     let filename = path
@@ -115,6 +163,7 @@ impl Index {
         header.extend_from_slice(&timestamp.to_le_bytes());
         header.resize(64, 0); // pad header to 64 bytes
 
+        remove_stale_save_temps(path);
         let (temporary, file) = create_save_temp(path)?;
         let mut data = IndexWriter {
             inner: BufWriter::new(file),
