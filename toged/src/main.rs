@@ -691,12 +691,13 @@ fn result_row(entry: &toge_core::index::Entry, query: &Query, highlight: bool) -
     }
 }
 
-// A consistent stream holds the index lock, avoiding an O(N) snapshot copy.
-// Bound the duration so disconnected or stalled consumers cannot pin it indefinitely.
+/// Write one length-prefixed stream frame. `deadline` bounds the whole write;
+/// `None` waits as long as the client takes to read, which is only safe
+/// while no lock is held.
 fn write_stream_event(
     stream: &mut UnixStream,
     event: &StreamEvent,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> io::Result<()> {
     let bytes = event.encode();
     if bytes.len() > MAX_STREAM_FRAME_SIZE {
@@ -708,13 +709,17 @@ fn write_stream_event(
     let length = (bytes.len() as u64).to_le_bytes();
     for mut pending in [length.as_slice(), bytes.as_slice()] {
         while !pending.is_empty() {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .filter(|duration| !duration.is_zero())
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::TimedOut, "stream deadline exceeded")
-                })?;
-            stream.set_write_timeout(Some(remaining.min(Duration::from_secs(5))))?;
+            let timeout = deadline
+                .map(|deadline| {
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .filter(|duration| !duration.is_zero())
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::TimedOut, "stream deadline exceeded")
+                        })
+                })
+                .transpose()?;
+            stream.set_write_timeout(timeout)?;
             match stream.write(pending) {
                 Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "stream closed")),
                 Ok(written) => pending = &pending[written..],
@@ -726,11 +731,81 @@ fn write_stream_event(
     Ok(())
 }
 
-fn stream_results(
+/// Total time a stream may spend holding the index lock.
+const STREAM_LOCK_BUDGET: Duration = Duration::from_mins(1);
+/// Entries visited per lock hold, so a stream that has stopped returning rows
+/// (past `max_results`, or few matches) still lets other requests in.
+const STREAM_SLICE_ENTRIES: usize = 1 << 16;
+
+/// The entries a stream has yet to visit, as IDs of the index epoch it last
+/// saw.
+enum StreamCursor {
+    /// Matches or trigram candidates, in the order they are streamed.
+    Ids { ids: Vec<u32>, next: usize },
+    /// Every slot in `next..end`, then `moved`: unvisited entries that a
+    /// removal moved into an already visited slot.
+    Scan {
+        next: u32,
+        end: u32,
+        moved: Vec<u32>,
+    },
+}
+
+impl StreamCursor {
+    fn pop(&mut self) -> Option<u32> {
+        match self {
+            Self::Ids { ids, next } => {
+                let id = ids.get(*next).copied()?;
+                *next += 1;
+                Some(id)
+            }
+            Self::Scan { next, end, moved } => {
+                if next < end {
+                    *next += 1;
+                    Some(*next - 1)
+                } else {
+                    moved.pop()
+                }
+            }
+        }
+    }
+
+    /// Follow removals that renumbered entries while the lock was released.
+    fn renumber(&mut self, remap: &std::collections::HashMap<u32, Option<u32>>, count: usize) {
+        let current = |id: u32| remap.get(&id).copied().unwrap_or(Some(id));
+        match self {
+            Self::Ids { ids, next } => {
+                *ids = ids[*next..].iter().filter_map(|&id| current(id)).collect();
+                *next = 0;
+            }
+            Self::Scan { next, end, moved } => {
+                *moved = moved.iter().filter_map(|&id| current(id)).collect();
+                // Removal moves the last entry down into the freed slot. An
+                // unvisited entry that lands behind the scan is visited later;
+                // one that lands ahead of it is reached by the scan itself.
+                for (&original, &now) in remap {
+                    if let Some(now) = now
+                        && (*next..*end).contains(&original)
+                        && now < *next
+                    {
+                        moved.push(now);
+                    }
+                }
+                *end = (*end).min(entry_id(count));
+            }
+        }
+    }
+}
+
+/// Stream the results of `request`, locking `state` only while filling each
+/// batch. The lock is released while the client reads, so a slow reader such
+/// as a pager holds up nothing but its own stream. `project` picks the index
+/// and order cache out of the locked state.
+fn stream_results<S>(
     stream: &mut UnixStream,
     request: &StreamQueryRequest,
-    index: &mut Index,
-    orders: &mut OrderCache,
+    state: &Mutex<S>,
+    project: impl Fn(&mut S) -> (&mut Index, &mut OrderCache),
     index_size: bool,
 ) -> io::Result<()> {
     let query = match Query::parse(&request.query.raw) {
@@ -739,86 +814,127 @@ fn stream_results(
             return write_stream_event(
                 stream,
                 &StreamEvent::Error(error.to_string()),
-                Instant::now() + Duration::from_secs(5),
+                Some(Instant::now() + Duration::from_secs(5)),
             );
         }
     };
-    let deadline = Instant::now() + Duration::from_mins(1);
     let matcher = QueryMatcher::new(query.clone());
     let needs_dates = query.date_modified.is_some()
         || query.date_created.is_some()
         || query.date_accessed.is_some();
-    // Sorted streams retain IDs, but still serialize only one batch at a time.
-    let sorted = if request.order == StreamOrder::Sorted {
-        Some(prepare_query_ids(index, orders, &query, index_size))
-    } else {
-        None
-    };
-    // Index-order streams visit only trigram/extension candidates when the
-    // query has a selective seed; posting lists are sorted, so order holds.
-    // Otherwise every entry is scanned without an ID buffer.
-    let ids = sorted.or_else(|| candidate_ids(index, &query));
+    // Sorted streams already hold only matches.
     let matched = request.order == StreamOrder::Sorted;
-    let count = ids.as_ref().map_or(index.count(), Vec::len);
     let mut summary = StreamSummary {
         id: request.query.id,
         total_count: 0,
         total_size: 0,
         returned_count: 0,
     };
-    let mut rows = Vec::with_capacity(STREAM_BATCH_SIZE);
-    for position in 0..count {
-        if position % 4096 == 0 && Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "stream deadline exceeded",
-            ));
-        }
-        let id = ids.as_ref().map_or(entry_id(position), |ids| ids[position]);
-        if !matched && needs_dates && missing_query_dates(&index.entries[id as usize], &query) {
-            index.update_metadata_by_id(id);
-        }
-        if !matched && !matcher.matches(&index.entries[id as usize]) {
-            continue;
-        }
-        if !matched && index_size {
-            let entry = &index.entries[id as usize];
-            if !entry.is_dir && entry.size == 0 {
-                index.update_metadata_by_id(id);
+    let mut budget = STREAM_LOCK_BUDGET;
+    let (mut cursor, mut epoch, mut count) = {
+        let mut guard = state.lock().unwrap();
+        let (index, orders) = project(&mut guard);
+        let started = Instant::now();
+        // Index-order streams visit only trigram/extension candidates when
+        // the query has a selective seed; posting lists are sorted, so order
+        // holds. Otherwise every slot is scanned without an ID buffer.
+        let ids = if matched {
+            Some(prepare_query_ids(index, orders, &query, index_size))
+        } else {
+            candidate_ids(index, &query)
+        };
+        let cursor = match ids {
+            Some(ids) => StreamCursor::Ids { ids, next: 0 },
+            None => StreamCursor::Scan {
+                next: 0,
+                end: entry_id(index.count()),
+                moved: Vec::new(),
+            },
+        };
+        budget = budget.saturating_sub(started.elapsed());
+        (cursor, index.epoch(), index.count())
+    };
+    loop {
+        let mut rows = Vec::with_capacity(STREAM_BATCH_SIZE);
+        let finished = {
+            let mut guard = state.lock().unwrap();
+            let (index, _) = project(&mut guard);
+            let started = Instant::now();
+            if index.epoch() != epoch {
+                let Some(removals) = index.removals_since(epoch) else {
+                    drop(guard);
+                    return write_stream_event(
+                        stream,
+                        &StreamEvent::Error("the index was rebuilt during the stream".into()),
+                        Some(Instant::now() + Duration::from_secs(5)),
+                    );
+                };
+                let remap = Index::renumbering(removals, entry_id(count));
+                cursor.renumber(&remap, index.count());
+                epoch = index.epoch();
             }
-        }
-        let entry = &index.entries[id as usize];
-        let ordinal = summary.total_count;
-        summary.total_count += 1;
-        summary.total_size = summary.total_size.saturating_add(entry.size);
-        if ordinal < request.query.offset || summary.returned_count >= request.query.max_results {
-            continue;
-        }
-        rows.push(result_row(entry, &query, request.query.highlight));
-        summary.returned_count += 1;
-        if rows.len() == STREAM_BATCH_SIZE {
+            // Stays false when the batch fills or the slice runs out first.
+            let mut finished = false;
+            for visited in 0..STREAM_SLICE_ENTRIES {
+                if visited % 4096 == 0 && started.elapsed() >= budget {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "stream deadline exceeded",
+                    ));
+                }
+                let Some(id) = cursor.pop() else {
+                    finished = true;
+                    break;
+                };
+                if !matched
+                    && needs_dates
+                    && missing_query_dates(&index.entries[id as usize], &query)
+                {
+                    index.update_metadata_by_id(id);
+                }
+                if !matched && !matcher.matches(&index.entries[id as usize]) {
+                    continue;
+                }
+                if !matched && index_size {
+                    let entry = &index.entries[id as usize];
+                    if !entry.is_dir && entry.size == 0 {
+                        index.update_metadata_by_id(id);
+                    }
+                }
+                let entry = &index.entries[id as usize];
+                let ordinal = summary.total_count;
+                summary.total_count += 1;
+                summary.total_size = summary.total_size.saturating_add(entry.size);
+                if ordinal < request.query.offset
+                    || summary.returned_count >= request.query.max_results
+                {
+                    continue;
+                }
+                rows.push(result_row(entry, &query, request.query.highlight));
+                summary.returned_count += 1;
+                if rows.len() == STREAM_BATCH_SIZE {
+                    break;
+                }
+            }
+            budget = budget.saturating_sub(started.elapsed());
+            count = index.count();
+            finished
+        };
+        if !rows.is_empty() {
             write_stream_event(
                 stream,
                 &StreamEvent::Rows {
                     id: summary.id,
-                    rows: std::mem::take(&mut rows),
+                    rows,
                 },
-                deadline,
+                None,
             )?;
-            rows = Vec::with_capacity(STREAM_BATCH_SIZE);
+        }
+        if finished {
+            break;
         }
     }
-    if !rows.is_empty() {
-        write_stream_event(
-            stream,
-            &StreamEvent::Rows {
-                id: summary.id,
-                rows,
-            },
-            deadline,
-        )?;
-    }
-    write_stream_event(stream, &StreamEvent::Done(summary), deadline)
+    write_stream_event(stream, &StreamEvent::Done(summary), None)
 }
 
 fn handle_stream_request(
@@ -827,20 +943,18 @@ fn handle_stream_request(
     config: &Config,
     state: &Arc<Mutex<DaemonState>>,
 ) -> io::Result<()> {
-    let mut st = state.lock().unwrap();
-    if st.status != DaemonStatus::Ready {
+    if state.lock().unwrap().status != DaemonStatus::Ready {
         return write_stream_event(
             stream,
             &StreamEvent::Error("daemon not ready".into()),
-            Instant::now() + Duration::from_secs(5),
+            Some(Instant::now() + Duration::from_secs(5)),
         );
     }
-    let st = &mut *st;
     stream_results(
         stream,
         request,
-        &mut st.index,
-        &mut st.orders,
+        state,
+        |st| (&mut st.index, &mut st.orders),
         config.index_size,
     )
 }
@@ -1019,11 +1133,12 @@ fn serve(
         let config_dir = config_dir.to_path_buf();
         let config = config.clone();
         let state = state.clone();
-        // Sessions stay open until the client leaves, so Quit shuts their
-        // sockets down to unblock them; other requests finish on their own.
+        // Sessions stay open until the client leaves, and streams wait on
+        // their reader, so Quit shuts their sockets down to unblock them;
+        // other requests finish on their own.
         let session_socket = matches!(
             req,
-            Request::OpenSession(_) | Request::OpenSessionPreview(_)
+            Request::OpenSession(_) | Request::OpenSessionPreview(_) | Request::StreamQuery(_)
         )
         .then(|| s.try_clone().ok())
         .flatten();

@@ -2,7 +2,6 @@
 
 use crate::index::{Index, entry_id};
 use std::cmp::Ordering;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
@@ -217,30 +216,8 @@ impl CachedOrder {
     /// ties involving a renumbered ID need reordering, instead of a full sort.
     fn renumber(&mut self, index: &Index, key: KeyFn, removals: &[(u32, u32)]) {
         let key_of = |id: u32| key(&index.entries[id as usize]);
-        let cached_len = entry_id(self.ascending.order.len());
-        // Which cached ID currently occupies a slot, for slots touched so far.
-        let mut owner: HashMap<u32, Option<u32>> = HashMap::new();
         // Cached ID -> its current ID, or None once removed.
-        let mut remap: HashMap<u32, Option<u32>> = HashMap::new();
-        for &(removed, moved_from) in removals {
-            let owner_of = |owner: &HashMap<u32, Option<u32>>, slot: u32| {
-                owner
-                    .get(&slot)
-                    .copied()
-                    .unwrap_or((slot < cached_len).then_some(slot))
-            };
-            if let Some(cached) = owner_of(&owner, removed) {
-                remap.insert(cached, None);
-            }
-            if removed != moved_from {
-                let moved = owner_of(&owner, moved_from);
-                owner.insert(removed, moved);
-                if let Some(cached) = moved {
-                    remap.insert(cached, Some(removed));
-                }
-            }
-            owner.insert(moved_from, None);
-        }
+        let remap = Index::renumbering(removals, entry_id(self.ascending.order.len()));
         let mut order: Vec<u32> = self
             .ascending
             .order

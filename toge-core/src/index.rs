@@ -247,6 +247,35 @@ impl Index {
         self.removals.get(start..)
     }
 
+    /// Where `removals` (see [`Index::removals_since`]) moved the IDs of the
+    /// first `count` entries: `Some(new_id)` for a moved entry, `None` for a
+    /// removed one. IDs missing from the map still refer to the same entry.
+    pub fn renumbering(removals: &[(u32, u32)], count: u32) -> HashMap<u32, Option<u32>> {
+        // Which original ID currently occupies a slot, for slots touched so far.
+        let mut owner: HashMap<u32, Option<u32>> = HashMap::new();
+        let mut remap: HashMap<u32, Option<u32>> = HashMap::new();
+        let owner_of = |owner: &HashMap<u32, Option<u32>>, slot: u32| {
+            owner
+                .get(&slot)
+                .copied()
+                .unwrap_or((slot < count).then_some(slot))
+        };
+        for &(removed, moved_from) in removals {
+            if let Some(original) = owner_of(&owner, removed) {
+                remap.insert(original, None);
+            }
+            if removed != moved_from {
+                let moved = owner_of(&owner, moved_from);
+                owner.insert(removed, moved);
+                if let Some(original) = moved {
+                    remap.insert(original, Some(removed));
+                }
+            }
+            owner.insert(moved_from, None);
+        }
+        remap
+    }
+
     /// Insert or update `path`, returning its entry ID. See
     /// [`Index::insert_with_metadata`] for when this returns `None`.
     pub fn insert(&mut self, path: &str, is_dir: bool) -> Option<u32> {
