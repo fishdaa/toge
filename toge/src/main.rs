@@ -36,7 +36,7 @@ fn usage() {
 }
 
 fn version() {
-    println!("toge 0.1.1");
+    println!("toge {}", env!("CARGO_PKG_VERSION"));
 }
 
 fn default_state_dir() -> PathBuf {

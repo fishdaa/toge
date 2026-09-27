@@ -129,7 +129,7 @@ fn usage() {
 }
 
 fn version() {
-    println!("toged 0.1.1");
+    println!("toged {}", env!("CARGO_PKG_VERSION"));
 }
 
 fn default_state_dir() -> PathBuf {

@@ -21,7 +21,7 @@ fn ndl_help_exits_zero() {
 fn ndl_version_prints_version() {
     let output = run_ndl(&["-v"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("toge 0.1.1"));
+    assert_eq!(stdout.trim(), format!("toge {}", env!("CARGO_PKG_VERSION")));
     assert!(output.status.success());
 }
 

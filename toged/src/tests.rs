@@ -148,7 +148,10 @@ fn needled_help_exits_zero() {
 fn needled_version_prints_version() {
     let output = run_needled(&["-v"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("toged 0.1.1"));
+    assert_eq!(
+        stdout.trim(),
+        format!("toged {}", env!("CARGO_PKG_VERSION"))
+    );
     assert!(output.status.success());
 }
 
