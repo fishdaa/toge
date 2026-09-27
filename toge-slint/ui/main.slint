@@ -91,6 +91,11 @@ export component AppWindow inherits Window {
     in-out property <string> rename-name;
     in-out property <bool> rename-working: false;
     private property <int> rename-selection-end;
+    // Path awaiting Shift+Delete confirmation; the dialog is open while non-empty.
+    in-out property <string> delete-path;
+    in-out property <string> delete-name;
+    callback delete-confirmed();
+    callback column-widths-changed(float, float, float);
     callback rename-commit(string);
     callback query-edited(string);
     callback submit(string);
@@ -123,6 +128,49 @@ export component AppWindow inherits Window {
         rename-focus.start();
     }
     public function focus-rename() { inline-name.focus(); }
+    public function apply-column-widths(name: float, path: float, size: float) {
+        table.columns[0].width = name * 1px;
+        table.columns[1].width = path * 1px;
+        table.columns[2].width = size * 1px;
+    }
+    public function confirm-delete(path: string, name: string) {
+        root.cancel-rename(false);
+        root.context-menu-open = false;
+        root.delete-path = path;
+        root.delete-name = name;
+        delete-focus.start();
+    }
+    public function close-delete-confirm() {
+        root.delete-path = "";
+        root.delete-name = "";
+        table.focus();
+    }
+    delete-focus := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => { self.stop(); if (root.delete-path != "") { delete-keys.focus(); } }
+    }
+
+    // Column resizing updates widths on every pointer move; save once the drag settles.
+    private property <length> name-width: table.columns[0].width;
+    private property <length> path-width: table.columns[1].width;
+    private property <length> size-width: table.columns[2].width;
+    changed name-width => { root.defer-width-save(); }
+    changed path-width => { root.defer-width-save(); }
+    changed size-width => { root.defer-width-save(); }
+    // Timer.restart() does nothing while stopped, and stop() followed by start()
+    // does not reset a running timer's delay.
+    function defer-width-save() {
+        if (width-save.running) { width-save.restart(); } else { width-save.start(); }
+    }
+    width-save := Timer {
+        interval: 400ms;
+        running: false;
+        triggered => {
+            self.stop();
+            root.column-widths-changed(root.name-width / 1px, root.path-width / 1px, root.size-width / 1px);
+        }
+    }
     public function cancel-rename(return-focus: bool) {
         if (root.rename-working) { return; }
         rename-focus.stop();
@@ -177,7 +225,7 @@ export component AppWindow inherits Window {
         // Like toge-gui, Up/Down step through results from anywhere in the
         // window, including the search field, without moving keyboard focus.
         capture-key-pressed(event) => {
-            if (root.rename-row >= 0 || root.context-menu-open || root.rows.length == 0) { return reject; }
+            if (root.rename-row >= 0 || root.context-menu-open || root.delete-path != "" || root.rows.length == 0) { return reject; }
             if (event.modifiers.control || event.modifiers.alt || event.modifiers.shift) { return reject; }
             if (event.text == Key.DownArrow) {
                 root.select-row(min(root.rows.length - 1, root.selected + 1));
@@ -190,6 +238,7 @@ export component AppWindow inherits Window {
             return reject;
         }
         key-pressed(event) => {
+            if (root.delete-path != "") { return reject; }
             if (event.modifiers.control && event.text == "l") {
                 root.cancel-rename(false); search.focus(); search.select-all(); return accept;
             }
@@ -239,7 +288,7 @@ export component AppWindow inherits Window {
                     if (event.modifiers.control && event.text == "c") { root.action(event.modifiers.shift ? "copy-path" : "copy"); return accept; }
                     if (event.modifiers.control && event.text == "x") { root.action("cut"); return accept; }
                     if (event.text == Key.F2) { root.action("rename"); return accept; }
-                    if (event.text == Key.Delete) { root.action("delete"); return accept; }
+                    if (event.text == Key.Delete) { root.action(event.modifiers.shift ? "delete-permanently" : "delete"); return accept; }
                     if (event.text == Key.Escape) { root.context-menu-open = false; return accept; }
                     // StandardTableView handles only Up/Down itself.
                     if (root.rows.length > 0) {
@@ -377,7 +426,7 @@ export component AppWindow inherits Window {
                 if root.context-menu-open: Rectangle {
                     x: max(8px, min(root.context-menu-x, parent.width - self.width - 8px));
                     y: max(8px, min(root.context-menu-y, parent.height - self.height - 8px));
-                    width: 184px; height: min(229px, parent.height - 16px);
+                    width: 184px; height: min(260px, parent.height - 16px);
                     background: Palette.background;
                     border-width: 1px;
                     border-color: Palette.foreground;
@@ -388,7 +437,7 @@ export component AppWindow inherits Window {
                       width: parent.width; height: parent.height;
                       viewport-width: self.visible-width;
                       VerticalLayout {
-                        height: 229px;
+                        height: 260px;
                         padding-top: 5px; padding-bottom: 5px;
                         spacing: 1px;
                         ContextMenuItem {
@@ -412,6 +461,7 @@ export component AppWindow inherits Window {
                         ContextMenuItem { label: "Copy"; activated => { root.context-menu-open = false; root.action("copy"); } }
                         ContextMenuItem { label: "Rename"; activated => { root.context-menu-open = false; root.action("rename"); } }
                         ContextMenuItem { label: "Delete"; activated => { root.context-menu-open = false; root.action("delete"); } }
+                        ContextMenuItem { label: "Delete permanently…"; activated => { root.context-menu-open = false; root.action("delete-permanently"); } }
                       }
                     }
                 }
@@ -472,6 +522,53 @@ export component AppWindow inherits Window {
                             text: root.index-status; overflow: elide;
                             font-size: 12px; vertical-alignment: center;
                             color: Palette.foreground; opacity: 0.65;
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle {
+            visible: root.delete-path != "";
+            width: 100%; height: 100%;
+            background: #00000060;
+            // Swallow clicks so the table cannot change underneath the dialog.
+            TouchArea { width: 100%; height: 100%; }
+            delete-keys := FocusScope {
+                width: 100%; height: 100%;
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) { root.close-delete-confirm(); return accept; }
+                    if (event.text == Key.Return) { root.delete-confirmed(); return accept; }
+                    return accept;
+                }
+                Rectangle {
+                    width: min(420px, parent.width - 32px);
+                    height: dialog.preferred-height;
+                    background: Palette.background;
+                    border-width: 1px; border-color: Palette.border;
+                    border-radius: 6px;
+                    drop-shadow-blur: 16px; drop-shadow-color: #50000000;
+                    accessible-role: groupbox;
+                    accessible-label: "Delete permanently";
+                    dialog := VerticalLayout {
+                        padding: 20px; spacing: 12px;
+                        Text {
+                            text: "Delete “" + root.delete-name + "” permanently?";
+                            font-size: 16px; font-weight: 700;
+                            wrap: word-wrap; color: Palette.foreground;
+                        }
+                        Text {
+                            text: "This skips the Trash and cannot be undone. Folders are deleted with all their contents.";
+                            wrap: word-wrap; color: Palette.foreground; opacity: 0.75;
+                        }
+                        Text {
+                            text: root.delete-path;
+                            wrap: word-wrap; font-size: 12px;
+                            color: Palette.foreground; opacity: 0.55;
+                        }
+                        HorizontalLayout {
+                            alignment: end; spacing: 8px; padding-top: 4px;
+                            Button { text: "Cancel"; clicked => { root.close-delete-confirm(); } }
+                            Button { text: "Delete permanently"; primary: true; clicked => { root.delete-confirmed(); } }
                         }
                     }
                 }

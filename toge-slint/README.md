@@ -54,13 +54,17 @@ Type the existing query syntax (`ext:pdf`, `folder:`, `path:src`, etc.). Search 
 initially debounced by 100 ms; Enter in the search field submits immediately.
 The initial empty query lists indexed entries. Use Up/Down in the table, Enter
 or double-click to open, and Ctrl+L to return to the search field. Right-click a
-row for Open, Copy path, Open folder, Copy, Cut, Rename, and Delete. Ctrl+C copies
+row for Open, Copy path, Open folder, Copy, Cut, Rename, Delete, and Delete
+permanently. Ctrl+C copies
 the file, Ctrl+X cuts it, and Ctrl+Shift+C copies its path. Paste files in your file
 manager; Cut moves the source only when pasted. File clipboard formats support
 GNOME and KDE file managers. F2 or Rename edits the Name cell in place; Enter
 saves and Escape cancels. Clicking elsewhere cancels an uncommitted rename.
 Delete moves the selected item straight to Trash without confirmation. Restore
-it from your file manager’s Trash if needed. Rename never replaces an existing
+it from your file manager’s Trash if needed. Shift+Delete (or **Delete
+permanently…**) skips the Trash: it asks for confirmation first, then removes the
+file, or a folder with all its contents. Enter confirms and Escape cancels. A
+symlink is removed itself, never its target. Rename never replaces an existing
 destination, and a successful rename keeps the renamed item selected. After a
 rename or trash, the daemon re-reads the affected paths, so the list updates even
 without the filesystem watcher. Click **toge** at the top left to open About.
@@ -72,7 +76,9 @@ Column headers sort in the daemon, using cached whole-index name and path
 orders, so sorting a million matches takes milliseconds. Size and modified time sort numerically.
 Sorting clears the selection and returns the list to the top. The sort column
 and direction are saved in `toge/slint-ui.toml` under the active XDG configuration
-directory and restored, including the header arrow, on launch. Selection follows
+directory and restored, including the header arrow, on launch. Resized Name,
+Path and Size column widths are saved to the same file once a drag settles and
+restored on launch; Modified fills the remaining width. Selection follows
 the full path when search results are replaced or refreshed.
 
 Results live in the daemon. Each search opens a *result session* on its own
@@ -99,8 +105,7 @@ two-second timeout and retry while the daemon is busy, within the readiness
 deadline.
 
 This MVP does not implement tray/global shortcuts, autostart, settings editing,
-diagnostics, persistent column widths,
-or installer packages. Edit configuration with the existing GUI or configuration
+diagnostics, or installer packages. Edit configuration with the existing GUI or configuration
 file. Keyboard bindings in this experimental shell are fixed.
 
 Slint is used under its Royalty-free Desktop, Mobile, and Web Applications license;

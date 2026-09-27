@@ -109,6 +109,15 @@ fn trash_with(path: &Path, program: &Path) -> io::Result<()> {
     }
 }
 
+/// Permanently remove a path. Symlinks are removed themselves, never their targets.
+pub fn delete_permanently(path: &Path) -> io::Result<()> {
+    if std::fs::symlink_metadata(path)?.is_dir() {
+        std::fs::remove_dir_all(path)
+    } else {
+        std::fs::remove_file(path)
+    }
+}
+
 fn file_action(action: &str, path: &Path) -> io::Result<&'static str> {
     match action {
         "copy" | "cut" => {
@@ -156,8 +165,73 @@ pub fn place_rename(ui: &crate::AppWindow, position: Option<i32>) {
     }
 }
 
+/// Run a trash or permanent delete off the UI thread, then refresh the row.
+fn remove(
+    ui: &crate::AppWindow,
+    path: PathBuf,
+    permanent: bool,
+    pending_deletes: &Arc<Mutex<HashSet<PathBuf>>>,
+) {
+    // Ignore repeated key events while this item is being removed.
+    if !pending_deletes.lock().unwrap().insert(path.clone()) {
+        return;
+    }
+    ui.invoke_cancel_rename(false);
+    ui.set_status(
+        if permanent {
+            "Deleting…"
+        } else {
+            "Moving to Trash…"
+        }
+        .into(),
+    );
+    let pending = pending_deletes.clone();
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let outcome = if permanent {
+            delete_permanently(&path)
+                .map_err(|error| io::Error::other(format!("Could not delete: {error}")))
+        } else {
+            trash_with(&path, Path::new("gio"))
+        };
+        let _ = weak.upgrade_in_event_loop(move |ui| {
+            pending.lock().unwrap().remove(&path);
+            match outcome {
+                Ok(()) => {
+                    crate::worker::results(&ui).send(crate::model::Command::Reconcile {
+                        paths: vec![path.to_string_lossy().into_owned()],
+                        select: None,
+                    });
+                    ui.set_status(
+                        if permanent {
+                            "Deleted permanently"
+                        } else {
+                            "Moved to Trash"
+                        }
+                        .into(),
+                    );
+                }
+                Err(error) => ui.set_status(error.to_string().into()),
+            }
+        });
+    });
+}
+
 pub fn connect(ui: &crate::AppWindow) {
     let pending_deletes = Arc::new(Mutex::new(HashSet::<PathBuf>::new()));
+    let weak = ui.as_weak();
+    let pending = pending_deletes.clone();
+    ui.on_delete_confirmed(move || {
+        let Some(ui) = weak.upgrade() else {
+            return;
+        };
+        // Delete the path shown in the dialog, even if results refreshed meanwhile.
+        let path = ui.get_delete_path();
+        ui.invoke_close_delete_confirm();
+        if !path.is_empty() {
+            remove(&ui, PathBuf::from(path.as_str()), true, &pending);
+        }
+    });
     let weak = ui.as_weak();
     ui.on_rename_commit(move |name| {
         let Some(ui) = weak.upgrade() else {
@@ -229,30 +303,21 @@ pub fn connect(ui: &crate::AppWindow) {
             return;
         }
         if action == "delete" {
-            // Ignore repeated Delete key events while this item is being trashed.
-            if !pending_deletes.lock().unwrap().insert(path.clone()) {
+            remove(&ui, path, false, &pending_deletes);
+            return;
+        }
+        if action == "delete-permanently" {
+            if pending_deletes.lock().unwrap().contains(&path) {
                 return;
             }
-            ui.invoke_cancel_rename(false);
-            ui.set_status("Moving to Trash…".into());
-            let pending = pending_deletes.clone();
-            let weak = ui.as_weak();
-            std::thread::spawn(move || {
-                let outcome = trash_with(&path, Path::new("gio"));
-                let _ = weak.upgrade_in_event_loop(move |ui| {
-                    pending.lock().unwrap().remove(&path);
-                    match outcome {
-                        Ok(()) => {
-                            crate::worker::results(&ui).send(crate::model::Command::Reconcile {
-                                paths: vec![path.to_string_lossy().into_owned()],
-                                select: None,
-                            });
-                            ui.set_status("Moved to Trash".into());
-                        }
-                        Err(error) => ui.set_status(error.to_string().into()),
-                    }
-                });
-            });
+            let name = path
+                .file_name()
+                .unwrap_or(path.as_os_str())
+                .to_string_lossy();
+            ui.invoke_confirm_delete(
+                path.to_string_lossy().into_owned().into(),
+                name.into_owned().into(),
+            );
             return;
         }
         let weak = ui.as_weak();
@@ -345,6 +410,31 @@ mod tests {
         assert!(rename(&source, "taken").is_err());
         let target = rename(&source, "renamed").unwrap();
         assert_eq!(std::fs::read_link(target).unwrap(), Path::new("missing"));
+    }
+    #[test]
+    fn permanent_delete_removes_files_and_folders_but_not_symlink_targets() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("file.txt");
+        std::fs::write(&file, "gone").unwrap();
+        delete_permanently(&file).unwrap();
+        assert!(!file.exists());
+        let folder = dir.path().join("folder");
+        std::fs::create_dir_all(folder.join("nested")).unwrap();
+        std::fs::write(folder.join("nested/a.txt"), "a").unwrap();
+        delete_permanently(&folder).unwrap();
+        assert!(!folder.exists());
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), "keep").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        delete_permanently(&link).unwrap();
+        assert!(std::fs::symlink_metadata(&link).is_err());
+        assert_eq!(
+            std::fs::read_to_string(target.join("keep.txt")).unwrap(),
+            "keep"
+        );
+        assert!(delete_permanently(&dir.path().join("missing")).is_err());
     }
     #[test]
     fn trash_failure_is_reported_without_deleting_the_file() {
