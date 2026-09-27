@@ -20,10 +20,12 @@ use toge_core::ipc::{
 };
 use toge_core::matcher::{QueryMatcher, candidate_ids, match_query};
 use toge_core::query::Query;
-use toge_core::sort::{SortKey, sort_ids};
+use toge_core::sort::{OrderCache, SortKey};
 use toge_core::sys::FsWatcher;
 use toge_core::sys::{FanotifyWatcher, WatchEvent};
 use toge_core::walker::{Excludes, has_hidden_ancestor_dir, reconcile, walk};
+
+mod session;
 
 struct DaemonState {
     index: Index,
@@ -33,6 +35,8 @@ struct DaemonState {
     last_updated_unix: i64,
     watcher: WatcherStatus,
     watcher_log: Vec<String>,
+    /// Whole-index name/path orders shared by all queries.
+    orders: OrderCache,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -379,6 +383,8 @@ fn handle_request(
                 return Response::Error(e.to_string());
             }
             let mut st = state.lock().unwrap();
+            let mut new_index = new_index;
+            new_index.succeed(&st.index);
             st.index = new_index;
             st.build_duration_ms = duration;
             st.last_updated_unix = current_unix_time();
@@ -395,22 +401,28 @@ fn handle_request(
             if st.status != DaemonStatus::Ready {
                 return Response::Error("daemon not ready".into());
             }
-            handle_query(&mut st.index, &q, config.index_size)
+            let st = &mut *st;
+            handle_query(&mut st.index, &mut st.orders, &q, config.index_size)
         }
-        Request::StreamQuery(_) => {
+        Request::StreamQuery(_) | Request::OpenSession(_) => {
             Response::Error("stream request requires a streaming connection".into())
         }
         Request::Quit => unreachable!(),
     }
 }
 
-fn handle_query(index: &mut Index, q: &QueryRequest, index_size: bool) -> Response {
+fn handle_query(
+    index: &mut Index,
+    orders: &mut OrderCache,
+    q: &QueryRequest,
+    index_size: bool,
+) -> Response {
     let query = match Query::parse(&q.raw) {
         Ok(query) => query,
         Err(e) => return Response::Error(e.to_string()),
     };
 
-    let ids = prepare_query_ids(index, &query, index_size);
+    let ids = prepare_query_ids(index, orders, &query, index_size);
 
     let total = ids.len();
     let total_size: u64 = ids.iter().map(|id| index.entries[*id as usize].size).sum();
@@ -432,7 +444,12 @@ fn handle_query(index: &mut Index, q: &QueryRequest, index_size: bool) -> Respon
     })
 }
 
-fn prepare_query_ids(index: &mut Index, query: &Query, index_size: bool) -> Vec<u32> {
+fn prepare_query_ids(
+    index: &mut Index,
+    orders: &mut OrderCache,
+    query: &Query,
+    index_size: bool,
+) -> Vec<u32> {
     let (sort_key, ascending) = sort_params(query.sort);
 
     // Metadata tiers may be disabled while a query still explicitly asks for
@@ -468,7 +485,7 @@ fn prepare_query_ids(index: &mut Index, query: &Query, index_size: bool) -> Vec<
         }
     }
 
-    sort_ids(index, &mut ids, sort_key, ascending);
+    orders.sort(index, &mut ids, sort_key, ascending);
 
     ids
 }
@@ -538,6 +555,7 @@ fn stream_results(
     stream: &mut UnixStream,
     request: &StreamQueryRequest,
     index: &mut Index,
+    orders: &mut OrderCache,
     index_size: bool,
 ) -> io::Result<()> {
     let query = match Query::parse(&request.query.raw) {
@@ -557,7 +575,7 @@ fn stream_results(
         || query.date_accessed.is_some();
     // Sorted streams retain IDs, but still serialize only one batch at a time.
     let sorted = if request.order == StreamOrder::Sorted {
-        Some(prepare_query_ids(index, &query, index_size))
+        Some(prepare_query_ids(index, orders, &query, index_size))
     } else {
         None
     };
@@ -642,7 +660,14 @@ fn handle_stream_request(
             Instant::now() + Duration::from_secs(5),
         );
     }
-    stream_results(stream, request, &mut st.index, config.index_size)
+    let st = &mut *st;
+    stream_results(
+        stream,
+        request,
+        &mut st.index,
+        &mut st.orders,
+        config.index_size,
+    )
 }
 
 fn highlight_path(path: &str, query: &Query) -> String {
@@ -777,6 +802,7 @@ fn write_response(stream: &mut UnixStream, resp: &Response) -> io::Result<()> {
 
 fn serve(
     state_dir: PathBuf,
+    config_dir: PathBuf,
     config: Config,
     state: Arc<Mutex<DaemonState>>,
     socket_path: PathBuf,
@@ -815,14 +841,20 @@ fn serve(
         // request (e.g. a broad substring scan) can't stall every other
         // connection behind it, as a single-threaded accept loop would.
         let state_dir = state_dir.clone();
+        let config_dir = config_dir.clone();
         let config = config.clone();
         let state = state.clone();
-        workers.push(thread::spawn(move || {
-            if let Request::StreamQuery(request) = req {
+        workers.push(thread::spawn(move || match req {
+            Request::StreamQuery(request) => {
                 // Transport failures close the connection. EOF without Done
                 // lets clients distinguish an interrupted stream from success.
                 let _ = handle_stream_request(&mut s, &request, &config, &state);
-            } else {
+            }
+            Request::OpenSession(open) => {
+                let env = session::SessionEnv::new(&config, &state_dir, &config_dir);
+                let _ = session::serve_session(&mut s, &open, &env, &state);
+            }
+            req => {
                 let resp = handle_request(req, &state_dir, &config, &state);
                 let _ = write_response(&mut s, &resp);
             }
@@ -886,6 +918,7 @@ fn main() {
         last_updated_unix: 0,
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
+        orders: OrderCache::default(),
     }));
 
     {
@@ -915,6 +948,8 @@ fn main() {
         let (index, duration) = build_index(&index_state_dir, &index_config, &index_state);
         let _ = save_index(&index, &index_state_dir);
         let mut st = index_state.lock().unwrap();
+        let mut index = index;
+        index.succeed(&st.index);
         st.index = index;
         st.build_duration_ms = duration;
         st.last_updated_unix = current_unix_time();
@@ -931,6 +966,8 @@ fn main() {
         let (index, duration) = build_index(&state_dir, &config, &state);
         let _ = save_index(&index, &state_dir);
         let mut st = state.lock().unwrap();
+        let mut index = index;
+        index.succeed(&st.index);
         st.index = index;
         st.build_duration_ms = duration;
         st.last_updated_unix = current_unix_time();
@@ -949,7 +986,7 @@ fn main() {
         watcher_config,
     );
 
-    serve(state_dir, config, state, socket).unwrap();
+    serve(state_dir, config_dir, config, state, socket).unwrap();
 }
 
 fn start_watcher(
@@ -1108,6 +1145,8 @@ fn start_watcher(
                     let watcher_status = install_watches(&mut watcher, &dirs);
                     {
                         let mut st = state.lock().unwrap();
+                        let mut new_index = new_index;
+                        new_index.succeed(&st.index);
                         st.index = new_index;
                         st.build_duration_ms = duration;
                         st.status = DaemonStatus::Ready;

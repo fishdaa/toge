@@ -40,6 +40,7 @@ fn moved_in_directory_is_indexed_recursively() {
         last_updated_unix: 0,
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
+        orders: toge_core::sort::OrderCache::default(),
     };
     index_created_path(
         &mut state,
@@ -81,6 +82,7 @@ fn watcher_runtime_failure_marks_daemon_ready_but_degraded() {
         last_updated_unix: 0,
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
+        orders: toge_core::sort::OrderCache::default(),
     }));
 
     mark_watcher_unavailable(&state, "permission denied");
@@ -135,6 +137,7 @@ fn query_before_ready_returns_not_ready_error() {
         last_updated_unix: 0,
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
+        orders: toge_core::sort::OrderCache::default(),
     }));
 
     let resp = handle_request(
@@ -169,6 +172,7 @@ fn modified_sort_refreshes_timestamps_when_metadata_indexing_is_disabled() {
 
     let response = handle_query(
         &mut index,
+        &mut Default::default(),
         &QueryRequest {
             id: 1,
             raw: "sort:modified-desc".into(),
@@ -197,6 +201,7 @@ fn status_response_uses_the_last_real_index_update_time() {
         last_updated_unix: 1_700_000_000,
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
+        orders: toge_core::sort::OrderCache::default(),
     };
 
     assert_eq!(status_response(&state).last_updated_unix, 1_700_000_000);
@@ -435,6 +440,7 @@ fn unlimited_query_returns_every_match_and_handles_nonzero_offsets() {
     for offset in [0, 3, usize::MAX] {
         let Response::Results(results) = handle_query(
             &mut index,
+            &mut Default::default(),
             &QueryRequest {
                 id: 7,
                 raw: String::new(),
@@ -489,7 +495,13 @@ fn stream_sends_bounded_batches_and_final_totals_in_both_orders() {
                 read_request(&mut server).unwrap(),
                 Some(Request::StreamQuery(producer_request.clone()))
             );
-            stream_results(&mut server, &producer_request, &mut index, false)
+            stream_results(
+                &mut server,
+                &producer_request,
+                &mut index,
+                &mut Default::default(),
+                false,
+            )
         });
         let mut paths = Vec::new();
         let mut batch_sizes = Vec::new();
@@ -528,7 +540,16 @@ fn disconnected_stream_and_expired_write_stop_promptly() {
     };
     let (mut server, client) = UnixStream::pair().unwrap();
     drop(client);
-    assert!(stream_results(&mut server, &request, &mut index, false).is_err());
+    assert!(
+        stream_results(
+            &mut server,
+            &request,
+            &mut index,
+            &mut Default::default(),
+            false
+        )
+        .is_err()
+    );
     let (mut server, _client) = UnixStream::pair().unwrap();
     let event = toge_core::ipc::StreamEvent::Done(toge_core::ipc::StreamSummary {
         id: 1,

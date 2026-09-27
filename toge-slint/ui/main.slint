@@ -147,7 +147,26 @@ export component AppWindow inherits Window {
         triggered => {
             self.stop();
             if (root.selected <= 0) { table.viewport-y = 0px; }
+            // set-current-row leaves the final row partly below the viewport.
+            else if (root.selected == root.rows.length - 1) {
+                table.set-current-row(root.selected);
+                table.viewport-y = min(0px, table.visible-height - table.viewport-height);
+                bottom-settle.start();
+            }
             else { table.set-current-row(root.selected); }
+        }
+    }
+
+    // The virtual table re-estimates its height after jumping to the end;
+    // pin the viewport to the bottom again once that layout has settled.
+    bottom-settle := Timer {
+        interval: 16ms;
+        running: false;
+        triggered => {
+            self.stop();
+            if (root.rows.length > 0 && root.selected == root.rows.length - 1) {
+                table.viewport-y = min(0px, table.visible-height - table.viewport-height);
+            }
         }
     }
 
@@ -205,8 +224,23 @@ export component AppWindow inherits Window {
                     if (event.text == Key.F2) { root.action("rename"); return accept; }
                     if (event.text == Key.Delete) { root.action("delete"); return accept; }
                     if (event.text == Key.Escape) { root.context-menu-open = false; return accept; }
+                    // StandardTableView handles only Up/Down itself.
+                    if (root.rows.length > 0) {
+                        if (event.text == Key.Home) { root.select-row(0); return accept; }
+                        if (event.text == Key.End) { root.select-row(root.rows.length - 1); return accept; }
+                        if (event.text == Key.PageDown) {
+                            root.select-row(min(root.rows.length - 1, max(0, root.selected) + self.page-rows));
+                            return accept;
+                        }
+                        if (event.text == Key.PageUp) {
+                            root.select-row(max(0, root.selected - self.page-rows));
+                            return accept;
+                        }
+                    }
                     return reject;
                 }
+                // Rows that fit in the viewport, less one so a page step keeps context.
+                property <int> page-rows: max(1, floor(table.visible-height / max(1px, table.viewport-height / max(1, root.rows.length))) - 1);
                 table := StandardTableView {
                     width: 100%; height: 100%;
                     rows: root.rows;
@@ -225,12 +259,16 @@ export component AppWindow inherits Window {
                         if (event.kind == PointerEventKind.down) { root.cancel-rename(false); }
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                             root.selected = index;
+                            table.focus();
                             root.context-menu-x = position.x;
                             root.context-menu-y = position.y;
                             root.context-menu-open = true;
                         }
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
                             root.context-menu-open = false;
+                            // Move keyboard focus off the search field so arrow keys,
+                            // Enter and shortcuts act on the clicked row.
+                            table.focus();
                             root.selected = index; root.row-clicked(index);
                         }
                     }

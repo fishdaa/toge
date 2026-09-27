@@ -6,10 +6,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
-use toge_core::ipc::{
-    MAX_IPC_MESSAGE_SIZE, QueryRequest, Request, Response, ResultsResponse, StatusResponse,
-    StreamOrder, StreamQueryRequest, stream_query,
-};
+use toge_core::ipc::session::{SessionClient, SessionOpen};
+use toge_core::ipc::{MAX_IPC_MESSAGE_SIZE, Request, Response, StatusResponse};
 
 pub fn socket_path() -> PathBuf {
     env::var_os("TOGE_SOCKET")
@@ -146,108 +144,31 @@ pub fn status(sock: &Path) -> io::Result<StatusResponse> {
     }
 }
 
-// Consume bounded daemon frames. The GUI sorts loaded rows locally, so use
-// index order to avoid a daemon-wide matching-ID buffer.
-pub fn query_stream(
+/// Open a result session. `register` sees the socket before the (possibly
+/// slow) initial query runs, so a superseding edit can shut it down.
+pub fn open_session(
     sock: &Path,
-    id: u64,
-    raw: &str,
-    offset: usize,
+    open: SessionOpen,
     register: impl FnOnce(&UnixStream) -> io::Result<()>,
-    mut publish: impl FnMut(ResultsResponse, bool, bool) -> io::Result<()>,
-) -> io::Result<()> {
-    let mut connection = connect(sock, QUERY_TIMEOUT)?;
+) -> io::Result<SessionClient<UnixStream>> {
+    let connection = connect(sock, QUERY_TIMEOUT)?;
     register(&connection)?;
-    let request = StreamQueryRequest {
-        query: QueryRequest {
-            id,
-            raw: raw.to_string(),
-            max_results: usize::MAX,
-            offset,
-            format: toge_core::ipc::OutputFormat::Default,
-            highlight: false,
-        },
-        order: StreamOrder::Index,
-    };
-    let mut first = true;
-    let summary = stream_query(&mut connection, &request, |rows| {
-        publish(
-            ResultsResponse {
-                id,
-                total_count: 0,
-                total_size: 0,
-                rows: rows.to_vec(),
-            },
-            first,
-            false,
-        )?;
-        first = false;
-        Ok(())
-    })
-    .map_err(|error| {
+    SessionClient::open(connection, open).map_err(|error| {
         if error.to_string() == "unknown request type" {
-            io::Error::other("Daemon does not support streaming. Restart or rebuild toged.")
+            io::Error::other("Daemon does not support result sessions. Restart or rebuild toged.")
         } else {
             response_error(error)
         }
-    })?;
-    publish(
-        ResultsResponse {
-            id,
-            total_count: summary.total_count,
-            total_size: summary.total_size,
-            rows: vec![],
-        },
-        first,
-        true,
-    )
-}
-
-#[cfg(test)]
-fn query(sock: &Path, id: u64, raw: &str, offset: usize) -> io::Result<ResultsResponse> {
-    let mut result = ResultsResponse {
-        id,
-        total_count: 0,
-        total_size: 0,
-        rows: vec![],
-    };
-    query_stream(
-        sock,
-        id,
-        raw,
-        offset,
-        |_| Ok(()),
-        |batch, _, _| {
-            result.total_count = batch.total_count;
-            result.total_size = batch.total_size;
-            result.rows.extend(batch.rows);
-            Ok(())
-        },
-    )?;
-    Ok(result)
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
-    use toge_core::ipc::{ResultRow, StreamEvent, StreamSummary};
-
-    pub(super) fn result_rows(count: usize) -> Vec<ResultRow> {
-        (0..count)
-            .map(|i| ResultRow {
-                path: format!("/test/{i}"),
-                name: i.to_string(),
-                parent: "/test".into(),
-                extension: String::new(),
-                is_dir: false,
-                size: i as u64,
-                modified_unix: -1,
-                created_unix: 2,
-                accessed_unix: 3,
-            })
-            .collect()
-    }
+    use toge_core::ipc::session::{
+        SessionRequest, SessionResponse, SessionState, read_frame, write_frame,
+    };
 
     #[test]
     fn rejects_oversized_and_truncated_frames() {
@@ -301,258 +222,89 @@ mod tests {
     }
 
     #[test]
-    fn query_checks_response_id_and_preserves_request() {
-        for response_id in [7, 8] {
+    fn session_open_sends_query_and_sort_and_reports_legacy_daemons() {
+        for scenario in ["ok", "legacy"] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("daemon.sock");
             let listener = UnixListener::bind(&path).unwrap();
             let server = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
-                let mut len = [0; 8];
-                stream.read_exact(&mut len).unwrap();
-                let mut body = vec![0; u64::from_le_bytes(len) as usize];
-                stream.read_exact(&mut body).unwrap();
-                match Request::decode(&body).unwrap() {
-                    Request::StreamQuery(request) => {
-                        assert_eq!(request.order, StreamOrder::Index);
-                        let q = request.query;
-                        assert_eq!(q.id, 7);
-                        assert_eq!(q.raw, "ext:pdf");
-                        assert_eq!(q.max_results, usize::MAX);
-                    }
-                    _ => panic!("expected query"),
-                }
-                // A valid query may take longer than the status timeout.
-                if response_id == 7 {
-                    thread::sleep(STATUS_TIMEOUT + Duration::from_millis(100));
-                }
-                let response = StreamEvent::Done(StreamSummary {
-                    id: response_id,
-                    total_count: 0,
-                    total_size: 0,
-                    returned_count: 0,
-                })
-                .encode();
-                stream
-                    .write_all(&(response.len() as u64).to_le_bytes())
-                    .unwrap();
-                stream.write_all(&response).unwrap();
-            });
-            let result = query(&path, 7, "ext:pdf", 0);
-            assert_eq!(result.is_ok(), response_id == 7);
-            server.join().unwrap();
-        }
-    }
-}
-
-#[cfg(test)]
-mod stream_tests {
-    use super::tests::result_rows;
-    use super::*;
-    use std::os::unix::net::UnixListener;
-    use toge_core::ipc::{ResultRow, StreamEvent, StreamSummary};
-
-    fn send(socket: &mut UnixStream, event: StreamEvent) -> io::Result<()> {
-        let bytes = event.encode();
-        socket.write_all(&(bytes.len() as u64).to_le_bytes())?;
-        socket.write_all(&bytes)
-    }
-    fn request(socket: &mut UnixStream) -> StreamQueryRequest {
-        let mut length = [0; 8];
-        socket.read_exact(&mut length).unwrap();
-        let mut bytes = vec![0; u64::from_le_bytes(length) as usize];
-        socket.read_exact(&mut bytes).unwrap();
-        let Request::StreamQuery(request) = Request::decode(&bytes).unwrap() else {
-            panic!("expected daemon stream request")
-        };
-        assert_eq!(request.order, StreamOrder::Index);
-        request
-    }
-
-    #[test]
-    fn publishes_rows_before_completion_and_totals_only_after_done() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("daemon.sock");
-        let listener = UnixListener::bind(&path).unwrap();
-        let rows = result_rows(300);
-        let expected = rows.clone();
-        let (published, wait) = std::sync::mpsc::channel();
-        let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            let request = request(&mut socket);
-            assert_eq!(request.query.raw, "foo");
-            assert_eq!(request.query.offset, 5);
-            send(
-                &mut socket,
-                StreamEvent::Rows {
-                    id: 7,
-                    rows: rows[..128].to_vec(),
-                },
-            )
-            .unwrap();
-            // The first rows must reach the UI before later rows or totals exist.
-            wait.recv_timeout(Duration::from_secs(2)).unwrap();
-            for batch in rows[128..].chunks(128) {
-                send(
-                    &mut socket,
-                    StreamEvent::Rows {
-                        id: 7,
-                        rows: batch.to_vec(),
-                    },
-                )
-                .unwrap();
-            }
-            send(
-                &mut socket,
-                StreamEvent::Done(StreamSummary {
-                    id: 7,
-                    total_count: 305,
-                    total_size: 42,
-                    returned_count: 300,
-                }),
-            )
-            .unwrap();
-        });
-        let mut collected = Vec::<ResultRow>::new();
-        let mut flags = vec![];
-        query_stream(
-            &path,
-            7,
-            "foo",
-            5,
-            |_| Ok(()),
-            |batch, first, done| {
-                if first {
-                    published.send(()).unwrap();
-                }
-                assert_eq!(batch.total_count, if done { 305 } else { 0 });
-                assert_eq!(batch.total_size, if done { 42 } else { 0 });
-                flags.push((batch.rows.len(), first, done));
-                collected.extend(batch.rows);
-                Ok(())
-            },
-        )
-        .unwrap();
-        server.join().unwrap();
-        assert_eq!(collected, expected);
-        assert_eq!(
-            flags,
-            [
-                (128, true, false),
-                (128, false, false),
-                (44, false, false),
-                (0, false, true)
-            ]
-        );
-    }
-
-    #[test]
-    fn streams_all_rows_beyond_the_old_display_limit() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("daemon.sock");
-        let listener = UnixListener::bind(&path).unwrap();
-        let server = thread::spawn(move || {
-            let (mut socket, _) = listener.accept().unwrap();
-            let request = request(&mut socket);
-            let rows = result_rows(25_003);
-            for batch in rows.chunks(128) {
-                send(
-                    &mut socket,
-                    StreamEvent::Rows {
-                        id: request.query.id,
-                        rows: batch.to_vec(),
-                    },
-                )
-                .unwrap();
-            }
-            send(
-                &mut socket,
-                StreamEvent::Done(StreamSummary {
-                    id: request.query.id,
-                    total_count: rows.len(),
-                    total_size: 42,
-                    returned_count: rows.len(),
-                }),
-            )
-            .unwrap();
-        });
-        let result = query(&path, 7, "all", 0).unwrap();
-        server.join().unwrap();
-        assert_eq!(result.rows, result_rows(25_003));
-        assert_eq!(result.total_count, 25_003);
-    }
-
-    #[test]
-    fn incomplete_errors_empty_and_cancelled_streams_do_not_publish_false_completion() {
-        for scenario in ["empty", "truncated", "error", "legacy", "cancel"] {
-            let directory = tempfile::tempdir().unwrap();
-            let path = directory.path().join("daemon.sock");
-            let listener = UnixListener::bind(&path).unwrap();
-            let server = thread::spawn(move || {
-                let (mut socket, _) = listener.accept().unwrap();
-                request(&mut socket);
-                match scenario {
-                    "empty" => send(
-                        &mut socket,
-                        StreamEvent::Done(StreamSummary {
-                            id: 7,
-                            total_count: 0,
-                            total_size: 0,
-                            returned_count: 0,
-                        }),
-                    )
-                    .unwrap(),
-                    "error" | "legacy" => send(
-                        &mut socket,
-                        StreamEvent::Error(
-                            if scenario == "legacy" {
-                                "unknown request type"
-                            } else {
-                                "bad query"
-                            }
-                            .into(),
-                        ),
-                    )
-                    .unwrap(),
-                    _ => send(
-                        &mut socket,
-                        StreamEvent::Rows {
-                            id: 7,
-                            rows: result_rows(128),
-                        },
-                    )
-                    .unwrap(),
+                let bytes = read_frame(&mut stream, 1 << 20).unwrap().unwrap();
+                assert_eq!(
+                    Request::decode(&bytes).unwrap(),
+                    Request::OpenSession(SessionOpen {
+                        raw: ".mkv".into(),
+                        sort: Some((toge_core::sort::SortKey::Size, false)),
+                    })
+                );
+                let response = if scenario == "ok" {
+                    SessionResponse::State(SessionState {
+                        generation: 1,
+                        total_count: 1113,
+                        total_size: 0,
+                    })
+                } else {
+                    SessionResponse::Error("unknown request type".into())
+                };
+                write_frame(&mut stream, &response.encode()).unwrap();
+                if scenario == "ok" {
+                    let bytes = read_frame(&mut stream, 1 << 20).unwrap().unwrap();
+                    assert_eq!(
+                        SessionRequest::decode(&bytes).unwrap(),
+                        SessionRequest::Sync
+                    );
                 }
             });
-            let mut done = false;
-            let result = query_stream(
+            let mut registered = false;
+            let result = open_session(
                 &path,
-                7,
-                "test",
-                0,
-                |_| Ok(()),
-                |batch, first, complete| {
-                    done = complete;
-                    if scenario == "empty" {
-                        assert!(first && complete && batch.rows.is_empty());
-                    }
-                    if scenario == "cancel" {
-                        return Err(io::Error::other("superseded"));
-                    }
+                SessionOpen {
+                    raw: ".mkv".into(),
+                    sort: Some((toge_core::sort::SortKey::Size, false)),
+                },
+                |_| {
+                    registered = true;
                     Ok(())
                 },
             );
-            server.join().unwrap();
-            assert_eq!(result.is_ok(), scenario == "empty");
-            assert_eq!(done, scenario == "empty");
-            if scenario == "legacy" {
-                assert!(
+            assert!(registered);
+            match scenario {
+                "ok" => {
+                    let mut session = result.unwrap();
+                    assert_eq!(session.state().total_count, 1113);
+                    // The fake daemon closes after the request: EOF is an error.
+                    assert!(session.request(&SessionRequest::Sync).is_err());
+                }
+                _ => assert!(
                     result
-                        .unwrap_err()
+                        .err()
+                        .unwrap()
                         .to_string()
                         .contains("Restart or rebuild")
-                );
+                ),
             }
+            server.join().unwrap();
         }
+    }
+
+    #[test]
+    fn registration_failure_aborts_before_the_query_is_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("daemon.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            assert!(read_frame(&mut stream, 1 << 20).unwrap().is_none());
+        });
+        let result = open_session(
+            &path,
+            SessionOpen {
+                raw: String::new(),
+                sort: None,
+            },
+            |_| Err(io::Error::other("superseded")),
+        );
+        assert_eq!(result.err().unwrap().to_string(), "superseded");
+        server.join().unwrap();
     }
 }

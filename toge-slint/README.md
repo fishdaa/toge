@@ -54,41 +54,42 @@ GNOME and KDE file managers. F2 or Rename edits the Name cell in place; Enter
 saves and Escape cancels. Clicking elsewhere cancels an uncommitted rename.
 Delete moves the selected item straight to Trash without confirmation. Restore
 it from your file manager’s Trash if needed. Rename never replaces an existing
-destination, and a successful rename keeps the renamed item selected. Trash
-actions update the displayed rows and clear selection. Click **toge** at the top
-left to open About.
+destination, and a successful rename keeps the renamed item selected. After a
+rename or trash, the daemon re-reads the affected paths, so the list updates even
+without the filesystem watcher. Click **toge** at the top left to open About.
 
-Column headers sort the loaded results. Size and modified time sort numerically.
+Clicking a row moves keyboard focus to the table. Up/Down, PageUp/PageDown and
+Home/End then move the selection, loading distant rows as needed.
+
+Column headers sort in the daemon, using cached whole-index name and path
+orders, so sorting a million matches takes milliseconds. Size and modified time sort numerically.
 Sorting clears the selection and returns the list to the top. The sort column
 and direction are saved in `toge/slint-ui.toml` under the active XDG configuration
 directory and restored, including the header arrow, on launch. Selection follows
-the full path when search results are replaced.
+the full path when search results are replaced or refreshed.
 
-The client uses the daemon's stream protocol in index order. Results appear in
-batches of at most 128 during matching, rather than after the daemon collects and
-sorts the full result set. Column headers still sort the received rows locally.
-The status shows the received count while searching and exact totals only after
-the completion summary. The GUI waits for each batch to be applied before reading
-the next, keeping queued UI data bounded.
+Results live in the daemon. Each search opens a *result session* on its own
+connection: the daemon keeps the matching index IDs (4 bytes per match) and the
+GUI fetches only the 256-row pages the table displays, plus the adjacent page.
+At most 16 pages are kept, so GUI memory does not grow with the match count.
+Rows not yet fetched render blank until their page arrives. The exact total is
+shown as soon as the query finishes. There is no display cap.
 
-All matching rows are requested; there is no 10,000-row display cap. Each wire
-frame is limited to 4 MiB; the full result set can span many frames. The GUI
-stores one compact path and the displayed numeric metadata per received row, deriving ordinary Name/Path cells from that path. Formatted cells are cached
-for at most 256 rows, so scrolling does not retain every visited row. Rename and
-trash update the model in place. All matches remain available; result storage
-still uses O(M) RAM for M displayed matches. Missing indexed sizes display `—`.
+While a session is open the GUI asks the daemon once a second whether the index
+changed. Additions are picked up at most once a second, or less often for
+expensive queries. Removals always rebuild the results before any more rows are
+served, because they renumber index IDs.
 
-Editing a query or closing the GUI immediately shuts down the active query socket.
-Stale batches and errors are ignored, and cancellation does not wait for another
-batch to arrive. Streams hold the daemon's index lock, so cancellation also lets
-new searches proceed once the daemon detects the closed socket. Use a daemon
-built with stream support; older daemons display an instruction to restart or
-rebuild `toged`.
+Editing a query or closing the GUI immediately shuts down the active session
+socket, which discards the daemon's copy of the results. Stale responses are
+ignored. The daemon holds its index lock only while answering one request, never
+while writing to the socket. Use a daemon built with session support; older
+daemons display an instruction to restart or rebuild `toged`.
 
 Connection/indexing errors appear in the status area; Retry resubmits the current
-query. Incomplete streams remain errors even if some rows arrived. Query responses
-have a 30-second read timeout; status checks have a two-second timeout and retry
-while the daemon is busy, within the readiness deadline.
+query. Session requests have a 30-second read timeout; status checks have a
+two-second timeout and retry while the daemon is busy, within the readiness
+deadline.
 
 This MVP does not implement tray/global shortcuts, autostart, settings editing,
 diagnostics, persistent column widths,

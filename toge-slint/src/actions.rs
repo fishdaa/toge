@@ -1,5 +1,5 @@
 use clipboard_rs::{Clipboard, ClipboardContent, ClipboardContext};
-use slint::{ComponentHandle, Model};
+use slint::ComponentHandle;
 use std::collections::HashSet;
 use std::ffi::CString;
 use std::io;
@@ -145,11 +145,11 @@ fn file_action(action: &str, path: &Path) -> io::Result<&'static str> {
 }
 
 /// Keep the editor attached to its original path when fresh query results arrive.
-pub fn sync_rename(ui: &crate::AppWindow, results: &crate::model::Results) {
+pub fn place_rename(ui: &crate::AppWindow, position: Option<i32>) {
     if ui.get_rename_path().is_empty() {
         return;
     }
-    let index = results.find(&ui.get_rename_path());
+    let index = position.unwrap_or(-1);
     ui.set_rename_row(index);
     if index < 0 {
         ui.invoke_cancel_rename(false);
@@ -176,14 +176,14 @@ pub fn connect(ui: &crate::AppWindow) {
                 ui.set_rename_working(false);
                 match outcome {
                     Ok(target) => {
-                        let model = ui.get_rows();
-                        let results = model
-                            .as_any()
-                            .downcast_ref::<crate::model::Results>()
-                            .unwrap();
-                        results.rename_path(&path.to_string_lossy(), &target.to_string_lossy());
                         ui.invoke_cancel_rename(true);
-                        ui.invoke_select_row(results.find(&target.to_string_lossy()));
+                        // The daemon re-reads both paths, so the row moves to
+                        // its new sort position without waiting for the watcher.
+                        let target = target.to_string_lossy().into_owned();
+                        crate::worker::results(&ui).send(crate::model::Command::Reconcile {
+                            paths: vec![path.to_string_lossy().into_owned(), target.clone()],
+                            select: Some(target),
+                        });
                         ui.set_status("Renamed".into());
                     }
                     Err(error) => {
@@ -209,12 +209,7 @@ pub fn connect(ui: &crate::AppWindow) {
         if ui.get_rename_working() {
             return;
         }
-        let model = ui.get_rows();
-        let results = model
-            .as_any()
-            .downcast_ref::<crate::model::Results>()
-            .unwrap();
-        let Some(path) = results.path(ui.get_selected()) else {
+        let Some(path) = crate::worker::results(&ui).path(ui.get_selected()) else {
             return;
         };
         let path = PathBuf::from(path);
@@ -248,13 +243,10 @@ pub fn connect(ui: &crate::AppWindow) {
                     pending.lock().unwrap().remove(&path);
                     match outcome {
                         Ok(()) => {
-                            let model = ui.get_rows();
-                            let results = model
-                                .as_any()
-                                .downcast_ref::<crate::model::Results>()
-                                .unwrap();
-                            results.remove_path(&path.to_string_lossy());
-                            ui.invoke_select_row(-1);
+                            crate::worker::results(&ui).send(crate::model::Command::Reconcile {
+                                paths: vec![path.to_string_lossy().into_owned()],
+                                select: None,
+                            });
                             ui.set_status("Moved to Trash".into());
                         }
                         Err(error) => ui.set_status(error.to_string().into()),

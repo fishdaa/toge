@@ -1,5 +1,7 @@
 //! IPC protocol types and serialization.
 
+pub mod session;
+
 pub const MAX_IPC_MESSAGE_SIZE: usize = 256 * 1024 * 1024;
 pub const MAX_RESPONSE_PATHS: usize = 1_000_000;
 pub const MAX_STATUS_LOG_ENTRIES: usize = 10_000;
@@ -8,6 +10,8 @@ pub const MAX_STATUS_LOG_ENTRIES: usize = 10_000;
 pub enum Request {
     Query(QueryRequest),
     StreamQuery(StreamQueryRequest),
+    /// Start a result session on this connection; see [`session`].
+    OpenSession(session::SessionOpen),
     Status,
     Flush,
     Reindex,
@@ -245,6 +249,11 @@ impl Request {
                     StreamOrder::Sorted => 1,
                 });
             }
+            Request::OpenSession(open) => {
+                buf.push(7);
+                push_string(&mut buf, &open.raw);
+                session::push_sort(&mut buf, open.sort);
+            }
             Request::Status => buf.push(2),
             Request::Flush => buf.push(3),
             Request::Reindex => buf.push(4),
@@ -293,6 +302,14 @@ impl Request {
                 } else {
                     Ok(Request::Query(query))
                 }
+            }
+            7 => {
+                let raw = take_string(bytes, &mut off).ok_or("missing raw")?;
+                let sort = session::take_sort(bytes, &mut off).ok_or("invalid sort")?;
+                if off != bytes.len() {
+                    return Err("trailing session bytes".into());
+                }
+                Ok(Request::OpenSession(session::SessionOpen { raw, sort }))
             }
             2 => Ok(Request::Status),
             3 => Ok(Request::Flush),

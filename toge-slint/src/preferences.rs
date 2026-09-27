@@ -1,6 +1,6 @@
-use slint::Model;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -83,17 +83,12 @@ impl SortState {
     }
 }
 
-pub fn connect(ui: &crate::AppWindow, path: PathBuf) {
+pub fn connect(ui: &crate::AppWindow, path: PathBuf, mailbox: Arc<crate::worker::Mailbox>) {
     if let Some(state) = SortState::load(&path).unwrap_or_else(|error| {
         eprintln!("Could not restore table sort: {error}");
         None
     }) {
-        let model = ui.get_rows();
-        let results = model
-            .as_any()
-            .downcast_ref::<crate::model::Results>()
-            .unwrap();
-        results.sort(state.column, state.ascending);
+        mailbox.set_sort(Some((state.column, state.ascending)));
         ui.invoke_apply_sort(state.column, state.ascending);
     }
     let weak = slint::ComponentHandle::as_weak(ui);
@@ -106,12 +101,10 @@ pub fn connect(ui: &crate::AppWindow, path: PathBuf) {
             return;
         }
         ui.invoke_apply_sort(column, ascending);
-        let model = ui.get_rows();
-        let results = model
-            .as_any()
-            .downcast_ref::<crate::model::Results>()
-            .unwrap();
-        results.sort(column, ascending);
+        // Sessions opened from now on use the new order; the daemon re-sorts
+        // the current one in place.
+        mailbox.set_sort(Some((column, ascending)));
+        crate::worker::results(&ui).send(crate::model::Command::Resort(Some((column, ascending))));
         ui.invoke_select_row(-1);
         if let Err(error) = (SortState { column, ascending }).save(&path) {
             ui.set_status(format!("Could not save table sort: {error}").into());
@@ -125,7 +118,6 @@ mod tests {
 
     #[test]
     fn saved_sort_restores_order_across_new_models_and_result_replacement() {
-        use toge_core::ipc::ResultRow;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profile/toge/slint-ui.toml");
         assert_eq!(SortState::load(&path).unwrap(), None);
@@ -143,31 +135,13 @@ mod tests {
         .save(&path)
         .unwrap();
         let state = SortState::load(&path).unwrap().unwrap();
-        let rows = || {
-            [1, 50, 9]
-                .into_iter()
-                .map(|size| ResultRow {
-                    path: size.to_string(),
-                    name: size.to_string(),
-                    parent: "/".into(),
-                    extension: String::new(),
-                    is_dir: false,
-                    size,
-                    modified_unix: 0,
-                    created_unix: 0,
-                    accessed_unix: 0,
-                })
-                .collect()
-        };
-        for _ in 0..2 {
-            let model = crate::model::Results::default();
-            model.sort(state.column, state.ascending);
-            for _ in 0..2 {
-                model.replace(rows());
-                assert_eq!(model.path(0).as_deref(), Some("50"));
-                assert_eq!(model.path(2).as_deref(), Some("1"));
-            }
-        }
+        // The restored column reaches the daemon as a sort key for new sessions.
+        let mailbox = crate::worker::Mailbox::default();
+        mailbox.set_sort(Some((state.column, state.ascending)));
+        assert_eq!(
+            crate::worker::sort_key(mailbox.sort()),
+            Some((toge_core::sort::SortKey::Size, false))
+        );
     }
 
     #[test]

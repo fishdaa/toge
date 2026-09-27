@@ -435,6 +435,7 @@ impl Index {
             path_to_id,
             trigrams,
             prefix_first_byte,
+            ..Index::default()
         };
         index.compact();
         Ok(index)

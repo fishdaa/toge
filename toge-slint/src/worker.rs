@@ -1,6 +1,15 @@
-use slint::Model;
+use crate::model::{Command, Focus, PAGE, Results};
+use slint::Model as _;
+use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+use toge_core::ipc::session::{SessionOpen, SessionRequest, SessionResponse, SessionState};
+use toge_core::sort::SortKey;
+
+/// How often an idle session asks the daemon whether its results changed.
+const SYNC_INTERVAL: Duration = Duration::from_secs(1);
+/// Fetches queued behind a fast scroll are dropped except for the latest few.
+const FETCH_BACKLOG: usize = 4;
 
 #[derive(Clone, Debug)]
 pub struct Query {
@@ -14,6 +23,7 @@ struct State {
     pending: Option<Query>,
     closed: bool,
     active: Option<(u64, std::os::unix::net::UnixStream)>,
+    sort: Option<(i32, bool)>,
 }
 #[derive(Default)]
 pub struct Mailbox {
@@ -38,6 +48,13 @@ impl Mailbox {
                 },
         });
         self.wake.notify_one();
+    }
+    /// Table sort used when the next session opens.
+    pub fn set_sort(&self, sort: Option<(i32, bool)>) {
+        self.state.lock().unwrap().sort = sort;
+    }
+    pub fn sort(&self) -> Option<(i32, bool)> {
+        self.state.lock().unwrap().sort
     }
     pub fn current(&self, id: u64) -> bool {
         let s = self.state.lock().unwrap();
@@ -84,6 +101,19 @@ impl Mailbox {
     }
 }
 
+/// Table columns map to daemon sort keys; anything else keeps the query's order.
+pub fn sort_key(sort: Option<(i32, bool)>) -> Option<(SortKey, bool)> {
+    let (column, ascending) = sort?;
+    let key = match column {
+        0 => SortKey::Name,
+        1 => SortKey::Path,
+        2 => SortKey::Size,
+        3 => SortKey::Modified,
+        _ => return None,
+    };
+    Some((key, ascending))
+}
+
 pub fn start(mailbox: Arc<Mailbox>, ui: slint::Weak<crate::AppWindow>) {
     // Serializes only the daemon-launch check, not query handling: each dispatched
     // query runs on its own thread so a slow/stale query (e.g. a broad substring
@@ -97,12 +127,99 @@ pub fn start(mailbox: Arc<Mailbox>, ui: slint::Weak<crate::AppWindow>) {
             let ui = ui.clone();
             let socket = socket.clone();
             let daemon_start = daemon_start.clone();
-            std::thread::spawn(move || run_query(q, &mailbox, &ui, &socket, &daemon_start));
+            std::thread::spawn(move || run_session(q, &mailbox, &ui, &socket, &daemon_start));
         }
     });
 }
 
-fn run_query(
+fn wait_until_ready(
+    q: &Query,
+    mailbox: &Arc<Mailbox>,
+    ui: &slint::Weak<crate::AppWindow>,
+    socket: &std::path::Path,
+    daemon_start: &Arc<Mutex<()>>,
+) -> std::io::Result<()> {
+    {
+        let _guard = daemon_start.lock().unwrap();
+        crate::client::ensure_daemon_running(socket)?;
+    }
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if !mailbox.current(q.id) {
+            return Err(std::io::Error::other("superseded"));
+        }
+        if Instant::now() >= deadline {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Daemon is still busy or indexing. Retry shortly.",
+            ));
+        }
+        let status = match crate::client::status(socket) {
+            Ok(status) => status,
+            Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
+                std::thread::sleep(Duration::from_millis(200));
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
+        if status.status == toge_core::ipc::DaemonStatus::Ready {
+            return Ok(());
+        }
+        let message = format!("{:?}: {}", status.status, status.status_message);
+        let m = mailbox.clone();
+        let id = q.id;
+        let _ = ui.upgrade_in_event_loop(move |ui| {
+            if m.current(id) {
+                ui.set_status(message.into());
+            }
+        });
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// Keep only the latest few fetches of a backlog, preserving command order.
+fn coalesce(commands: Vec<Command>) -> Vec<Command> {
+    let mut kept_fetches = Vec::new();
+    for command in commands.iter().rev() {
+        if let Command::Fetch(page) = command
+            && !kept_fetches.contains(page)
+            && kept_fetches.len() < FETCH_BACKLOG
+        {
+            kept_fetches.push(*page);
+        }
+    }
+    let mut seen = Vec::new();
+    commands
+        .into_iter()
+        .filter(|command| match command {
+            Command::Fetch(page) => {
+                if kept_fetches.contains(page) && !seen.contains(page) {
+                    seen.push(*page);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => true,
+        })
+        .collect()
+}
+
+/// What the UI should do with a daemon response besides adopting its state.
+enum Reply {
+    Rows {
+        offset: usize,
+        rows: Vec<toge_core::ipc::session::SessionRow>,
+    },
+    Located {
+        focus: Focus,
+        position: Option<usize>,
+    },
+    Rebuilt,
+    Synced,
+}
+
+fn run_session(
     q: Query,
     mailbox: &Arc<Mailbox>,
     ui: &slint::Weak<crate::AppWindow>,
@@ -111,98 +228,32 @@ fn run_query(
 ) {
     let size_indexed = config_size_indexed();
     let outcome = (|| {
-        {
-            let _guard = daemon_start.lock().unwrap();
-            crate::client::ensure_daemon_running(socket)?;
-        }
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if !mailbox.current(q.id) {
-                return Err(std::io::Error::other("superseded"));
-            }
-            if Instant::now() >= deadline {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Daemon is still busy or indexing. Retry shortly.",
-                ));
-            }
-            let status = match crate::client::status(socket) {
-                Ok(status) => status,
-                Err(error) if error.kind() == std::io::ErrorKind::TimedOut => {
-                    std::thread::sleep(Duration::from_millis(200));
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            if status.status == toge_core::ipc::DaemonStatus::Ready {
-                break;
-            }
-            let message = format!("{:?}: {}", status.status, status.status_message);
-            let m = mailbox.clone();
-            let id = q.id;
-            let _ = ui.upgrade_in_event_loop(move |ui| {
-                if m.current(id) {
-                    ui.set_status(message.into());
-                }
-            });
-            if Instant::now() >= deadline {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::TimedOut,
-                    "Daemon is still indexing. Retry shortly.",
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(200));
-        }
-        let selection = Arc::new(Mutex::new(StreamSelection::default()));
-        crate::client::query_stream(
+        wait_until_ready(&q, mailbox, ui, socket, daemon_start)?;
+        let sort = mailbox.sort();
+        let mut session = crate::client::open_session(
             socket,
-            q.id,
-            &q.text,
-            0,
-            |socket| mailbox.register(q.id, socket),
-            |response, first, done| {
-                let selection = selection.clone();
-                if !mailbox.current(q.id) {
-                    return Err(std::io::Error::other("superseded"));
-                }
-                let m = mailbox.clone();
-                let id = q.id;
-                // Wait until the UI applies this batch before reading another one.
-                // This bounds queued row data and lets socket backpressure reach the daemon.
-                let (applied, wait) = std::sync::mpsc::sync_channel(1);
-                ui.upgrade_in_event_loop(move |ui| {
-                    if !m.current(id) {
-                        return;
-                    }
-                    apply_batch(
-                        &ui,
-                        response,
-                        first,
-                        done,
-                        size_indexed,
-                        &mut selection.lock().unwrap(),
-                    );
-                    let _ = applied.send(());
-                })
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-                loop {
-                    if !mailbox.current(id) {
-                        return Err(std::io::Error::other("superseded"));
-                    }
-                    match wait.recv_timeout(Duration::from_millis(50)) {
-                        Ok(()) => return Ok(()),
-                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
-                        Err(_) => return Err(std::io::Error::other("UI closed")),
-                    }
-                }
+            SessionOpen {
+                raw: q.text.clone(),
+                sort: sort_key(sort),
             },
-        )
+            |socket| mailbox.register(q.id, socket),
+        )?;
+        let (commands, inbox) = channel();
+        let (m, id, state) = (mailbox.clone(), q.id, session.state());
+        ui.upgrade_in_event_loop(move |ui| {
+            if m.current(id) {
+                opened(&ui, &m, commands, state, sort, size_indexed);
+            }
+        })
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+        serve_commands(&q, mailbox, ui, &mut session, &inbox)
     })();
     mailbox.finish(q.id);
     if let Err(error) = outcome {
         let m = mailbox.clone();
         let _ = ui.upgrade_in_event_loop(move |ui| {
             if m.current(q.id) {
+                results(&ui).detach();
                 ui.set_busy(false);
                 ui.set_has_error(true);
                 ui.set_status(format!("{error} — Retry to reconnect").into());
@@ -211,82 +262,220 @@ fn run_query(
     }
 }
 
-#[derive(Default)]
-struct StreamSelection {
-    preferred: Option<String>,
-    last_selected: Option<String>,
-    restore_scroll: bool,
+fn serve_commands(
+    q: &Query,
+    mailbox: &Arc<Mailbox>,
+    ui: &slint::Weak<crate::AppWindow>,
+    session: &mut toge_core::ipc::session::SessionClient<std::os::unix::net::UnixStream>,
+    inbox: &Receiver<Command>,
+) -> std::io::Result<()> {
+    loop {
+        if !mailbox.current(q.id) {
+            return Ok(());
+        }
+        let first = match inbox.recv_timeout(SYNC_INTERVAL) {
+            Ok(command) => Some(command),
+            Err(RecvTimeoutError::Timeout) => None,
+            // The UI attached a newer session or closed.
+            Err(RecvTimeoutError::Disconnected) => return Ok(()),
+        };
+        let Some(first) = first else {
+            session.request(&SessionRequest::Sync)?;
+            post(mailbox, ui, q.id, session.state(), Reply::Synced)?;
+            continue;
+        };
+        let backlog = std::iter::once(first).chain(inbox.try_iter()).collect();
+        for command in coalesce(backlog) {
+            if !mailbox.current(q.id) {
+                return Ok(());
+            }
+            match command {
+                Command::Fetch(page) => {
+                    let request = SessionRequest::Fetch {
+                        offset: page * PAGE,
+                        len: PAGE,
+                    };
+                    if let SessionResponse::Rows { offset, rows, .. } = session.request(&request)? {
+                        post(
+                            mailbox,
+                            ui,
+                            q.id,
+                            session.state(),
+                            Reply::Rows { offset, rows },
+                        )?;
+                    }
+                }
+                Command::Resort(sort) => {
+                    session.request(&SessionRequest::Resort {
+                        sort: sort_key(sort),
+                    })?;
+                    post(mailbox, ui, q.id, session.state(), Reply::Rebuilt)?;
+                }
+                Command::Locate { path, focus } => {
+                    locate(session, mailbox, ui, q.id, path, focus)?;
+                }
+                Command::Reconcile { paths, select } => {
+                    session.request(&SessionRequest::Reconcile { paths })?;
+                    post(mailbox, ui, q.id, session.state(), Reply::Rebuilt)?;
+                    match select {
+                        Some(path) => locate(session, mailbox, ui, q.id, path, Focus::Scroll)?,
+                        None => post(
+                            mailbox,
+                            ui,
+                            q.id,
+                            session.state(),
+                            Reply::Located {
+                                focus: Focus::Scroll,
+                                position: None,
+                            },
+                        )?,
+                    }
+                }
+            }
+        }
+    }
 }
 
-fn apply_batch(
-    ui: &crate::AppWindow,
-    response: toge_core::ipc::ResultsResponse,
-    first: bool,
-    done: bool,
-    size_indexed: bool,
-    selection: &mut StreamSelection,
-) {
-    let model = ui.get_rows();
-    let results = model
-        .as_any()
-        .downcast_ref::<crate::model::Results>()
-        .unwrap();
-    let selected = results.path(ui.get_selected());
-    if first {
-        // The previously selected path may arrive in a later batch.
-        selection.preferred = selected.clone();
-        selection.restore_scroll = false;
-    } else if selected != selection.last_selected {
-        // A selection made during transfer takes precedence.
-        selection.preferred = None;
-        selection.restore_scroll = false;
+fn locate(
+    session: &mut toge_core::ipc::session::SessionClient<std::os::unix::net::UnixStream>,
+    mailbox: &Arc<Mailbox>,
+    ui: &slint::Weak<crate::AppWindow>,
+    id: u64,
+    path: String,
+    focus: Focus,
+) -> std::io::Result<()> {
+    if let SessionResponse::Located { position, .. } =
+        session.request(&SessionRequest::Locate { path })?
+    {
+        post(
+            mailbox,
+            ui,
+            id,
+            session.state(),
+            Reply::Located { focus, position },
+        )?;
     }
-    results.set_size_indexed(size_indexed);
-    if first {
-        results.replace(response.rows);
-    } else {
-        results.append(response.rows);
-    }
-    crate::actions::sync_rename(ui, results);
-    let n = results.row_count();
-    let preferred_index = selection
-        .preferred
-        .as_deref()
-        .map_or(-1, |p| results.find(p));
-    let index = if preferred_index >= 0 {
-        selection.preferred = None;
-        selection.restore_scroll = true;
-        preferred_index
-    } else {
-        selected.as_deref().map_or(-1, |p| results.find(p))
-    };
-    // Avoid reselecting on ordinary appends, which would reset the user's scroll.
-    let next = if index >= 0 {
-        index
-    } else if n > 0 {
-        0
-    } else {
-        -1
-    };
-    if first || next != ui.get_selected() || (done && selection.restore_scroll) {
-        // The virtual table's row-height estimate can change as batches arrive.
-        // Reposition a restored selection once the final model size is known.
-        ui.invoke_select_row(next);
-    }
-    if done {
-        selection.restore_scroll = false;
-    }
-    selection.last_selected = results.path(next);
-    ui.set_has_error(false);
-    ui.set_busy(!done);
-    ui.set_status(
-        if done {
-            format!("Showing {n} of {} matches", response.total_count)
-        } else {
-            format!("Received {n} matches — Searching…")
+    Ok(())
+}
+
+fn post(
+    mailbox: &Arc<Mailbox>,
+    ui: &slint::Weak<crate::AppWindow>,
+    id: u64,
+    state: SessionState,
+    reply: Reply,
+) -> std::io::Result<()> {
+    let m = mailbox.clone();
+    ui.upgrade_in_event_loop(move |ui| {
+        if m.current(id) {
+            apply(&ui, state, reply);
         }
-        .into(),
-    );
+    })
+    .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+pub fn results(ui: &crate::AppWindow) -> impl std::ops::Deref<Target = Results> + '_ {
+    struct Handle(slint::ModelRc<slint::ModelRc<slint::StandardListViewItem>>);
+    impl std::ops::Deref for Handle {
+        type Target = Results;
+        fn deref(&self) -> &Results {
+            self.0.as_any().downcast_ref::<Results>().unwrap()
+        }
+    }
+    Handle(ui.get_rows())
+}
+
+fn status_text(total: usize) -> String {
+    match total {
+        1 => "1 match".into(),
+        n => format!("{n} matches"),
+    }
+}
+
+fn opened(
+    ui: &crate::AppWindow,
+    mailbox: &Mailbox,
+    commands: std::sync::mpsc::Sender<Command>,
+    state: SessionState,
+    sort: Option<(i32, bool)>,
+    size_indexed: bool,
+) {
+    let results = results(ui);
+    let previous = results.path(ui.get_selected());
+    results.set_size_indexed(size_indexed);
+    results.attach(commands, state);
+    // A header click while the session was opening was sent to the old session.
+    if mailbox.sort() != sort {
+        results.send(Command::Resort(mailbox.sort()));
+    }
+    ui.set_has_error(false);
+    ui.set_busy(false);
+    ui.set_status(status_text(state.total_count).into());
+    match previous {
+        // The previously selected path may still match; keep it selected.
+        Some(path) => {
+            results.send(Command::Locate {
+                path,
+                focus: Focus::Scroll,
+            });
+        }
+        None => ui.invoke_select_row(if state.total_count > 0 { 0 } else { -1 }),
+    }
+    follow_rename(ui, &results);
+}
+
+/// Re-attach an open inline rename editor to its path's new position.
+fn follow_rename(ui: &crate::AppWindow, results: &Results) {
+    if !ui.get_rename_path().is_empty() {
+        results.send(Command::Locate {
+            path: ui.get_rename_path().to_string(),
+            focus: Focus::Rename,
+        });
+    }
+}
+
+fn apply(ui: &crate::AppWindow, state: SessionState, reply: Reply) {
+    let results = results(ui);
+    let selected = results.path(ui.get_selected());
+    if results.apply_state(state) {
+        // Live refreshes keep the selected file selected wherever it moved.
+        // Explicit rebuilds (sort, rename, delete) set the selection themselves
+        // and keep the action's status message.
+        if !matches!(reply, Reply::Rebuilt) {
+            ui.set_status(status_text(state.total_count).into());
+            if let Some(path) = selected {
+                results.send(Command::Locate {
+                    path,
+                    focus: Focus::Keep,
+                });
+            }
+            follow_rename(ui, &results);
+        }
+    }
+    let total = results.total() as i32;
+    match reply {
+        Reply::Rows { offset, rows } => results.fill(state.generation, offset, rows),
+        Reply::Located { focus, position } => {
+            let position = position.map(|p| p as i32);
+            match focus {
+                Focus::Scroll => {
+                    ui.invoke_select_row(position.unwrap_or(if total > 0 { 0 } else { -1 }))
+                }
+                Focus::Keep => match position {
+                    Some(position) => ui.set_selected(position),
+                    None if ui.get_selected() >= total => ui.set_selected(total - 1),
+                    None => {}
+                },
+                Focus::Rename => crate::actions::place_rename(ui, position),
+            }
+        }
+        Reply::Rebuilt | Reply::Synced => {
+            if ui.get_selected() >= total {
+                ui.set_selected(total - 1);
+            }
+        }
+    }
+    ui.set_has_error(false);
 }
 
 fn config_size_indexed() -> bool {
@@ -313,6 +502,48 @@ mod tests {
         assert_eq!(m.next().unwrap().text, "newest");
         m.close();
         assert!(m.next().is_none());
+    }
+
+    #[test]
+    fn fast_scroll_backlog_keeps_only_the_latest_distinct_fetches_in_order() {
+        let locate = Command::Locate {
+            path: "/a".into(),
+            focus: Focus::Keep,
+        };
+        let backlog = vec![
+            Command::Fetch(0),
+            Command::Fetch(1),
+            locate.clone(),
+            Command::Fetch(2),
+            Command::Fetch(3),
+            Command::Fetch(4),
+            Command::Fetch(5),
+            Command::Fetch(4),
+        ];
+        assert_eq!(
+            coalesce(backlog),
+            [
+                locate,
+                Command::Fetch(2),
+                Command::Fetch(3),
+                Command::Fetch(4),
+                Command::Fetch(5),
+            ]
+        );
+    }
+
+    #[test]
+    fn table_columns_map_to_daemon_sort_keys() {
+        assert_eq!(sort_key(Some((0, true))), Some((SortKey::Name, true)));
+        assert_eq!(sort_key(Some((1, false))), Some((SortKey::Path, false)));
+        assert_eq!(sort_key(Some((2, true))), Some((SortKey::Size, true)));
+        assert_eq!(sort_key(Some((3, false))), Some((SortKey::Modified, false)));
+        assert_eq!(sort_key(Some((4, true))), None);
+        assert_eq!(sort_key(None), None);
+        let m = Mailbox::default();
+        assert_eq!(m.sort(), None);
+        m.set_sort(Some((2, false)));
+        assert_eq!(m.sort(), Some((2, false)));
     }
 }
 

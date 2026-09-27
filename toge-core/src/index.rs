@@ -187,11 +187,33 @@ pub struct Index {
     pub(crate) path_to_id: HashMap<u64, u32>,
     pub(crate) trigrams: HashMap<u32, Vec<u32>>,
     pub(crate) prefix_first_byte: HashMap<u8, Vec<u32>>,
+    /// Bumped whenever existing IDs may refer to different entries (removal
+    /// swaps the last entry into the freed slot, or the index is replaced).
+    pub(crate) epoch: u64,
+    /// Bumped whenever the set of entries changes.
+    pub(crate) revision: u64,
 }
 
 impl Index {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Counter that changes whenever previously returned IDs may be stale.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Counter that changes whenever an entry is added or removed.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Mark this index as the replacement of `previous`, invalidating IDs
+    /// handed out by it.
+    pub fn succeed(&mut self, previous: &Index) {
+        self.epoch = previous.epoch.max(self.epoch) + 1;
+        self.revision = previous.revision.max(self.revision) + 1;
     }
 
     pub fn insert(&mut self, path: &str, is_dir: bool) -> u32 {
@@ -223,6 +245,7 @@ impl Index {
         }
 
         let id = self.entries.len() as u32;
+        self.revision += 1;
         let name_off = path.rfind('/').map(|i| i + 1).unwrap_or(0) as u16;
         let name = &path[name_off as usize..];
         let ext_off = if is_dir {
@@ -279,6 +302,8 @@ impl Index {
         }
 
         self.path_to_id.remove(&path_hash);
+        self.epoch += 1;
+        self.revision += 1;
 
         let is_dir = entry.is_dir;
         let name_lower = lowered_bytes(entry.name());

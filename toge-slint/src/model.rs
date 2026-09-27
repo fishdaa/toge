@@ -1,13 +1,47 @@
 use slint::{Model, ModelNotify, ModelRc, ModelTracker, StandardListViewItem, VecModel};
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, VecDeque};
-use toge_core::ipc::ResultRow;
+use std::sync::mpsc::Sender;
+use std::time::{Duration, Instant};
+use toge_core::ipc::session::{SessionRow, SessionState};
 
-// Keep one path allocation per ordinary row. Wire-only metadata is discarded.
-// Retain exceptional display labels (e.g. highlighted paths) without changing them.
+/// Rows are fetched from the daemon in pages of this size.
+pub const PAGE: usize = 256;
+/// Loaded pages kept around, so memory stays bounded however far the user scrolls.
+const PAGE_LIMIT: usize = 16;
+/// A page requested this long ago without arriving may be requested again.
+const REQUEST_RETRY: Duration = Duration::from_secs(2);
+
+/// How a located row should be selected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Focus {
+    /// Select and scroll to the row (new query, rename).
+    Scroll,
+    /// Update the selection index without moving the viewport (live refresh).
+    Keep,
+    /// Re-attach the inline rename editor.
+    Rename,
+}
+
+/// Requests from the UI thread to the thread that owns the daemon session.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Command {
+    Fetch(usize),
+    /// Table column and direction, or `None` for the query's own order.
+    Resort(Option<(i32, bool)>),
+    Locate {
+        path: String,
+        focus: Focus,
+    },
+    /// Re-read changed paths, then select `select` (or clear the selection).
+    Reconcile {
+        paths: Vec<String>,
+        select: Option<String>,
+    },
+}
+
 struct Row {
     path: Box<str>,
-    labels: Option<Box<(Box<str>, Box<str>)>>,
     size: u64,
     modified_unix: i64,
 }
@@ -16,193 +50,198 @@ impl Row {
         path.rsplit_once('/')
             .map_or((path, ""), |(parent, name)| (name, parent))
     }
-    fn name(&self) -> &str {
-        self.labels
-            .as_ref()
-            .map_or_else(|| Self::split(&self.path).0, |labels| &labels.0)
-    }
-    fn parent(&self) -> &str {
-        self.labels
-            .as_ref()
-            .map_or_else(|| Self::split(&self.path).1, |labels| &labels.1)
-    }
 }
-impl From<ResultRow> for Row {
-    fn from(row: ResultRow) -> Self {
-        let (name, parent) = Self::split(&row.path);
-        let labels = (name != row.name || parent != row.parent)
-            .then(|| Box::new((row.name.into_boxed_str(), row.parent.into_boxed_str())));
+impl From<SessionRow> for Row {
+    fn from(row: SessionRow) -> Self {
         Self {
             path: row.path.into_boxed_str(),
-            labels,
             size: row.size,
             modified_unix: row.modified_unix,
         }
     }
 }
 
-// Bound retained formatting even after scrolling through millions of results.
-const RENDER_CACHE_LIMIT: usize = 256;
 #[derive(Default)]
-struct RenderCache {
-    rows: HashMap<usize, ModelRc<StandardListViewItem>>,
+struct Pages {
+    loaded: HashMap<usize, Vec<Row>>,
+    /// Least recently used first.
     order: VecDeque<usize>,
+    requested: HashMap<usize, Instant>,
 }
-impl RenderCache {
-    fn clear(&mut self) {
-        self.rows.clear();
-        self.order.clear();
-    }
-    fn insert(&mut self, index: usize, row: ModelRc<StandardListViewItem>) {
-        if self.rows.len() == RENDER_CACHE_LIMIT {
-            self.rows.remove(&self.order.pop_front().unwrap());
+impl Pages {
+    fn touch(&mut self, page: usize) {
+        if self.order.back() != Some(&page) {
+            self.order.retain(|&p| p != page);
+            self.order.push_back(page);
         }
-        self.order.push_back(index);
-        self.rows.insert(index, row);
     }
 }
 
+/// A window onto results held by the daemon. Only pages near what the table
+/// displays are loaded; other rows render as blank placeholders until their
+/// page arrives.
 #[derive(Default)]
 pub struct Results {
-    rows: RefCell<Vec<Row>>,
-    order: RefCell<Vec<usize>>,
-    rendered: RefCell<RenderCache>,
-    sort: Cell<Option<(i32, bool)>>,
+    generation: Cell<u64>,
+    total: Cell<usize>,
+    pages: RefCell<Pages>,
+    session: RefCell<Option<Sender<Command>>>,
+    placeholder: RefCell<Option<ModelRc<StandardListViewItem>>>,
     pub size_indexed: Cell<bool>,
     notify: ModelNotify,
 }
 impl Results {
-    pub fn path(&self, index: i32) -> Option<String> {
-        let index = usize::try_from(index).ok()?;
-        self.order
+    /// Attach a newly opened session. Rows from any previous session are dropped.
+    pub fn attach(&self, session: Sender<Command>, state: SessionState) {
+        *self.session.borrow_mut() = Some(session);
+        self.reset(state);
+    }
+
+    /// Stop sending requests to a session that is gone.
+    pub fn detach(&self) {
+        self.session.borrow_mut().take();
+    }
+
+    pub fn send(&self, command: Command) -> bool {
+        self.session
             .borrow()
-            .get(index)
-            .map(|&i| self.rows.borrow()[i].path.to_string())
+            .as_ref()
+            .is_some_and(|session| session.send(command).is_ok())
     }
-    pub fn find(&self, path: &str) -> i32 {
-        let rows = self.rows.borrow();
-        self.order
-            .borrow()
-            .iter()
-            .position(|&i| rows[i].path.as_ref() == path)
-            .map_or(-1, |i| i as i32)
+
+    pub fn total(&self) -> usize {
+        self.total.get()
     }
-    pub fn replace(&self, rows: Vec<ResultRow>) {
-        *self.order.borrow_mut() = (0..rows.len()).collect();
-        *self.rows.borrow_mut() = rows.into_iter().map(Row::from).collect();
-        self.rendered.borrow_mut().clear();
-        self.resort();
+
+    /// Adopt a (possibly rebuilt) daemon state. Returns true when the results
+    /// were rebuilt and every loaded row was discarded.
+    pub fn apply_state(&self, state: SessionState) -> bool {
+        if state.generation == self.generation.get() && state.total_count == self.total.get() {
+            return false;
+        }
+        self.reset(state);
+        true
     }
-    pub fn append(&self, rows: Vec<ResultRow>) {
-        let start = self.rows.borrow().len();
-        let count = rows.len();
-        if count == 0 {
+
+    fn reset(&self, state: SessionState) {
+        self.generation.set(state.generation);
+        self.total.set(state.total_count);
+        *self.pages.borrow_mut() = Pages::default();
+        self.notify.reset();
+    }
+
+    /// Store fetched rows. Rows from an older generation are discarded.
+    pub fn fill(&self, generation: u64, offset: usize, rows: Vec<SessionRow>) {
+        if generation != self.generation.get() || !offset.is_multiple_of(PAGE) {
             return;
         }
-        self.rows
-            .borrow_mut()
-            .extend(rows.into_iter().map(Row::from));
-        self.order.borrow_mut().extend(start..start + count);
-        if self.sort.get().is_some() {
-            self.resort();
-        } else {
-            self.notify.row_added(start, count);
-        }
-    }
-    pub fn remove_path(&self, path: &str) {
-        let prefix = format!("{path}/");
-        self.rows
-            .borrow_mut()
-            .retain(|row| row.path.as_ref() != path && !row.path.starts_with(&prefix));
-        self.rebuild_order();
-    }
-    pub fn rename_path(&self, old: &str, new: &str) {
-        let prefix = format!("{old}/");
-        for row in self.rows.borrow_mut().iter_mut() {
-            if row.path.as_ref() == old || row.path.starts_with(&prefix) {
-                row.path = format!("{new}{}", &row.path[old.len()..]).into_boxed_str();
-                let path = std::path::Path::new(row.path.as_ref());
-                let name = path.file_name().unwrap_or_default().to_string_lossy();
-                let parent = path
-                    .parent()
-                    .unwrap_or(std::path::Path::new("/"))
-                    .to_string_lossy();
-                let (derived_name, derived_parent) = Row::split(&row.path);
-                row.labels = (name != derived_name || parent != derived_parent).then(|| {
-                    Box::new((
-                        name.into_owned().into_boxed_str(),
-                        parent.into_owned().into_boxed_str(),
-                    ))
-                });
+        let page = offset / PAGE;
+        let count = rows.len().min(self.total.get().saturating_sub(offset));
+        {
+            let mut pages = self.pages.borrow_mut();
+            pages.requested.remove(&page);
+            pages
+                .loaded
+                .insert(page, rows.into_iter().take(count).map(Row::from).collect());
+            pages.touch(page);
+            while pages.loaded.len() > PAGE_LIMIT {
+                let Some(oldest) = pages.order.pop_front() else {
+                    break;
+                };
+                pages.loaded.remove(&oldest);
             }
         }
-        self.rebuild_order();
+        for row in offset..offset + count {
+            self.notify.row_changed(row);
+        }
     }
-    fn rebuild_order(&self) {
-        *self.order.borrow_mut() = (0..self.rows.borrow().len()).collect();
-        self.rendered.borrow_mut().clear();
-        self.resort();
+
+    pub fn path(&self, index: i32) -> Option<String> {
+        let index = usize::try_from(index).ok()?;
+        self.pages
+            .borrow()
+            .loaded
+            .get(&(index / PAGE))?
+            .get(index % PAGE)
+            .map(|row| row.path.to_string())
     }
-    pub fn sort(&self, column: i32, ascending: bool) {
-        self.sort.set(Some((column, ascending)));
-        self.resort();
-    }
+
     pub fn set_size_indexed(&self, value: bool) {
         if self.size_indexed.replace(value) != value {
-            self.rendered.borrow_mut().clear();
             self.notify.reset();
         }
     }
-    fn resort(&self) {
-        if let Some((column, ascending)) = self.sort.get() {
-            let rows = self.rows.borrow();
-            self.order.borrow_mut().sort_by(|&a, &b| {
-                let (a, b) = (&rows[a], &rows[b]);
-                let cmp = match column {
-                    1 => a.parent().cmp(b.parent()),
-                    2 => a.size.cmp(&b.size),
-                    3 => a.modified_unix.cmp(&b.modified_unix),
-                    _ => a.name().cmp(b.name()),
-                }
-                .then_with(|| a.path.cmp(&b.path));
-                if ascending { cmp } else { cmp.reverse() }
-            });
+
+    fn request(&self, pages: &mut Pages, page: usize) {
+        if page * PAGE >= self.total.get() || pages.loaded.contains_key(&page) {
+            return;
         }
-        self.notify.reset();
+        let now = Instant::now();
+        if pages
+            .requested
+            .get(&page)
+            .is_some_and(|at| now.duration_since(*at) < REQUEST_RETRY)
+        {
+            return;
+        }
+        if self.send(Command::Fetch(page)) {
+            pages.requested.insert(page, now);
+        }
+    }
+
+    fn placeholder(&self) -> ModelRc<StandardListViewItem> {
+        self.placeholder
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                ModelRc::new(VecModel::from(vec![StandardListViewItem::default(); 4]))
+            })
+            .clone()
     }
 }
 impl Model for Results {
     type Data = ModelRc<StandardListViewItem>;
     fn row_count(&self) -> usize {
-        self.order.borrow().len()
+        self.total.get()
     }
     fn row_data(&self, row: usize) -> Option<Self::Data> {
-        let index = *self.order.borrow().get(row)?;
-
-        if let Some(rendered) = self.rendered.borrow().rows.get(&index).cloned() {
-            return Some(rendered);
+        if row >= self.total.get() {
+            return None;
         }
-
-        let rows = self.rows.borrow();
-        let r = &rows[index];
+        let page = row / PAGE;
+        let mut pages = self.pages.borrow_mut();
+        let Some(r) = pages
+            .loaded
+            .get(&page)
+            .and_then(|rows| rows.get(row % PAGE))
+        else {
+            self.request(&mut pages, page);
+            return Some(self.placeholder());
+        };
+        let (name, parent) = Row::split(&r.path);
         let size = if self.size_indexed.get() {
             crate::format::format_size(r.size)
         } else {
             "—".into()
         };
-        let rendered = ModelRc::new(VecModel::from(
-            vec![
-                r.name().to_string(),
-                r.parent().to_string(),
-                size,
-                crate::format::format_time(r.modified_unix),
-            ]
-            .into_iter()
-            .map(|text| StandardListViewItem::from(slint::SharedString::from(text)))
-            .collect::<Vec<_>>(),
-        ));
-        self.rendered.borrow_mut().insert(index, rendered.clone());
-        Some(rendered)
+        let cells = [
+            name.to_string(),
+            parent.to_string(),
+            size,
+            crate::format::format_time(r.modified_unix),
+        ];
+        pages.touch(page);
+        // Prefetch neighbours so ordinary scrolling rarely shows placeholders.
+        if row % PAGE >= PAGE / 2 {
+            self.request(&mut pages, page + 1);
+        } else if page > 0 {
+            self.request(&mut pages, page - 1);
+        }
+        Some(ModelRc::new(VecModel::from(
+            cells
+                .into_iter()
+                .map(|text| StandardListViewItem::from(slint::SharedString::from(text)))
+                .collect::<Vec<_>>(),
+        )))
     }
     fn model_tracker(&self) -> &dyn ModelTracker {
         &self.notify
@@ -215,126 +254,107 @@ impl Model for Results {
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn row(path: &str, size: u64) -> ResultRow {
-        ResultRow {
-            path: path.into(),
-            name: path.into(),
-            parent: "/".into(),
-            extension: String::new(),
-            is_dir: false,
-            size,
-            modified_unix: size as i64,
-            created_unix: 0,
-            accessed_unix: 0,
+    use std::sync::mpsc::{Receiver, channel};
+
+    fn state(generation: u64, total_count: usize) -> SessionState {
+        SessionState {
+            generation,
+            total_count,
+            total_size: 0,
         }
     }
+    fn rows(offset: usize, count: usize) -> Vec<SessionRow> {
+        (offset..offset + count)
+            .map(|i| SessionRow {
+                path: format!("/tmp/dir/{i}.txt"),
+                is_dir: false,
+                size: i as u64,
+                modified_unix: 0,
+            })
+            .collect()
+    }
+    fn attached(total: usize) -> (Results, Receiver<Command>) {
+        let (tx, rx) = channel();
+        let model = Results::default();
+        model.attach(tx, state(1, total));
+        (model, rx)
+    }
+    fn text(model: &Results, row: usize, column: usize) -> String {
+        model
+            .row_data(row)
+            .unwrap()
+            .row_data(column)
+            .unwrap()
+            .text
+            .to_string()
+    }
+
     #[test]
-    fn scrolling_cache_is_bounded_and_evicted_rows_can_be_rendered_again() {
-        let m = Results::default();
-        m.replace(
-            (0..4096)
-                .map(|i| row(&format!("/tmp/{i}.txt"), i))
-                .collect(),
+    fn unloaded_rows_are_placeholders_that_request_their_page_once() {
+        let (model, rx) = attached(PAGE * 3 + 5);
+        assert_eq!(model.row_count(), PAGE * 3 + 5);
+        assert_eq!(text(&model, PAGE + 3, 0), "");
+        assert_eq!(text(&model, PAGE + 4, 0), "");
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Command::Fetch(1)]);
+        assert!(model.row_data(PAGE * 3 + 5).is_none());
+        model.fill(1, PAGE, rows(PAGE, PAGE));
+        assert_eq!(text(&model, PAGE + 3, 0), format!("{}.txt", PAGE + 3));
+        assert_eq!(text(&model, PAGE + 3, 1), "/tmp/dir");
+        assert_eq!(
+            model.path((PAGE + 3) as i32).unwrap(),
+            format!("/tmp/dir/{}.txt", PAGE + 3)
         );
-        m.set_size_indexed(true);
-        for i in 0..m.row_count() {
-            assert_eq!(
-                m.row_data(i).unwrap().row_data(2).unwrap().text,
-                crate::format::format_size(i as u64)
-            );
+        // Rendering the first half of a page prefetches the previous page.
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Command::Fetch(0)]);
+        assert!(model.path(0).is_none());
+        assert!(model.path(-1).is_none());
+    }
+
+    #[test]
+    fn stale_generations_are_ignored_and_rebuilds_drop_loaded_rows() {
+        let (model, rx) = attached(10);
+        model.fill(0, 0, rows(0, 10));
+        assert!(model.path(0).is_none());
+        model.fill(1, 0, rows(0, 10));
+        assert!(model.path(9).is_some());
+        assert!(!model.apply_state(state(1, 10)));
+        assert!(model.apply_state(state(2, 4)));
+        assert_eq!(model.row_count(), 4);
+        assert!(model.path(0).is_none());
+        let _ = model.row_data(0);
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Command::Fetch(0)]);
+        // Rows past the new total are never exposed.
+        model.fill(2, 0, rows(0, 10));
+        assert!(model.path(3).is_some());
+        assert!(model.path(4).is_none());
+    }
+
+    #[test]
+    fn loaded_pages_are_bounded_and_evicted_pages_are_fetched_again() {
+        let total = PAGE * (PAGE_LIMIT + 4);
+        let (model, rx) = attached(total);
+        for page in 0..PAGE_LIMIT + 4 {
+            model.fill(1, page * PAGE, rows(page * PAGE, PAGE));
         }
-        assert_eq!(m.rendered.borrow().rows.len(), RENDER_CACHE_LIMIT);
-        assert_eq!(m.rendered.borrow().order.len(), RENDER_CACHE_LIMIT);
-        assert!(!m.rendered.borrow().rows.contains_key(&0));
-        assert_eq!(m.row_data(0).unwrap().row_data(2).unwrap().text, "0 B");
-        m.set_size_indexed(false);
-        assert!(m.rendered.borrow().rows.is_empty());
-        assert_eq!(m.row_data(0).unwrap().row_data(2).unwrap().text, "—");
-        m.replace(vec![]);
-        assert!(m.rendered.borrow().rows.is_empty());
-        assert!(m.row_data(0).is_none());
+        assert_eq!(model.pages.borrow().loaded.len(), PAGE_LIMIT);
+        assert!(model.path(0).is_none());
+        assert!(model.path((total - 1) as i32).is_some());
+        let _ = rx.try_iter().count();
+        assert_eq!(text(&model, 0, 0), "");
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Command::Fetch(0)]);
     }
+
     #[test]
-    fn compact_rows_preserve_wire_labels_and_unicode_paths() {
-        let mut wire = row("/tmp/日本/é.txt", 42);
-        wire.name = "é.txt".into();
-        wire.parent = "/tmp/日本".into();
-        let compact = Row::from(wire.clone());
-        assert!(compact.labels.is_none());
-        assert_eq!(compact.name(), wire.name);
-        assert_eq!(compact.parent(), wire.parent);
-        // The IPC contract can supply labels that differ from the raw path.
-        wire.name = "custom label".into();
-        let compact = Row::from(wire);
-        assert_eq!(compact.name(), "custom label");
-        assert_eq!(compact.parent(), "/tmp/日本");
-        assert_eq!(Row::split("/root.txt"), ("root.txt", ""));
-        assert_eq!(Row::split("relative.txt"), ("relative.txt", ""));
-    }
-    #[test]
-    fn appending_keeps_cached_rows_and_active_sort() {
-        let m = Results::default();
-        m.replace(vec![row("large", 100), row("small", 9)]);
-        let cached = m.row_data(0).unwrap();
-        m.append(vec![row("middle", 20)]);
-        assert_eq!(m.path(0).as_deref(), Some("large"));
-        assert_eq!(m.row_count(), 3);
-        assert_eq!(m.row_data(0).unwrap(), cached);
-        m.sort(2, true);
-        m.append(vec![row("tiny", 1)]);
-        assert_eq!(m.path(0).as_deref(), Some("tiny"));
-        assert_eq!(m.find("large"), 3);
-        m.append(vec![]);
-        assert_eq!(m.row_count(), 4);
-    }
-    #[test]
-    fn renaming_updates_descendants_cached_cells_and_sort_order() {
-        let m = Results::default();
-        let mut directory = row("/tmp/old", 0);
-        directory.is_dir = true;
-        m.replace(vec![
-            directory,
-            row("/tmp/old/child.txt", 1),
-            row("/tmp/older/keep", 2),
-        ]);
-        m.sort(1, true);
-        let _ = m.row_data(m.find("/tmp/old/child.txt") as usize).unwrap();
-        m.rename_path("/tmp/old", "/tmp/new");
-        assert_eq!(m.find("/tmp/old"), -1);
-        assert_eq!(m.row_count(), 3);
-        let child = m.find("/tmp/new/child.txt") as usize;
-        let cells = m.row_data(child).unwrap();
-        assert_eq!(cells.row_data(0).unwrap().text, "child.txt");
-        assert_eq!(cells.row_data(1).unwrap().text, "/tmp/new");
-        assert!(m.find("/tmp/older/keep") >= 0);
-        assert_eq!(m.rows.borrow()[1].name(), "child.txt");
-        m.rename_path("/tmp/new/child.txt", "/tmp/new/child.pdf");
-        assert_eq!(m.rows.borrow()[1].name(), "child.pdf");
-    }
-    #[test]
-    fn removing_directory_removes_only_its_descendants() {
-        let m = Results::default();
-        m.replace(vec![
-            row("/tmp/old", 0),
-            row("/tmp/old/child", 1),
-            row("/tmp/older/keep", 2),
-        ]);
-        m.remove_path("/tmp/old");
-        assert_eq!(m.row_count(), 1);
-        assert_eq!(m.path(0).as_deref(), Some("/tmp/older/keep"));
-    }
-    #[test]
-    fn numeric_sort_and_path_selection_survive_replacement() {
-        let m = Results::default();
-        m.replace(vec![row("large", 100), row("small", 9)]);
-        m.sort(2, true);
-        assert_eq!(m.path(0).as_deref(), Some("small"));
-        m.replace(vec![row("small", 9), row("large", 100), row("middle", 20)]);
-        assert_eq!(m.find("large"), 2);
-        m.sort(3, false);
-        assert_eq!(m.path(0).as_deref(), Some("large"));
-        m.replace(vec![]);
-        assert_eq!(m.find("large"), -1);
-        assert!(m.path(-1).is_none());
+    fn size_column_follows_size_indexing_and_detached_models_stop_requesting() {
+        let (model, rx) = attached(PAGE * 2);
+        model.fill(1, 0, rows(0, PAGE));
+        assert_eq!(text(&model, 3, 2), "—");
+        model.set_size_indexed(true);
+        assert_eq!(text(&model, 3, 2), crate::format::format_size(3));
+        let _ = rx.try_iter().count();
+        model.detach();
+        let _ = model.row_data(PAGE + 1);
+        assert!(!model.send(Command::Fetch(1)));
+        assert!(rx.try_iter().next().is_none());
     }
 }

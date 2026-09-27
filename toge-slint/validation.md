@@ -125,3 +125,69 @@ rows in place instead of cloning the full result set. No match limit was added.
 
 Result memory remains O(M); eliminating that would require daemon-backed paging
 and sorting rather than retaining every match in the client.
+
+
+## Daemon-held result sessions — 2026-09-27
+
+The GUI no longer copies result rows over IPC. The daemon keeps each query's
+matching IDs in a per-connection session. The GUI fetches 256-row pages on demand
+and asks the daemon to re-sort, locate paths, and re-read renamed or trashed
+paths. Retained IDs are tied to an index epoch that changes on every removal or
+reindex, so the daemon never serves a row whose ID has been renumbered.
+
+- Unit tests: 159 core (session wire round trips, malformed frames, client
+  response checks), 32 daemon (ranges, resort, locate, removal and reindex
+  invalidation, paced live sync, reconcile limited to configured roots, served
+  session lifecycle) and 26 Slint (placeholder/page loading, stale generations,
+  bounded page cache, fast-scroll fetch coalescing, sort-key mapping,
+  cancellation). Clippy with `-D warnings` and rustfmt are clean. The existing
+  temporary-script `access` test failed once in a parallel run and passed on
+  every rerun.
+- Native Niri/Wayland verification of the real `toge-slint` binary and shared
+  `ui/main.slint`, against an isolated `toged` indexing 35,000 files (30,000
+  sparse `.mkv` files with distinct sizes and times) on btrfs. Injected Slint
+  WindowEvents typed `.mkv` (30,000 matches in ~0.45 s), wheel-scrolled about
+  1,200 rows deep, clicked and arrow-keyed through deep rows, sorted by size
+  both ways, renamed the largest file inline (it stays selected at row 0),
+  showed the empty state, and searched for the renamed file. All 13 assertions
+  passed. Frames were inspected for placeholders, clipping, focus, selection,
+  sort arrows and status text.
+- Recording: [daemon-sessions.mp4](https://fedora.taila85941.ts.net:8913/daemon-sessions.mp4)
+  (tailnet only). The fixture, log and contact sheet are in the gitignored
+  `visual-test-artifacts/daemon-sessions-20260927/`. Frames were captured with
+  `Window::take_snapshot` about 8 times a second, so the video runs faster than
+  real time. The input was injected rather than physical, and the watcher had no
+  fanotify capability, so live watcher updates were not part of the visual run.
+- Follow-up: clicking a row now moves keyboard focus to the table, and
+  Home/End/PageUp/PageDown move the selection (the table widget handles only
+  Up/Down). End jumps to row 29,999, loads its page, and pins the viewport to the
+  bottom so the final row is not clipped. The re-run passed all 17 assertions
+  with no Tab presses needed, and the recording at the same URL was replaced.
+
+## Session query latency — 2026-09-27
+
+Opening a session sorted every match by name before the first page (about
+360 ms for 820k results), and superseded keystrokes queued on the index lock.
+The daemon now keeps whole-index name and path orders (`OrderCache`), so a
+query picks its matches in one pass over the cached order or sorts them by rank.
+Appended entries are merged in about 2 ms; removals and reindexes rebuild it
+(about 110 ms once). Superseded opens are skipped when the client has already
+hung up, and the bulk zero-size `stat` pass runs only for size-sorted sessions,
+since fetched rows refresh their own metadata.
+
+Release daemon on a copy of the real 820k-entry index, open plus first 256-row
+page, median of 5:
+
+| Query | Matches | Before (match + per-query sort, timed separately) | After (end to end) |
+| --- | ---: | ---: | ---: |
+| (empty) | 816,750 | ~370 ms | 10.6 ms |
+| `.` | 688,642 | ~290 ms | 28.8 ms |
+| `s` | 494,304 | ~210 ms | 26.0 ms |
+| `.mkv` | 31,113 | ~3 ms | 2.0 ms |
+| `ext:mkv` | 31,113 | ~2 ms | 0.6 ms |
+
+Typing `.` `.m` `.mk` then `.mkv` in a burst: final results ready 30 ms after
+the first keystroke. Remaining time for broad queries is the matcher's scan.
+Cached orders produce exactly the same order as `sort_ids`, which the tests
+check across result sizes, both directions, ties, and merged insertions. The
+native visual run passed all 17 assertions again.

@@ -5,7 +5,7 @@ mod format;
 mod model;
 mod preferences;
 mod worker;
-use slint::{ComponentHandle, Model};
+use slint::ComponentHandle;
 use std::{rc::Rc, sync::Arc};
 slint::include_modules!();
 
@@ -22,7 +22,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let ui = AppWindow::new()?;
     ui.set_rows(slint::ModelRc::from(Rc::new(model::Results::default())));
-    preferences::connect(&ui, preferences::path());
+    let mailbox = Arc::new(worker::Mailbox::default());
+    preferences::connect(&ui, preferences::path(), mailbox.clone());
     let about = Rc::new(std::cell::RefCell::new(None::<AboutWindow>));
     ui.on_about(move || {
         let mut window = about.borrow_mut();
@@ -43,7 +44,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let _ = slint::quit_event_loop();
         slint::CloseRequestResponse::HideWindow
     });
-    let mailbox = Arc::new(worker::Mailbox::default());
     ui.show()?;
     worker::start(mailbox.clone(), ui.as_weak());
     mailbox.submit(String::new(), true);
@@ -68,9 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let last_click = std::cell::RefCell::new(None::<(String, std::time::Instant)>);
     ui.on_row_clicked(move |index| {
         if let Some(ui) = weak.upgrade() {
-            let model = ui.get_rows();
-            let results = model.as_any().downcast_ref::<model::Results>().unwrap();
-            let Some(path) = results.path(index) else {
+            let Some(path) = worker::results(&ui).path(index) else {
                 return;
             };
             let now = std::time::Instant::now();
