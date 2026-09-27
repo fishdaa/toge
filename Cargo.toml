@@ -12,7 +12,7 @@ repository = "https://github.com/fishdaa/needle"
 [workspace.dependencies]
 toge-core = { package = "toge-core", version = "0.1.16", path = "toge-core" }
 
-# Slint's Skia renderer leans on pure-Rust text shaping (rustybuzz) that is
+# Slint's renderer leans on pure-Rust text shaping and rasterization that is
 # unusably slow without optimizations; unoptimized dependency code is what
 # turns a normal result-list repaint into a 300ms+ UI freeze in dev builds.
 [profile.dev.package."*"]

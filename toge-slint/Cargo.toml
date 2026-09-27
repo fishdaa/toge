@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 toge-core.workspace = true
-slint = { version = "=1.17.1", default-features = false, features = ["std", "backend-winit", "renderer-skia-opengl", "compat-1-2"] }
+slint = { version = "=1.17.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
 time = { version = "0.3", features = ["formatting"] }
 clipboard-rs = { version = "0.3.5", default-features = false, features = ["wayland"] }
 

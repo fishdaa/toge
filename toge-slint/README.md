@@ -1,7 +1,7 @@
 # Toge Slint MVP
 
 Experimental Linux desktop client for the existing `toged` daemon. Uses Rust,
-Slint 1.17.1, Winit and the Skia renderer. Tauri remains the supported release.
+Slint 1.17.1, Winit and the software renderer. Tauri remains the supported release.
 
 ```bash
 make slint                # isolated development daemon and settings
@@ -46,7 +46,7 @@ cargo build --release -p toge-slint -p toged
 The app connects to `TOGE_SOCKET` or the usual XDG state socket, and starts `toged`
 from its executable directory or PATH if absent. The GUI exits when closed; an
 independent daemon continues running. Build requires Rust and Linux development
-libraries for Winit/Skia rendering (including fontconfig and xkbcommon).
+libraries for Winit rendering (including fontconfig and xkbcommon).
 No Node, WebKit or Qt is needed for the Slint build. Runtime file actions use
 `xdg-open` and `gio trash`; the clipboard supports Wayland and X11 directly.
 
