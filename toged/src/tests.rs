@@ -1,9 +1,9 @@
 use crate::{
     DaemonState, IndexChange, WatchScope, WatcherStatus, apply_highlight_ranges,
-    canonical_starts_with, discover_roots, ensure_private_dir, handle_query, handle_request,
-    highlight_path, index_created_path, is_ignored_path, is_own_path, is_within_roots,
-    mark_watcher_unavailable, read_request, remove_deleted_path, resolve_events, status_response,
-    stream_results, term_needles, write_stream_event,
+    canonical_starts_with, discover_roots, ensure_private_dir, hand_off_to_watcher, handle_query,
+    handle_request, highlight_path, index_created_path, is_ignored_path, is_own_path,
+    is_within_roots, mark_watcher_unavailable, read_request, remove_deleted_path, resolve_events,
+    status_response, stream_results, term_needles, write_stream_event,
 };
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -102,6 +102,29 @@ fn watcher_runtime_failure_marks_daemon_ready_but_degraded() {
             .unwrap()
             .contains("permission denied")
     );
+}
+
+#[test]
+fn watcher_spawn_failure_still_lets_indexing_reach_ready() {
+    let mut state = DaemonState {
+        index: Index::new(),
+        status: DaemonStatus::LoadingIndex,
+        status_message: String::new(),
+        build_duration_ms: 0,
+        last_updated_unix: 0,
+        watcher: WatcherStatus::default(),
+        watcher_log: Vec::new(),
+        orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
+    };
+
+    hand_off_to_watcher(&mut state, Some("thread spawn error: busy"));
+    assert_eq!(state.status, DaemonStatus::Ready);
+    assert!(!state.watcher.is_healthy);
+
+    state.status = DaemonStatus::LoadingIndex;
+    hand_off_to_watcher(&mut state, None);
+    assert_eq!(state.status, DaemonStatus::StartingWatcher);
 }
 
 /// Helper to build and run the daemon binary with given args.

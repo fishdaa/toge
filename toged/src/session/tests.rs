@@ -230,6 +230,50 @@ fn reconcile_applies_client_changes_within_roots_only() {
 }
 
 #[test]
+fn reconcile_skips_paths_the_index_excludes() {
+    let root = tempfile::Builder::new()
+        .prefix("toged-session-")
+        .tempdir_in(std::env::temp_dir())
+        .unwrap();
+    let mut config = Config::default_config();
+    config.roots = vec![root.path().to_path_buf()];
+    config.exclude_folders = vec!["build".into()];
+    config.exclude_patterns = vec!["*.tmp".into()];
+    let state_dir = root.path().join(".state");
+    let env = SessionEnv::new(&config, &state_dir, &state_dir);
+    fs::create_dir(root.path().join("build")).unwrap();
+    let in_excluded_folder = root.path().join("build").join("out.mkv");
+    let excluded_name = root.path().join("clip.tmp");
+    let kept = root.path().join("kept.mkv");
+    for path in [&in_excluded_folder, &excluded_name, &kept] {
+        fs::write(path, b"x").unwrap();
+    }
+    let mut st = daemon(&[]);
+    let mut session = open(&mut st, "", None);
+
+    session.handle(
+        &mut st,
+        SessionRequest::Reconcile {
+            paths: [&in_excluded_folder, &excluded_name, &kept]
+                .map(|path| path.to_str().unwrap().to_string())
+                .to_vec(),
+        },
+        &env,
+    );
+    assert!(
+        st.index
+            .id_by_path(in_excluded_folder.to_str().unwrap())
+            .is_none()
+    );
+    assert!(
+        st.index
+            .id_by_path(excluded_name.to_str().unwrap())
+            .is_none()
+    );
+    assert!(st.index.id_by_path(kept.to_str().unwrap()).is_some());
+}
+
+#[test]
 fn served_session_answers_until_the_client_disconnects() {
     let config = Config::default_config();
     let state = Mutex::new(daemon(&[("/r/a.mkv", 1), ("/r/b.mkv", 2)]));

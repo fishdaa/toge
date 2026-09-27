@@ -207,7 +207,12 @@ fn run_streamed_query<W: Write>(
             format: IpcFormat::Default,
             highlight: opts.highlight && !totals_only,
         },
-        order: if opts.sort.is_some() {
+        // `--sort`, `/o` flags and inline `sort:` all land in the search text.
+        order: if opts
+            .search
+            .split_whitespace()
+            .any(|token| token.to_ascii_lowercase().starts_with("sort:"))
+        {
             StreamOrder::Sorted
         } else {
             StreamOrder::Index

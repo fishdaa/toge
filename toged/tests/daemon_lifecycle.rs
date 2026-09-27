@@ -306,3 +306,47 @@ fn daemon_startup_reconciles_changes_made_while_stopped() {
 
     cleanup(&dir, &mut child);
 }
+
+#[test]
+fn quit_exits_while_a_session_is_open() {
+    if !uds_available("quit-session") {
+        return;
+    }
+    let (dir, state, cfg) = setup("quit-session");
+    let sock = socket_path("quit-session");
+    let mut child = spawn_needled(&[
+        "--socket",
+        sock.to_str().unwrap(),
+        "--config",
+        cfg.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--clean",
+    ]);
+    assert!(wait_for_ready(&sock, 10_000), "daemon not ready");
+
+    // Held open, as the UI does, for the whole shutdown.
+    let session = toge_core::ipc::session::SessionClient::open(
+        UnixStream::connect(&sock).unwrap(),
+        toge_core::ipc::session::SessionOpen {
+            raw: "foo".into(),
+            sort: None,
+        },
+    )
+    .unwrap();
+    let mut stream = UnixStream::connect(&sock).unwrap();
+    send_request(&mut stream, &Request::Quit);
+    assert_eq!(read_response(&mut stream), Response::Ok);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "daemon did not exit with a session open"
+        );
+        thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!sock.exists(), "socket left behind");
+    drop(session);
+    cleanup(&dir, &mut child);
+}

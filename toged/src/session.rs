@@ -2,8 +2,9 @@
 //! the row ranges a client displays. See `toge_core::ipc::session`.
 
 use crate::{
-    DaemonState, discover_roots, index_created_path, is_ignored_path, is_within_roots,
-    missing_query_dates, missing_sort_date, prepare_query_ids, remove_deleted_path, sort_params,
+    DaemonState, discover_roots, index_created_path, index_excludes, is_ignored_path,
+    is_within_roots, missing_query_dates, missing_sort_date, prepare_query_ids,
+    remove_deleted_path, sort_params,
 };
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -21,6 +22,7 @@ use toge_core::ipc::session::{
 use toge_core::matcher::{QueryMatcher, candidate_ids};
 use toge_core::query::{Query, Sort};
 use toge_core::sort::{OrderCache, SortKey};
+use toge_core::walker::{Excludes, excluded_under_roots};
 
 /// Clients poll with `Sync`; a session left silent this long is abandoned.
 const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -30,6 +32,7 @@ const SYNC_MIN_INTERVAL: Duration = Duration::from_secs(1);
 pub(crate) struct SessionEnv<'a> {
     pub config: &'a Config,
     pub roots: Vec<PathBuf>,
+    pub excludes: Excludes,
     pub state_dir: &'a Path,
     pub config_dir: &'a Path,
 }
@@ -39,6 +42,7 @@ impl<'a> SessionEnv<'a> {
         Self {
             config,
             roots: discover_roots(config),
+            excludes: index_excludes(config),
             state_dir,
             config_dir,
         }
@@ -323,7 +327,7 @@ impl Session {
 }
 
 /// Bring one path's index entries in line with the filesystem, applying the
-/// same root and ignore rules as the watcher.
+/// same root, ignore and exclude rules as the watcher.
 fn reconcile_path(st: &mut DaemonState, path: &str, env: &SessionEnv) {
     if !Path::new(path).is_absolute() || !is_within_roots(path, &env.roots) {
         return;
@@ -334,7 +338,7 @@ fn reconcile_path(st: &mut DaemonState, path: &str, env: &SessionEnv) {
         return;
     }
     remove_deleted_path(&mut st.index, path);
-    if metadata.is_some() {
+    if metadata.is_some() && !excluded_under_roots(Path::new(path), &env.roots, &env.excludes) {
         index_created_path(st, path, is_dir, env.config);
     }
 }

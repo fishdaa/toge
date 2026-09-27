@@ -216,7 +216,12 @@ fn replace_index(st: &mut DaemonState, mut index: Index) {
 /// A cached index is served immediately and then reconciled with the disk in the
 /// background, since changes made while the daemon was stopped can only be found
 /// by walking. Without a usable cache, a fresh index is built first.
-fn start_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>>) {
+fn start_index(
+    state_dir: &Path,
+    config: &Config,
+    state: &Arc<Mutex<DaemonState>>,
+    watcher_failure: Option<&str>,
+) {
     let start = Instant::now();
     let Ok(cached) = Index::load(&state_dir.join("index.bin")) else {
         let (index, duration) = build_index(config, state);
@@ -225,8 +230,7 @@ fn start_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>
         replace_index(&mut st, index);
         st.build_duration_ms = duration;
         st.last_updated_unix = current_unix_time();
-        st.status = DaemonStatus::StartingWatcher;
-        st.status_message = "Setting up file watcher".to_string();
+        hand_off_to_watcher(&mut st, watcher_failure);
         return;
     };
 
@@ -235,8 +239,7 @@ fn start_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>
         replace_index(&mut st, cached);
         st.build_duration_ms = start.elapsed().as_millis() as u64;
         st.last_updated_unix = current_unix_time();
-        st.status = DaemonStatus::StartingWatcher;
-        st.status_message = "Setting up file watcher".to_string();
+        hand_off_to_watcher(&mut st, watcher_failure);
         st.index_generation
     };
 
@@ -268,6 +271,17 @@ fn start_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>
             st.index.count(),
             st.build_duration_ms
         );
+    }
+}
+
+/// Let the watcher thread take over once the index is served. Without a
+/// watcher thread nothing would leave `StartingWatcher`, so go straight to Ready.
+fn hand_off_to_watcher(st: &mut DaemonState, watcher_failure: Option<&str>) {
+    if let Some(detail) = watcher_failure {
+        mark_watcher_unavailable_locked(st, detail);
+    } else {
+        st.status = DaemonStatus::StartingWatcher;
+        st.status_message = "Setting up file watcher".to_string();
     }
 }
 
@@ -436,13 +450,16 @@ fn remove_deleted_path(index: &mut Index, path: &str) {
 }
 
 fn mark_watcher_unavailable(state: &Arc<Mutex<DaemonState>>, detail: &str) {
-    let mut st = state.lock().unwrap();
+    mark_watcher_unavailable_locked(&mut state.lock().unwrap(), detail);
+}
+
+fn mark_watcher_unavailable_locked(st: &mut DaemonState, detail: &str) {
     st.watcher.is_healthy = false;
     st.watcher.watch_failure_count = st.watcher.watch_failure_count.max(1);
     st.status = DaemonStatus::Ready;
     st.status_message = WATCHER_REMEDIATION.to_string();
     append_watcher_log(
-        &mut st,
+        st,
         format!("fanotify setup failed: {detail}; {WATCHER_REMEDIATION}"),
     );
 }
@@ -746,7 +763,7 @@ fn stream_results(
             ));
         }
         let id = ids.as_ref().map_or(position as u32, |ids| ids[position]);
-        if !matched && needs_dates {
+        if !matched && needs_dates && missing_query_dates(&index.entries[id as usize], &query) {
             index.update_metadata_by_id(id);
         }
         if !matched && !matcher.matches(&index.entries[id as usize]) {
@@ -990,7 +1007,15 @@ fn serve(
         let config_dir = config_dir.clone();
         let config = config.clone();
         let state = state.clone();
-        workers.push(thread::spawn(move || match req {
+        // Sessions stay open until the client leaves, so Quit shuts their
+        // sockets down to unblock them; other requests finish on their own.
+        let session_socket = matches!(
+            req,
+            Request::OpenSession(_) | Request::OpenSessionPreview(_)
+        )
+        .then(|| s.try_clone().ok())
+        .flatten();
+        let handle = thread::spawn(move || match req {
             Request::StreamQuery(request) => {
                 // Transport failures close the connection. EOF without Done
                 // lets clients distinguish an interrupted stream from success.
@@ -1006,14 +1031,21 @@ fn serve(
                 let resp = handle_request(req, &state_dir, &config, &state);
                 let _ = write_response(&mut s, &resp);
             }
-        }));
-        workers.retain(|h: &thread::JoinHandle<()>| !h.is_finished());
+        });
+        workers.push((handle, session_socket));
+        workers.retain(|(handle, _)| !handle.is_finished());
     }
-    for handle in workers {
+    // Refuse new clients before waiting on the in-flight ones.
+    drop(listener);
+    let _ = fs::remove_file(&socket_path);
+    for (_, socket) in &workers {
+        if let Some(socket) = socket {
+            let _ = socket.shutdown(std::net::Shutdown::Both);
+        }
+    }
+    for (handle, _) in workers {
         let _ = handle.join();
     }
-
-    let _ = fs::remove_file(&socket_path);
     Ok(())
 }
 
@@ -1094,7 +1126,7 @@ fn main() {
     let watcher_state_dir = state_dir.clone();
     let watcher_config_dir = config_dir.clone();
     let watcher_config = config.clone();
-    start_watcher(
+    let watcher_failure = start_watcher(
         watcher_state,
         watcher_state_dir,
         watcher_config_dir,
@@ -1104,12 +1136,21 @@ fn main() {
     let index_state_dir = state_dir.clone();
     let index_config = config.clone();
     let index_state = Arc::clone(&state);
-    let spawn_result = thread::Builder::new()
-        .spawn(move || start_index(&index_state_dir, &index_config, &index_state));
+    let spawn_result = thread::Builder::new().spawn({
+        let watcher_failure = watcher_failure.clone();
+        move || {
+            start_index(
+                &index_state_dir,
+                &index_config,
+                &index_state,
+                watcher_failure.as_deref(),
+            )
+        }
+    });
 
     if let Err(err) = spawn_result {
         eprintln!("background indexing unavailable: {}", err);
-        start_index(&state_dir, &config, &state);
+        start_index(&state_dir, &config, &state, watcher_failure.as_deref());
     }
 
     serve(state_dir, config_dir, config, state, socket).unwrap();
@@ -1361,8 +1402,7 @@ fn start_watcher(
     state_dir: PathBuf,
     config_dir: PathBuf,
     config: Config,
-) {
-    let spawn_failure_state = Arc::clone(&state);
+) -> Option<String> {
     let spawn_result = thread::Builder::new()
         .name("fanotify-watcher".into())
         .spawn(move || {
@@ -1442,13 +1482,12 @@ fn start_watcher(
             }
         });
 
-    if let Err(error) = spawn_result {
+    // Reported to start_index, which marks the daemon Ready once the index is
+    // served; marking it here would be undone by the StartingWatcher hand-off.
+    spawn_result.err().map(|error| {
         eprintln!("Failed to spawn fanotify watcher thread: {error}");
-        mark_watcher_unavailable(
-            &spawn_failure_state,
-            &format!("thread spawn error: {error}"),
-        );
-    }
+        format!("thread spawn error: {error}")
+    })
 }
 
 #[cfg(test)]

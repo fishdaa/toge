@@ -367,7 +367,7 @@ fn serve_commands(
                     locate(session, mailbox, ui, q.id, path, focus)?;
                 }
                 Command::Reconcile { paths, select } => {
-                    session.request(&SessionRequest::Reconcile { paths })?;
+                    reconcile(session, &paths)?;
                     let rows = first_page(session)?;
                     post(mailbox, ui, q.id, session.state(), Reply::Rebuilt { rows })?;
                     match select {
@@ -387,6 +387,20 @@ fn serve_commands(
             }
         }
     }
+}
+
+/// Keep a single UI action within the wire protocol's per-request path limit.
+/// The caller publishes one refreshed page after every batch has completed.
+fn reconcile<S: std::io::Read + std::io::Write>(
+    session: &mut toge_core::ipc::session::SessionClient<S>,
+    paths: &[String],
+) -> std::io::Result<()> {
+    for batch in paths.chunks(toge_core::ipc::session::MAX_SESSION_RECONCILE) {
+        session.request(&SessionRequest::Reconcile {
+            paths: batch.to_vec(),
+        })?;
+    }
+    Ok(())
 }
 
 fn locate(
@@ -568,6 +582,68 @@ fn config_size_indexed() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn large_reconciliation_keeps_the_session_usable() {
+        use toge_core::ipc::session::{
+            MAX_SESSION_FRAME_SIZE, MAX_SESSION_RECONCILE, SessionClient, read_frame, write_frame,
+        };
+        let (client, mut server) = std::os::unix::net::UnixStream::pair().unwrap();
+        let paths: Vec<_> = (0..MAX_SESSION_RECONCILE * 2 + 1)
+            .map(|i| format!("/fixture/{i}.txt"))
+            .collect();
+        let expected = paths.clone();
+        let daemon = std::thread::spawn(move || {
+            let bytes = read_frame(&mut server, MAX_SESSION_FRAME_SIZE)
+                .unwrap()
+                .unwrap();
+            assert!(matches!(
+                toge_core::ipc::Request::decode(&bytes).unwrap(),
+                toge_core::ipc::Request::OpenSession(_)
+            ));
+            let mut state = SessionState {
+                generation: 1,
+                total_count: 0,
+                total_size: 0,
+            };
+            write_frame(&mut server, &SessionResponse::State(state).encode()).unwrap();
+            let mut received = Vec::new();
+            for expected_len in [MAX_SESSION_RECONCILE, MAX_SESSION_RECONCILE, 1] {
+                let bytes = read_frame(&mut server, MAX_SESSION_FRAME_SIZE)
+                    .unwrap()
+                    .unwrap();
+                let SessionRequest::Reconcile { paths } = SessionRequest::decode(&bytes).unwrap()
+                else {
+                    panic!("expected reconciliation");
+                };
+                assert_eq!(paths.len(), expected_len);
+                received.extend(paths);
+                state.generation += 1;
+                write_frame(&mut server, &SessionResponse::State(state).encode()).unwrap();
+            }
+            assert_eq!(received, expected);
+            let bytes = read_frame(&mut server, MAX_SESSION_FRAME_SIZE)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                SessionRequest::decode(&bytes).unwrap(),
+                SessionRequest::Sync
+            );
+            write_frame(&mut server, &SessionResponse::State(state).encode()).unwrap();
+        });
+        let mut session = SessionClient::open(
+            client,
+            SessionOpen {
+                raw: String::new(),
+                sort: None,
+            },
+        )
+        .unwrap();
+        reconcile(&mut session, &paths).unwrap();
+        session.request(&SessionRequest::Sync).unwrap();
+        assert_eq!(session.state().generation, 4);
+        daemon.join().unwrap();
+    }
+
     #[test]
     fn latest_edit_invalidates_active_query_before_debounce() {
         let m = Mailbox::default();
