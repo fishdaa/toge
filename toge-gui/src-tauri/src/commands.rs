@@ -55,6 +55,10 @@ pub struct WatcherSelfTestResult {
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn window_ready(window: tauri::Window) -> Result<(), String> {
     let state = window.app_handle().state::<AppState>();
     if state.started_automatically() && window.label() == "main" {
@@ -65,6 +69,10 @@ pub fn window_ready(window: tauri::Window) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn is_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;
 
@@ -72,6 +80,10 @@ pub fn is_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn set_autostart_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
 
@@ -161,31 +173,55 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusResult, Stri
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized as owned values"
+)]
 pub fn open_path(path: String) {
     crate::actions::open_path(&path);
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized as owned values"
+)]
 pub fn reveal_in_folder(path: String) {
     crate::actions::reveal_in_folder(&path);
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized as owned values"
+)]
 pub fn copy_to_clipboard(text: String) {
     crate::actions::copy_to_clipboard(&text);
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized as owned values"
+)]
 pub fn trash_path(path: String) -> Result<(), String> {
     crate::actions::trash_path(&path)
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized as owned values"
+)]
 pub fn delete_path(path: String) -> Result<(), String> {
     crate::actions::delete_path(&path)
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn reindex_index(state: State<'_, AppState>) -> Result<(), String> {
     let socket = state.socket_path();
     ipc_client::ensure_daemon_running(&socket).map_err(|e| e.to_string())?;
@@ -193,6 +229,10 @@ pub fn reindex_index(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn get_keyboard_settings(
     state: State<'_, AppState>,
 ) -> Result<KeyboardSettingsPayload, String> {
@@ -201,6 +241,10 @@ pub fn get_keyboard_settings(
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn save_keyboard_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -394,6 +438,10 @@ pub(crate) fn open_options_window_internal(app: &tauri::AppHandle) -> Result<(),
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn close_options_window(window: tauri::Window) -> Result<(), String> {
     window.close().map_err(|e| e.to_string())
 }

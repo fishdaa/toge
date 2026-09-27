@@ -70,7 +70,7 @@ fn send_request(stream: &mut UnixStream, req: &Request) {
 fn read_response(stream: &mut UnixStream) -> Response {
     let mut len_buf = [0u8; 8];
     stream.read_exact(&mut len_buf).unwrap();
-    let len = u64::from_le_bytes(len_buf) as usize;
+    let len = usize::try_from(u64::from_le_bytes(len_buf)).unwrap();
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).unwrap();
     Response::decode(&buf).unwrap()

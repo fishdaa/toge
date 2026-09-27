@@ -202,7 +202,7 @@ fn modified_sort_refreshes_timestamps_when_metadata_indexing_is_disabled() {
 
     let response = handle_query(
         &mut index,
-        &mut Default::default(),
+        &mut toge_core::sort::OrderCache::default(),
         &QueryRequest {
             id: 1,
             raw: "sort:modified-desc".into(),
@@ -471,7 +471,7 @@ fn unlimited_query_returns_every_match_and_handles_nonzero_offsets() {
     for offset in [0, 3, usize::MAX] {
         let Response::Results(results) = handle_query(
             &mut index,
-            &mut Default::default(),
+            &mut toge_core::sort::OrderCache::default(),
             &QueryRequest {
                 id: 7,
                 raw: String::new(),
@@ -530,7 +530,7 @@ fn stream_sends_bounded_batches_and_final_totals_in_both_orders() {
                 &mut server,
                 &producer_request,
                 &mut index,
-                &mut Default::default(),
+                &mut toge_core::sort::OrderCache::default(),
                 false,
             )
         });
@@ -576,7 +576,7 @@ fn disconnected_stream_and_expired_write_stop_promptly() {
             &mut server,
             &request,
             &mut index,
-            &mut Default::default(),
+            &mut toge_core::sort::OrderCache::default(),
             false
         )
         .is_err()

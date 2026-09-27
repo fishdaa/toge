@@ -127,7 +127,14 @@ impl Ranked {
     fn new(order: Vec<u32>) -> Self {
         let mut rank = vec![0u32; order.len()];
         for (position, &id) in order.iter().enumerate() {
-            rank[id as usize] = position as u32;
+            // `position` is bounded by `order.len()`, well under `u32::MAX`;
+            // see `Index::entry_count_u32`.
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "position < order.len(), which fits in u32; see Index::entry_count_u32"
+            )]
+            let position = position as u32;
+            rank[id as usize] = position;
         }
         Self { order, rank }
     }
@@ -159,6 +166,12 @@ impl CachedOrder {
     fn build(index: &Index, key: KeyFn) -> Self {
         // An 8-byte big-endian prefix orders like the string itself, so most
         // comparisons avoid chasing the string pointer.
+        // `id` is bounded by `index.entries.len()`, well under `u32::MAX`;
+        // see `Index::entry_count_u32`.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "id < index.entries.len(), which fits in u32; see Index::entry_count_u32"
+        )]
         let mut keyed: Vec<(u64, u32, &str)> = index
             .entries
             .iter()
@@ -182,18 +195,24 @@ impl CachedOrder {
 
     /// Merge entries appended since the cache was built.
     fn extend(&mut self, index: &Index, key: KeyFn) {
-        let added = (self.ascending.order.len() as u32..index.count() as u32).collect();
+        // Bounded by `index.count()`, well under `u32::MAX`; see `Index::entry_count_u32`.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "order.len() and index.count() fit in u32; see Index::entry_count_u32"
+        )]
+        let mut added: Vec<u32> =
+            (self.ascending.order.len() as u32..index.count() as u32).collect();
         let old = std::mem::take(&mut self.ascending.order);
-        self.merge(index, key, old, added);
+        self.merge(index, key, &old, &mut added);
     }
 
     /// Merge `added` IDs into `old`, an order of every other current entry.
-    fn merge(&mut self, index: &Index, key: KeyFn, old: Vec<u32>, mut added: Vec<u32>) {
+    fn merge(&mut self, index: &Index, key: KeyFn, old: &[u32], added: &mut [u32]) {
         let key_of = |id: u32| key(&index.entries[id as usize]);
         added.sort_by(|&a, &b| key_of(a).cmp(key_of(b)).then(a.cmp(&b)));
         let mut order = Vec::with_capacity(index.count());
         let mut copied = 0;
-        for id in added {
+        for &id in added.iter() {
             let text = key_of(id);
             // Equal keys stay in ascending ID order.
             let at = copied
@@ -217,6 +236,11 @@ impl CachedOrder {
     /// ties involving a renumbered ID need reordering, instead of a full sort.
     fn renumber(&mut self, index: &Index, key: KeyFn, removals: &[(u32, u32)]) {
         let key_of = |id: u32| key(&index.entries[id as usize]);
+        // Bounded by `index.count()`, well under `u32::MAX`; see `Index::entry_count_u32`.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "order.len() fits in u32; see Index::entry_count_u32"
+        )]
         let cached_len = self.ascending.order.len() as u32;
         // Which cached ID currently occupies a slot, for slots touched so far.
         let mut owner: HashMap<u32, Option<u32>> = HashMap::new();
@@ -278,10 +302,15 @@ impl CachedOrder {
         for &id in &order {
             present[id as usize] = true;
         }
-        let added = (0..count as u32)
+        // Bounded by `index.count()`, well under `u32::MAX`; see `Index::entry_count_u32`.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "count fits in u32; see Index::entry_count_u32"
+        )]
+        let mut added: Vec<u32> = (0..count as u32)
             .filter(|&id| !present[id as usize])
             .collect();
-        self.merge(index, key, order, added);
+        self.merge(index, key, &order, &mut added);
     }
 
     fn descending(&mut self, index: &Index, key: KeyFn) -> &Ranked {

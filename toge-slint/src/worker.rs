@@ -127,7 +127,7 @@ pub fn start(mailbox: Arc<Mailbox>, ui: slint::Weak<crate::AppWindow>) {
     let daemon_start = Arc::new(Mutex::new(()));
     {
         let (ui, socket, mailbox) = (ui.clone(), crate::client::socket_path(), mailbox.clone());
-        std::thread::spawn(move || poll_index_status(ui, socket, &mailbox));
+        std::thread::spawn(move || poll_index_status(&ui, &socket, &mailbox));
     }
     std::thread::spawn(move || {
         let socket = crate::client::socket_path();
@@ -136,7 +136,7 @@ pub fn start(mailbox: Arc<Mailbox>, ui: slint::Weak<crate::AppWindow>) {
             let ui = ui.clone();
             let socket = socket.clone();
             let daemon_start = daemon_start.clone();
-            std::thread::spawn(move || run_session(q, &mailbox, &ui, &socket, &daemon_start));
+            std::thread::spawn(move || run_session(&q, &mailbox, &ui, &socket, &daemon_start));
         }
     });
 }
@@ -233,7 +233,7 @@ enum Reply {
 }
 
 fn run_session(
-    q: Query,
+    q: &Query,
     mailbox: &Arc<Mailbox>,
     ui: &slint::Weak<crate::AppWindow>,
     socket: &std::path::Path,
@@ -241,7 +241,7 @@ fn run_session(
 ) {
     let size_indexed = config_size_indexed();
     let outcome = (|| {
-        wait_until_ready(&q, mailbox, ui, socket, daemon_start)?;
+        wait_until_ready(q, mailbox, ui, socket, daemon_start)?;
         let sort = mailbox.sort();
         let mut session = crate::client::open_session(
             socket,
@@ -279,13 +279,13 @@ fn run_session(
             }
         })
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-        serve_commands(&q, mailbox, ui, &mut session, &inbox)
+        serve_commands(q, mailbox, ui, &mut session, &inbox)
     })();
     mailbox.finish(q.id);
     if let Err(error) = outcome {
-        let m = mailbox.clone();
+        let (m, id) = (mailbox.clone(), q.id);
         let _ = ui.upgrade_in_event_loop(move |ui| {
-            if m.current(q.id) {
+            if m.current(id) {
                 results(&ui).detach();
                 ui.set_busy(false);
                 ui.set_has_error(true);
@@ -544,16 +544,18 @@ fn status_text(state: SessionState, size_indexed: bool) -> String {
 /// Only reads daemon status; searches are what start the daemon. Stops when
 /// the window closes.
 fn poll_index_status(
-    ui: slint::Weak<crate::AppWindow>,
-    socket: std::path::PathBuf,
+    ui: &slint::Weak<crate::AppWindow>,
+    socket: &std::path::Path,
     mailbox: &Mailbox,
 ) {
     while !mailbox.closed() {
-        let text = match crate::client::status(&socket) {
+        let text = match crate::client::status(socket) {
             Ok(status) => crate::format::index_status(&status),
             Err(_) => "Index unavailable".to_string(),
         };
-        let posted = ui.upgrade_in_event_loop(move |ui| ui.set_index_status(text.into()));
+        let posted = ui
+            .clone()
+            .upgrade_in_event_loop(move |ui| ui.set_index_status(text.into()));
         if posted.is_err() {
             return;
         }
@@ -625,11 +627,11 @@ fn apply(ui: &crate::AppWindow, state: SessionState, reply: Reply) {
             follow_rename(ui, &results);
         }
     }
-    let total = results.total() as i32;
+    let total = i32::try_from(results.total()).unwrap_or(i32::MAX);
     match reply {
         Reply::Rows { offset, rows } => results.fill(state.generation, offset, rows),
         Reply::Located { focus, position } => {
-            let position = position.map(|p| p as i32);
+            let position = position.map(|p| i32::try_from(p).unwrap_or(i32::MAX));
             match focus {
                 Focus::Scroll => {
                     ui.invoke_select_row(position.unwrap_or(if total > 0 { 0 } else { -1 }));
@@ -654,9 +656,10 @@ fn apply(ui: &crate::AppWindow, state: SessionState, reply: Reply) {
 }
 
 fn config_size_indexed() -> bool {
-    let root = std::env::var_os("XDG_CONFIG_HOME").map_or_else(|| {
-            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        }, std::path::PathBuf::from);
+    let root = std::env::var_os("XDG_CONFIG_HOME").map_or_else(
+        || std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"),
+        std::path::PathBuf::from,
+    );
     toge_core::config::Config::load(&root.join("toge/config.toml"))
         .unwrap_or_else(|_| toge_core::config::Config::default_config())
         .index_size

@@ -215,7 +215,9 @@ fn take_u64(buf: &[u8], off: &mut usize) -> Option<u64> {
 }
 
 fn take_usize(buf: &[u8], off: &mut usize) -> Option<usize> {
-    take_u64(buf, off).map(|v| v as usize)
+    // Reject values that don't fit in a usize rather than silently truncating
+    // them on 32-bit targets; this is untrusted wire data.
+    usize::try_from(take_u64(buf, off)?).ok()
 }
 
 fn take_string(buf: &[u8], off: &mut usize) -> Option<String> {
@@ -345,9 +347,9 @@ fn encode_results(id: u64, total_count: usize, total_size: u64, rows: &[ResultRo
         push_string(&mut buf, &row.extension);
         buf.push(u8::from(row.is_dir));
         push_u64(&mut buf, row.size);
-        push_u64(&mut buf, row.modified_unix as u64);
-        push_u64(&mut buf, row.created_unix as u64);
-        push_u64(&mut buf, row.accessed_unix as u64);
+        push_u64(&mut buf, row.modified_unix.cast_unsigned());
+        push_u64(&mut buf, row.created_unix.cast_unsigned());
+        push_u64(&mut buf, row.accessed_unix.cast_unsigned());
     }
     buf
 }
@@ -372,7 +374,7 @@ impl Response {
                 for entry in &s.watcher_log {
                     push_string(&mut buf, entry);
                 }
-                push_u64(&mut buf, s.last_updated_unix as u64);
+                push_u64(&mut buf, s.last_updated_unix.cast_unsigned());
                 push_u64(&mut buf, s.build_duration_ms);
             }
             Response::Ok => buf.push(3),
@@ -407,12 +409,15 @@ impl Response {
                     let is_dir = bytes.get(off).copied() == Some(1);
                     off += 1;
                     let size = take_u64(bytes, &mut off).ok_or("missing row size")?;
-                    let modified_unix =
-                        take_u64(bytes, &mut off).ok_or("missing row modified")? as i64;
-                    let created_unix =
-                        take_u64(bytes, &mut off).ok_or("missing row created")? as i64;
-                    let accessed_unix =
-                        take_u64(bytes, &mut off).ok_or("missing row accessed")? as i64;
+                    let modified_unix = take_u64(bytes, &mut off)
+                        .ok_or("missing row modified")?
+                        .cast_signed();
+                    let created_unix = take_u64(bytes, &mut off)
+                        .ok_or("missing row created")?
+                        .cast_signed();
+                    let accessed_unix = take_u64(bytes, &mut off)
+                        .ok_or("missing row accessed")?
+                        .cast_signed();
                     rows.push(ResultRow {
                         path,
                         name,
@@ -461,8 +466,9 @@ impl Response {
                             .push(take_string(bytes, &mut off).ok_or("missing watcher_log entry")?);
                     }
                 }
-                let last_updated_unix =
-                    take_u64(bytes, &mut off).ok_or("missing last_updated")? as i64;
+                let last_updated_unix = take_u64(bytes, &mut off)
+                    .ok_or("missing last_updated")?
+                    .cast_signed();
                 let build_duration_ms =
                     take_u64(bytes, &mut off).ok_or("missing build_duration")?;
                 Ok(Response::Status(StatusResponse {
@@ -564,10 +570,13 @@ pub fn stream_query<S: std::io::Read + std::io::Write>(
         let mut len = [0; 8];
         connection.read_exact(&mut len)?;
         let len = u64::from_le_bytes(len);
-        if len > MAX_STREAM_FRAME_SIZE as u64 {
-            return Err(Error::new(ErrorKind::InvalidData, "stream frame too large"));
-        }
-        let mut bytes = vec![0; len as usize];
+        // Reject frames that don't fit in a usize as well as ones over the
+        // documented limit, rather than truncating the length on 32-bit targets.
+        let len = usize::try_from(len)
+            .ok()
+            .filter(|&len| len <= MAX_STREAM_FRAME_SIZE)
+            .ok_or_else(|| Error::new(ErrorKind::InvalidData, "stream frame too large"))?;
+        let mut bytes = vec![0; len];
         connection.read_exact(&mut bytes)?;
         match StreamEvent::decode(&bytes).map_err(|e| Error::new(ErrorKind::InvalidData, e))? {
             StreamEvent::Rows { id, rows } if id == request.query.id => {

@@ -10,8 +10,10 @@ pub fn open_path(path: &str) {
 }
 
 pub fn reveal_in_folder(path: &str) {
-    let parent = Path::new(path)
-        .parent().map_or_else(|| path.to_string(), |p| p.as_os_str().to_string_lossy().to_string());
+    let parent = Path::new(path).parent().map_or_else(
+        || path.to_string(),
+        |p| p.as_os_str().to_string_lossy().to_string(),
+    );
     let _ = Command::new("xdg-open")
         .arg(parent)
         .stdout(Stdio::null())

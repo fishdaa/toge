@@ -202,9 +202,8 @@ impl FanotifyWatcher {
 
     /// Find all btrfs subvolume mount points and their subvol paths on the same device.
     fn btrfs_subvolumes(device: &str) -> Vec<(PathBuf, String)> {
-        let mountinfo = match fs::read_to_string("/proc/self/mountinfo") {
-            Ok(s) => s,
-            Err(_) => return Vec::new(),
+        let Ok(mountinfo) = fs::read_to_string("/proc/self/mountinfo") else {
+            return Vec::new();
         };
         let mut out = Vec::new();
         for line in mountinfo.lines() {
@@ -212,9 +211,8 @@ impl FanotifyWatcher {
             if fields.len() < 10 {
                 continue;
             }
-            let sep_idx = match fields.iter().position(|f| *f == "-") {
-                Some(i) => i,
-                None => continue,
+            let Some(sep_idx) = fields.iter().position(|f| *f == "-") else {
+                continue;
             };
             let fstype = match fields.get(sep_idx + 1) {
                 Some(f) => *f,
@@ -246,7 +244,8 @@ impl FanotifyWatcher {
     /// Mount the btrfs toplevel (subvolid=5) at a private mount point.
     fn mount_btrfs_root(device: &str) -> io::Result<PathBuf> {
         let pid = std::process::id();
-        let base = env::var_os("XDG_RUNTIME_DIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
+        let base =
+            env::var_os("XDG_RUNTIME_DIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
         let mount_dir = base.join(format!("toge-btrfs-root-{pid}"));
         let mount_dir_str = mount_dir.to_string_lossy().into_owned();
 
@@ -326,7 +325,7 @@ impl FanotifyWatcher {
                 let _ = unsafe { OwnedFd::from_raw_fd(fd) };
                 if let Some(p) = path {
                     // Translate btrfs root paths to real mount point paths
-                    let translated = self.translate_path(&p, marked);
+                    let translated = Self::translate_path(&p, marked);
                     return Some(translated);
                 }
             }
@@ -334,7 +333,7 @@ impl FanotifyWatcher {
         None
     }
 
-    fn translate_path(&self, resolved: &Path, marked: &MarkedFs) -> PathBuf {
+    fn translate_path(resolved: &Path, marked: &MarkedFs) -> PathBuf {
         for (btrfs_prefix, real_mount) in &marked.path_translations {
             if let Ok(rest) = resolved.strip_prefix(btrfs_prefix) {
                 if rest.as_os_str().is_empty() {
@@ -531,11 +530,13 @@ impl FsWatcher for FanotifyWatcher {
             return Err(err);
         }
 
-        let n = n as usize;
+        // `n < 0` returned above, so `n` is non-negative here.
+        let n = n.cast_unsigned();
         let mut offset = 0;
 
         while offset + METADATA_LEN <= n {
-            let event_len = self.read_u32(offset) as usize;
+            let event_len_u32 = self.read_u32(offset);
+            let event_len = event_len_u32 as usize;
             let vers = self.buf[offset + 4];
             let _metadata_len = self.read_u16(offset + 6);
             let mask = self.read_u64(offset + 8);
@@ -574,7 +575,7 @@ impl FsWatcher for FanotifyWatcher {
             // For dir events (CREATE, DELETE, MOVE), use DFID_NAME info records
             let path = if let Some(p) = path_opt {
                 p
-            } else if let Some((parent, name)) = self.extract_dir_and_name(offset, event_len as u32) {
+            } else if let Some((parent, name)) = self.extract_dir_and_name(offset, event_len_u32) {
                 if name.is_empty() {
                     parent
                 } else {

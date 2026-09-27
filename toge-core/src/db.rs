@@ -37,13 +37,14 @@ impl<W: Write> Write for IndexWriter<W> {
         let start = self.bytes_written;
         let end = start + written as u64;
         if start < 12 {
-            self.checksum = fnv1a_extend(self.checksum, &buf[..(end.min(12) - start) as usize]);
+            // `end.min(12) - start` is bounded to 0..=12, so it always fits in a usize.
+            let split = usize::try_from(end.min(12) - start).unwrap_or(usize::MAX);
+            self.checksum = fnv1a_extend(self.checksum, &buf[..split]);
         }
         if end > 20 {
-            self.checksum = fnv1a_extend(
-                self.checksum,
-                &buf[(20u64.saturating_sub(start)) as usize..written],
-            );
+            // `20 - start` is bounded to 0..=20 here, so it always fits in a usize.
+            let skip = usize::try_from(20u64.saturating_sub(start)).unwrap_or(usize::MAX);
+            self.checksum = fnv1a_extend(self.checksum, &buf[skip..written]);
         }
         self.bytes_written = end;
         Ok(written)
@@ -99,14 +100,17 @@ impl Index {
         // Header placeholder.
         header.extend_from_slice(MAGIC);
         header.extend_from_slice(&VERSION.to_le_bytes());
-        let entry_count = self.entries.len() as u32;
+        let entry_count = u32::try_from(self.entries.len()).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "too many entries to serialize")
+        })?;
         header.extend_from_slice(&entry_count.to_le_bytes());
         header.extend_from_slice(&0u64.to_le_bytes()); // checksum placeholder
         header.extend_from_slice(&0u32.to_le_bytes()); // tier flags
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() as i64;
+            .as_secs()
+            .cast_signed();
         header.extend_from_slice(&timestamp.to_le_bytes());
         header.resize(64, 0); // pad header to 64 bytes
 
@@ -147,11 +151,16 @@ impl Index {
         // Section 3: by_ext map.
         let mut ext_entries: Vec<_> = self.by_ext.iter().collect();
         ext_entries.sort_by_key(|(k, _)| *k);
-        data.write_all(&(ext_entries.len() as u32).to_le_bytes())?;
+        let overflow_err =
+            || io::Error::new(io::ErrorKind::InvalidData, "section too large to serialize");
+        let ext_entries_count = u32::try_from(ext_entries.len()).map_err(|_| overflow_err())?;
+        data.write_all(&ext_entries_count.to_le_bytes())?;
         for (ext, ids) in ext_entries {
-            data.write_all(&(ext.len() as u32).to_le_bytes())?;
+            let ext_len = u32::try_from(ext.len()).map_err(|_| overflow_err())?;
+            data.write_all(&ext_len.to_le_bytes())?;
             data.write_all(ext.as_bytes())?;
-            data.write_all(&(ids.len() as u32).to_le_bytes())?;
+            let ids_count = u32::try_from(ids.len()).map_err(|_| overflow_err())?;
+            data.write_all(&ids_count.to_le_bytes())?;
             for id in ids {
                 data.write_all(&id.to_le_bytes())?;
             }
@@ -160,7 +169,10 @@ impl Index {
         let bytes_written = data.bytes_written;
         let checksum = data.checksum;
         data.flush()?;
-        let mut file = data.inner.into_inner().map_err(std::io::IntoInnerError::into_error)?;
+        let mut file = data
+            .inner
+            .into_inner()
+            .map_err(std::io::IntoInnerError::into_error)?;
         file.seek(SeekFrom::Start(12))?;
         file.write_all(&checksum.to_le_bytes())?;
         file.sync_all()?;
@@ -226,7 +238,7 @@ impl Index {
                 "truncated path section",
             ));
         }
-        let path_section_len = u64::from_le_bytes([
+        let path_section_len_u64 = u64::from_le_bytes([
             data[offset],
             data[offset + 1],
             data[offset + 2],
@@ -235,8 +247,13 @@ impl Index {
             data[offset + 5],
             data[offset + 6],
             data[offset + 7],
-        ]) as usize;
+        ]);
         offset += 8;
+        // Reject values that don't fit in a usize rather than silently truncating them on
+        // 32-bit targets, which could otherwise bypass the length check below.
+        let path_section_len = usize::try_from(path_section_len_u64).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "path section exceeds limit")
+        })?;
         if path_section_len > MAX_PATH_SECTION_LEN {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -443,6 +460,12 @@ impl Index {
         let mut path_to_id = HashMap::with_capacity(entry_count);
         for (id, entry) in entries.iter().enumerate() {
             let path_hash = fnv1a_64(entry.path.as_bytes());
+            // `id` is bounded by `entry_count`, which was checked above against
+            // `MAX_ENTRY_COUNT` (10,000,000), far below `u32::MAX`.
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "id < entry_count <= MAX_ENTRY_COUNT, which fits in u32"
+            )]
             path_to_id.insert(path_hash, id as u32);
         }
 
@@ -450,6 +473,12 @@ impl Index {
         let mut trigrams = HashMap::new();
         let mut prefix_first_byte = HashMap::new();
         for (id, entry) in entries.iter().enumerate() {
+            // `id` is bounded by `entry_count`, which was checked above against
+            // `MAX_ENTRY_COUNT` (10,000,000), far below `u32::MAX`.
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "id < entry_count <= MAX_ENTRY_COUNT, which fits in u32"
+            )]
             let id = id as u32;
             let name_lower = lowered_bytes(entry.name());
             for trigram in unique_trigrams(&name_lower) {

@@ -77,12 +77,10 @@ pub fn has_hidden_ancestor_dir(path: &Path) -> bool {
 pub fn is_hidden_dir_path(path: &Path, is_dir: bool) -> bool {
     has_hidden_ancestor_dir(path)
         || (is_dir
-            && path
-                .file_name()
-                .is_some_and(|n| {
-                    let name = n.as_encoded_bytes();
-                    name.len() > 1 && name.starts_with(b".")
-                }))
+            && path.file_name().is_some_and(|n| {
+                let name = n.as_encoded_bytes();
+                name.len() > 1 && name.starts_with(b".")
+            }))
 }
 
 /// Walk a directory tree and insert entries into the index.
@@ -243,9 +241,8 @@ fn visit(
             continue;
         }
 
-        let entries = match fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
         };
 
         for entry in entries.flatten() {
@@ -283,17 +280,17 @@ fn visit(
                     .as_ref()
                     .and_then(|m| m.modified().ok())
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_secs() as i64);
+                    .map_or(0, |d| d.as_secs().cast_signed());
                 let created = metadata
                     .as_ref()
                     .and_then(|m| m.created().ok())
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_secs() as i64);
+                    .map_or(0, |d| d.as_secs().cast_signed());
                 let accessed = metadata
                     .as_ref()
                     .and_then(|m| m.accessed().ok())
                     .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map_or(0, |d| d.as_secs() as i64);
+                    .map_or(0, |d| d.as_secs().cast_signed());
 
                 (size, modified, created, accessed)
             } else {

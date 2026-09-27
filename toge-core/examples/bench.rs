@@ -1,5 +1,9 @@
 //! Performance benchmarks for toge-core.
 //! Run with: cargo run --release --example bench
+#![allow(
+    clippy::cast_precision_loss,
+    reason = "counts/sizes are only formatted as approximate human-readable rates here"
+)]
 
 use std::fs;
 use std::time::{Duration, Instant};

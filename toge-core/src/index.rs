@@ -207,6 +207,19 @@ impl Index {
         Self::default()
     }
 
+    /// `entries.len()` as a `u32`, the width used for entry IDs throughout
+    /// the index. Entry IDs are handed out sequentially starting from 0, so
+    /// this would only truncate past 4 billion entries, which is far beyond
+    /// what this in-memory structure (or the on-disk format, capped at 10
+    /// million entries in `db::load`) is built to hold.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "entry ids stay well under u32::MAX in practice; see doc comment"
+    )]
+    fn entry_count_u32(&self) -> u32 {
+        self.entries.len() as u32
+    }
+
     /// Counter that changes whenever previously returned IDs may be stale.
     pub fn epoch(&self) -> u64 {
         self.epoch
@@ -268,15 +281,26 @@ impl Index {
             }
         }
 
-        let id = self.entries.len() as u32;
+        let id = self.entry_count_u32();
         self.revision += 1;
+        // `name_off`/`ext_off` are u16 byte offsets into `path`. Real filesystem paths
+        // stay far below u16::MAX (65535) bytes (PATH_MAX is a few thousand bytes at
+        // most on the platforms this crate targets), so this cast does not truncate
+        // in practice; it preserves the existing on-disk `Entry` layout.
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "path byte offsets stay well under u16::MAX in practice; see comment above"
+        )]
         let name_off = path.rfind('/').map_or(0, |i| i + 1) as u16;
         let name = &path[name_off as usize..];
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "path byte offsets stay well under u16::MAX in practice; see comment above"
+        )]
         let ext_off = if is_dir {
             0
         } else {
-            name.rfind('.')
-                .map_or(0, |i| name_off as usize + i + 1) as u16
+            name.rfind('.').map_or(0, |i| name_off as usize + i + 1) as u16
         };
 
         let entry = Entry {
@@ -333,7 +357,7 @@ impl Index {
             self.removals.drain(..REMOVAL_LOG_LIMIT / 2);
             self.removal_base += (REMOVAL_LOG_LIMIT / 2) as u64;
         }
-        self.removals.push((id, self.entries.len() as u32 - 1));
+        self.removals.push((id, self.entry_count_u32() - 1));
         self.epoch += 1;
         self.revision += 1;
 
@@ -370,7 +394,7 @@ impl Index {
             list.remove(pos);
         }
 
-        let old_last_id = self.entries.len() as u32 - 1;
+        let old_last_id = self.entry_count_u32() - 1;
         self.entries.swap_remove(id as usize);
 
         if id != old_last_id {
@@ -421,17 +445,17 @@ impl Index {
             if let Ok(t) = metadata.modified()
                 && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
             {
-                entry.modified = d.as_secs() as i64;
+                entry.modified = d.as_secs().cast_signed();
             }
             if let Ok(t) = metadata.created()
                 && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
             {
-                entry.created = d.as_secs() as i64;
+                entry.created = d.as_secs().cast_signed();
             }
             if let Ok(t) = metadata.accessed()
                 && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
             {
-                entry.accessed = d.as_secs() as i64;
+                entry.accessed = d.as_secs().cast_signed();
             }
         }
         true
@@ -452,14 +476,21 @@ impl Index {
                 })
                 .collect()
         } else if needle_bytes.is_empty() {
-            (0..self.entries.len() as u32).collect()
+            (0..self.entry_count_u32()).collect()
         } else {
-            self.entries
+            // `i` is bounded by `self.entries.len()`; see `entry_count_u32`.
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "i < entries.len(), which fits in u32; see entry_count_u32"
+            )]
+            let ids: Vec<u32> = self
+                .entries
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| contains_ignore_case(e.name(), needle_bytes))
                 .map(|(i, _)| i as u32)
-                .collect()
+                .collect();
+            ids
         }
     }
 
@@ -468,7 +499,7 @@ impl Index {
         let prefix_bytes = prefix_lower.as_bytes();
 
         if prefix_bytes.is_empty() {
-            return (0..self.entries.len() as u32).collect();
+            return (0..self.entry_count_u32()).collect();
         }
 
         if let Some(first_byte) = prefix_bytes.first()
@@ -529,7 +560,11 @@ impl Index {
                 .map(|e| e.path.capacity())
                 .sum::<usize>()
             + self.by_ext.capacity() * std::mem::size_of::<(String, Vec<u32>)>()
-            + self.by_ext.keys().map(std::string::String::capacity).sum::<usize>()
+            + self
+                .by_ext
+                .keys()
+                .map(std::string::String::capacity)
+                .sum::<usize>()
             + self.path_to_id.capacity() * std::mem::size_of::<(u64, u32)>()
             + self.trigrams.capacity() * std::mem::size_of::<(u32, Vec<u32>)>()
             + self.prefix_first_byte.capacity() * std::mem::size_of::<(u8, Vec<u32>)>()
@@ -549,6 +584,11 @@ impl Index {
         self.trigrams.clear();
         self.prefix_first_byte.clear();
         for (id, entry) in self.entries.iter().enumerate() {
+            // `id` is bounded by `self.entries.len()`; see `entry_count_u32`.
+            #[allow(
+                clippy::cast_possible_truncation,
+                reason = "id < entries.len(), which fits in u32; see entry_count_u32"
+            )]
             let id = id as u32;
             let path_hash = fnv1a_64(entry.path.as_bytes());
             self.path_to_id.insert(path_hash, id);

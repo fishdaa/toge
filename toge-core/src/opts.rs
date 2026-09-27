@@ -1,6 +1,11 @@
 //! CLI option parsing (mirrors ES syntax).
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each field mirrors a distinct Everything-compatible CLI flag; grouping them into \
+              flags would be a public API break for little benefit"
+)]
 pub struct NdlOptions {
     pub search: String,
     pub regex: Option<String>,

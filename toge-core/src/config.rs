@@ -4,6 +4,11 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each field mirrors a distinct, independently-set config file option; grouping them \
+              into flags would be a public API break for little benefit"
+)]
 pub struct Config {
     pub roots: Vec<PathBuf>,
     pub exclude_fstypes: Vec<String>,
@@ -149,7 +154,6 @@ impl Config {
                 "polling" if key == "interval_secs" => {
                     cfg.poll_interval_secs = value.parse().map_err(|_| "invalid interval")?;
                 }
-                "polling" => {}
                 "keyboard" => match key {
                     "new_window_hotkey" => {
                         cfg.keyboard.new_window_hotkey = parse_string(value)?;

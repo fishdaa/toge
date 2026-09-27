@@ -74,12 +74,19 @@ impl QueryMatcher {
 /// iterator cancels the scan. Metadata is read as stored in the index.
 pub fn iter_query<'a>(index: &'a Index, query: &Query) -> impl Iterator<Item = u32> + 'a {
     let matcher = QueryMatcher::new(query.clone());
-    index
+    // `id` is bounded by `index.entries.len()`, which the `Index` invariants
+    // keep well under `u32::MAX` (see `Index::entry_count_u32`).
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "id < index.entries.len(), which fits in u32; see Index::entry_count_u32"
+    )]
+    let ids = index
         .entries
         .iter()
         .enumerate()
         .filter(move |(_, entry)| matcher.matches(entry))
-        .map(|(id, _)| id as u32)
+        .map(|(id, _)| id as u32);
+    ids
 }
 
 /// Sorted (index-order) IDs that may match, taken from the extension and
@@ -121,6 +128,12 @@ pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
     // Seed directly from the trigram index so a selective filename query does
     // not first allocate an ID vector for every entry in the filesystem.
     // The full matcher below still enforces every query option.
+    // `index.count()` is bounded well under `u32::MAX` by the `Index` invariants
+    // (see `Index::entry_count_u32`), so the fallback range fits in u32.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "index.count() fits in u32; see Index::entry_count_u32"
+    )]
     let mut ids =
         candidate_ids(index, query).unwrap_or_else(|| (0..index.count() as u32).collect());
     let compiled = compile_terms(&query.terms, query.match_case);

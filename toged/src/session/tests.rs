@@ -6,7 +6,7 @@ use toge_core::ipc::session::SessionClient;
 fn daemon(paths: &[(&str, u64)]) -> DaemonState {
     let mut index = Index::new();
     for (path, size) in paths {
-        index.insert_with_metadata(path, false, *size, 1_700_000_000 + *size as i64, 1, 1);
+        index.insert_with_metadata(path, false, *size, 1_700_000_000 + size.cast_signed(), 1, 1);
     }
     DaemonState {
         index,
@@ -352,9 +352,9 @@ fn superseded_open_is_skipped_without_running_the_query() {
 
 #[test]
 fn progressive_open_previews_before_sort_and_keeps_exact_final_results() {
-    let paths: Vec<_> = (0..600)
+    let paths: Vec<_> = (0..600u64)
         .rev()
-        .map(|i| (format!("/r/{i:04}.txt"), i as u64))
+        .map(|i| (format!("/r/{i:04}.txt"), i))
         .collect();
     let refs: Vec<_> = paths
         .iter()

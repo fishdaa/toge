@@ -1,3 +1,7 @@
+#![allow(
+    clippy::cast_possible_truncation,
+    reason = "test fixtures use tiny, well-known entry counts that always fit in u32"
+)]
 use super::*;
 use crate::index::Index;
 

@@ -2,7 +2,7 @@
 //! the row ranges a client displays. See `toge_core::ipc::session`.
 
 use crate::{
-    DaemonState, discover_roots, index_created_path, index_excludes, is_ignored_path,
+    DaemonState, as_entry_id, discover_roots, index_created_path, index_excludes, is_ignored_path,
     is_within_roots, missing_query_dates, missing_sort_date, prepare_query_ids,
     remove_deleted_path, sort_params,
 };
@@ -129,7 +129,7 @@ impl Session {
         for position in 0..count {
             let id = candidates
                 .as_ref()
-                .map_or(position as u32, |ids| ids[position]);
+                .map_or(as_entry_id(position), |ids| ids[position]);
             if dates && missing_query_dates(&st.index.entries[id as usize], &query) {
                 st.index.update_metadata_by_id(id);
             }

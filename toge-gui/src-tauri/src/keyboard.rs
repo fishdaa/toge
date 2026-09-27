@@ -221,9 +221,7 @@ pub fn normalize_accelerator(value: &str) -> Result<String, String> {
             }
             _ => {
                 if key.is_some() {
-                    return Err(format!(
-                        "accelerator must contain exactly one key: {value}"
-                    ));
+                    return Err(format!("accelerator must contain exactly one key: {value}"));
                 }
                 key = Some(normalize_key(part)?);
             }
@@ -232,7 +230,9 @@ pub fn normalize_accelerator(value: &str) -> Result<String, String> {
 
     // A modifier may itself be the primary key for an in-window command. Treat
     // the last modifier as the key, matching the order produced by keydown.
-    let key = if let Some(key) = key { key } else {
+    let key = if let Some(key) = key {
+        key
+    } else {
         let primary = modifiers
             .pop()
             .ok_or_else(|| format!("accelerator is missing a key: {value}"))?;

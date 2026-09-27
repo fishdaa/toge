@@ -1,3 +1,7 @@
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "approximate human-readable size formatting; precision loss only matters above 2^52 bytes"
+)]
 pub fn format_size(size: u64) -> String {
     if size < 1024 {
         return format!("{size} B");

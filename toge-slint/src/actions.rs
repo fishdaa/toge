@@ -78,6 +78,16 @@ fn write_clipboard(contents: Vec<ClipboardContent>) -> io::Result<()> {
         .map_err(io::Error::other)
 }
 
+unsafe extern "C" {
+    fn renameat2(
+        oldfd: i32,
+        old: *const std::ffi::c_char,
+        newfd: i32,
+        new: *const std::ffi::c_char,
+        flags: u32,
+    ) -> i32;
+}
+
 pub fn rename(path: &Path, name: &str) -> io::Result<PathBuf> {
     if name.is_empty() || name == "." || name == ".." || name.contains('/') || name.contains('\0') {
         return Err(io::Error::new(
@@ -95,15 +105,6 @@ pub fn rename(path: &Path, name: &str) -> io::Result<PathBuf> {
     }
     let old = CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
     let new = CString::new(target.as_os_str().as_bytes()).map_err(io::Error::other)?;
-    unsafe extern "C" {
-        fn renameat2(
-            oldfd: i32,
-            old: *const std::ffi::c_char,
-            newfd: i32,
-            new: *const std::ffi::c_char,
-            flags: u32,
-        ) -> i32;
-    }
     // RENAME_NOREPLACE prevents overwriting a destination, including a dangling
     // symlink, atomically rather than relying on a racy existence check.
     let result = unsafe { renameat2(-100, old.as_ptr(), -100, new.as_ptr(), 1) };
@@ -199,7 +200,8 @@ pub fn place_rename(ui: &crate::AppWindow, position: Option<i32>) {
 
 /// Snapshot the selected indices; paths can be resolved by the session worker.
 fn selected_range(ui: &crate::AppWindow) -> Option<(usize, usize)> {
-    let last = crate::worker::results(ui).total() as i32 - 1;
+    let total = i32::try_from(crate::worker::results(ui).total()).unwrap_or(i32::MAX);
+    let last = total - 1;
     let current = ui.get_selected().min(last);
     let anchor = ui.get_selection_anchor().min(last);
     if current < 0 {
@@ -210,7 +212,11 @@ fn selected_range(ui: &crate::AppWindow) -> Option<(usize, usize)> {
     } else {
         (current, current)
     };
-    Some((start as usize, (end - start + 1) as usize))
+    // `start`/`end` are non-negative here: `current >= 0` was checked above, and
+    // `anchor` is only used when `>= 0`.
+    let start = usize::try_from(start).unwrap_or(0);
+    let end = usize::try_from(end).unwrap_or(start);
+    Some((start, end - start + 1))
 }
 
 fn item_count(count: usize) -> String {
@@ -298,7 +304,8 @@ fn delete_summary(paths: &[PathBuf]) -> String {
     const SHOWN: usize = 5;
     let mut summary = joined_paths(&paths[..paths.len().min(SHOWN)]);
     if paths.len() > SHOWN {
-        summary.push_str(&format!("\n…and {} more", paths.len() - SHOWN));
+        use std::fmt::Write;
+        let _ = write!(summary, "\n…and {} more", paths.len() - SHOWN);
     }
     summary
 }
@@ -368,10 +375,10 @@ pub fn connect(ui: &crate::AppWindow) {
     let pending = pending_deletes.clone();
     let to_delete = confirming.clone();
     ui.on_resolved_action(move |action, paths| {
+        use slint::Model;
         let Some(ui) = weak.upgrade() else {
             return;
         };
-        use slint::Model;
         let paths = paths
             .iter()
             .map(|path| PathBuf::from(path.as_str()))
@@ -402,7 +409,7 @@ pub fn connect(ui: &crate::AppWindow) {
             ui.invoke_begin_rename(
                 ui.get_selected(),
                 name.to_string().into(),
-                selection_end as i32,
+                i32::try_from(selection_end).unwrap_or(i32::MAX),
             );
             return;
         }
@@ -411,7 +418,11 @@ pub fn connect(ui: &crate::AppWindow) {
         };
         let results = crate::worker::results(&ui);
         let paths: Option<Vec<_>> = (offset..offset + len)
-            .map(|index| results.path(index as i32).map(PathBuf::from))
+            .map(|index| {
+                results
+                    .path(i32::try_from(index).unwrap_or(i32::MAX))
+                    .map(PathBuf::from)
+            })
             .collect();
         if let Some(paths) = paths {
             perform_action(&ui, action, paths, &pending_deletes, &confirming);
@@ -461,7 +472,7 @@ fn perform_action(
         ui.invoke_confirm_delete(
             delete_summary(&paths).into(),
             name.into(),
-            paths.len() as i32,
+            i32::try_from(paths.len()).unwrap_or(i32::MAX),
         );
         *confirming.borrow_mut() = paths;
         return;

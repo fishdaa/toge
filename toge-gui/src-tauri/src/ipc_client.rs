@@ -16,10 +16,14 @@ pub fn socket_path() -> PathBuf {
 }
 
 fn default_state_dir() -> PathBuf {
-    env::var_os("XDG_STATE_HOME").map_or_else(|| {
-            let home = env::var_os("HOME").expect("HOME not set");
-            PathBuf::from(home).join(".local/state")
-        }, PathBuf::from)
+    env::var_os("XDG_STATE_HOME")
+        .map_or_else(
+            || {
+                let home = env::var_os("HOME").expect("HOME not set");
+                PathBuf::from(home).join(".local/state")
+            },
+            PathBuf::from,
+        )
         .join("toge")
 }
 
@@ -117,7 +121,7 @@ fn send_request(stream: &mut UnixStream, req: &Request) -> io::Result<()> {
 fn read_response(stream: &mut UnixStream) -> io::Result<Response> {
     let mut len_buf = [0u8; 8];
     stream.read_exact(&mut len_buf)?;
-    let len = u64::from_le_bytes(len_buf) as usize;
+    let len = usize::try_from(u64::from_le_bytes(len_buf)).unwrap_or(usize::MAX);
     if len > MAX_IPC_MESSAGE_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,

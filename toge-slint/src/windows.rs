@@ -170,18 +170,19 @@ pub fn shutdown() {
 }
 
 pub fn show_about() {
-    let about = match APP.with_borrow(|app| app.about.as_ref().map(slint::ComponentHandle::clone_strong)) {
-        Some(ui) => ui,
-        None => match AboutWindow::new() {
-            Ok(ui) => {
-                APP.with_borrow_mut(|app| app.about = Some(ui.clone_strong()));
-                ui
-            }
-            Err(error) => {
-                eprintln!("Could not open About: {error}");
-                return;
-            }
-        },
-    };
+    let about =
+        match APP.with_borrow(|app| app.about.as_ref().map(slint::ComponentHandle::clone_strong)) {
+            Some(ui) => ui,
+            None => match AboutWindow::new() {
+                Ok(ui) => {
+                    APP.with_borrow_mut(|app| app.about = Some(ui.clone_strong()));
+                    ui
+                }
+                Err(error) => {
+                    eprintln!("Could not open About: {error}");
+                    return;
+                }
+            },
+        };
     let _ = about.show();
 }

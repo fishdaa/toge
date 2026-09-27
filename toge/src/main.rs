@@ -40,10 +40,14 @@ fn version() {
 }
 
 fn default_state_dir() -> PathBuf {
-    env::var_os("XDG_STATE_HOME").map_or_else(|| {
-            let home = env::var_os("HOME").expect("HOME not set");
-            PathBuf::from(home).join(".local/state")
-        }, PathBuf::from)
+    env::var_os("XDG_STATE_HOME")
+        .map_or_else(
+            || {
+                let home = env::var_os("HOME").expect("HOME not set");
+                PathBuf::from(home).join(".local/state")
+            },
+            PathBuf::from,
+        )
         .join("toge")
 }
 
@@ -76,9 +80,8 @@ fn ensure_daemon_running(sock: &Path) -> io::Result<()> {
 fn wait_for_ready(sock: &Path, timeout: Duration) -> io::Result<()> {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        match send_simple(sock, Request::Status) {
+        match send_simple(sock, &Request::Status) {
             Ok(Response::Status(status)) if status.status == DaemonStatus::Ready => return Ok(()),
-            Ok(Response::Status(_)) => {}
             Ok(Response::Error(e)) => return Err(io::Error::other(e)),
             Ok(_) => {}
             Err(e)
@@ -117,7 +120,7 @@ fn read_response(stream: &mut UnixStream) -> io::Result<Response> {
 fn read_response_from<R: Read>(reader: &mut R) -> io::Result<Response> {
     let mut len_buf = [0u8; 8];
     reader.read_exact(&mut len_buf)?;
-    let len = u64::from_le_bytes(len_buf) as usize;
+    let len = usize::try_from(u64::from_le_bytes(len_buf)).unwrap_or(usize::MAX);
     if len > MAX_IPC_MESSAGE_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -130,7 +133,7 @@ fn read_response_from<R: Read>(reader: &mut R) -> io::Result<Response> {
 }
 
 fn daemon_responding(sock: &Path) -> bool {
-    matches!(send_simple(sock, Request::Status), Ok(Response::Status(_)))
+    matches!(send_simple(sock, &Request::Status), Ok(Response::Status(_)))
 }
 
 fn daemon_command(sock: &Path) -> Command {
@@ -235,7 +238,7 @@ fn run_streamed_query<W: Write>(
         } else {
             writeln!(output, "{}", summary.total_size)?;
         }
-    } else if !header_written && !(opts.hide_empty || opts.no_result_error) {
+    } else if !header_written && !opts.hide_empty && !opts.no_result_error {
         output.write_all(render_results(&[], opts.format, false).as_bytes())?;
     }
     output.flush()?;
@@ -281,9 +284,9 @@ fn render_table(
     output
 }
 
-fn send_simple(sock: &Path, req: Request) -> io::Result<Response> {
+fn send_simple(sock: &Path, req: &Request) -> io::Result<Response> {
     let mut stream = connect(sock)?;
-    send_request(&mut stream, &req)?;
+    send_request(&mut stream, req)?;
     read_response(&mut stream)
 }
 
@@ -318,7 +321,7 @@ fn main() {
     }
 
     if opts.status {
-        match send_simple(&sock, Request::Status) {
+        match send_simple(&sock, &Request::Status) {
             Ok(Response::Status(s)) => {
                 println!(
                     "Index: {} files | status: {:?} | {} | watcher healthy: {} | watched dirs: {} | watch failures: {} | overflows: {} | build time: {} ms",
@@ -347,7 +350,7 @@ fn main() {
     }
 
     if opts.save_db {
-        match send_simple(&sock, Request::Flush) {
+        match send_simple(&sock, &Request::Flush) {
             Ok(Response::Ok) => {}
             Ok(Response::Error(e)) => {
                 eprintln!("error: {e}");
@@ -362,7 +365,7 @@ fn main() {
     }
 
     if opts.reindex {
-        match send_simple(&sock, Request::Reindex) {
+        match send_simple(&sock, &Request::Reindex) {
             Ok(Response::Ok) => {}
             Ok(Response::Error(e)) => {
                 eprintln!("error: {e}");
