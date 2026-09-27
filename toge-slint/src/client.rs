@@ -150,12 +150,15 @@ pub fn open_session(
     sock: &Path,
     open: SessionOpen,
     register: impl FnOnce(&UnixStream) -> io::Result<()>,
+    preview: impl FnMut(Vec<toge_core::ipc::session::SessionRow>) -> io::Result<()>,
 ) -> io::Result<SessionClient<UnixStream>> {
     let connection = connect(sock, QUERY_TIMEOUT)?;
     register(&connection)?;
-    SessionClient::open(connection, open).map_err(|error| {
+    SessionClient::open_with_preview(connection, open, preview).map_err(|error| {
         if error.to_string() == "unknown request type" {
-            io::Error::other("Daemon does not support result sessions. Restart or rebuild toged.")
+            io::Error::other(
+                "Daemon does not support progressive result sessions. Restart or rebuild toged.",
+            )
         } else {
             response_error(error)
         }
@@ -232,7 +235,7 @@ mod tests {
                 let bytes = read_frame(&mut stream, 1 << 20).unwrap().unwrap();
                 assert_eq!(
                     Request::decode(&bytes).unwrap(),
-                    Request::OpenSession(SessionOpen {
+                    Request::OpenSessionPreview(SessionOpen {
                         raw: ".mkv".into(),
                         sort: Some((toge_core::sort::SortKey::Size, false)),
                     })
@@ -266,6 +269,7 @@ mod tests {
                     registered = true;
                     Ok(())
                 },
+                |_| Ok(()),
             );
             assert!(registered);
             match scenario {
@@ -303,6 +307,7 @@ mod tests {
                 sort: None,
             },
             |_| Err(io::Error::other("superseded")),
+            |_| Ok(()),
         );
         assert_eq!(result.err().unwrap().to_string(), "superseded");
         server.join().unwrap();

@@ -1,8 +1,9 @@
 use crate::{
-    DaemonState, WatcherStatus, apply_highlight_ranges, canonical_starts_with, discover_roots,
-    ensure_private_dir, handle_query, handle_request, highlight_path, index_created_path,
-    is_ignored_path, is_own_path, is_within_roots, mark_watcher_unavailable, read_request,
-    remove_deleted_path, status_response, stream_results, term_needles, write_stream_event,
+    DaemonState, IndexChange, WatchScope, WatcherStatus, apply_highlight_ranges,
+    canonical_starts_with, discover_roots, ensure_private_dir, handle_query, handle_request,
+    highlight_path, index_created_path, is_ignored_path, is_own_path, is_within_roots,
+    mark_watcher_unavailable, read_request, remove_deleted_path, resolve_events, status_response,
+    stream_results, term_needles, write_stream_event,
 };
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
@@ -41,6 +42,7 @@ fn moved_in_directory_is_indexed_recursively() {
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
         orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
     };
     index_created_path(
         &mut state,
@@ -83,6 +85,7 @@ fn watcher_runtime_failure_marks_daemon_ready_but_degraded() {
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
         orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
     }));
 
     mark_watcher_unavailable(&state, "permission denied");
@@ -138,6 +141,7 @@ fn query_before_ready_returns_not_ready_error() {
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
         orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
     }));
 
     let resp = handle_request(
@@ -202,6 +206,7 @@ fn status_response_uses_the_last_real_index_update_time() {
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
         orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
     };
 
     assert_eq!(status_response(&state).last_updated_unix, 1_700_000_000);
@@ -563,4 +568,71 @@ fn disconnected_stream_and_expired_write_stop_promptly() {
             .kind(),
         io::ErrorKind::TimedOut
     );
+}
+
+struct NullWatcher;
+impl toge_core::sys::FsWatcher for NullWatcher {
+    fn watch(&mut self, _: &std::path::Path) -> io::Result<()> {
+        Ok(())
+    }
+    fn unwatch(&mut self, _: &std::path::Path) -> io::Result<()> {
+        Ok(())
+    }
+    fn poll_events(&mut self) -> io::Result<Vec<toge_core::sys::WatchEvent>> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn watcher_drops_events_in_excluded_folders_before_locking() {
+    use toge_core::sys::WatchEvent;
+    let root = visible_tempdir();
+    let roots = [root.path().to_path_buf()];
+    let excludes = toge_core::walker::Excludes {
+        folders: vec!["target".into()],
+        ..Default::default()
+    };
+    let other = visible_tempdir();
+    let scope = WatchScope::new(&roots, excludes, other.path(), other.path());
+    let at = |name: &str| root.path().join(name).to_str().unwrap().to_string();
+    let changes = resolve_events(
+        vec![
+            WatchEvent::Create {
+                path: at("target/debug/a.o"),
+                is_dir: false,
+            },
+            WatchEvent::Delete {
+                path: at("target/debug/a.o"),
+            },
+            WatchEvent::Create {
+                path: at("src/main.rs"),
+                is_dir: false,
+            },
+            WatchEvent::Move {
+                from: at("src/lib.rs"),
+                to: at("target/lib.rs"),
+            },
+        ],
+        &scope,
+        &mut NullWatcher,
+    );
+    assert!(matches!(
+        changes.as_slice(),
+        [IndexChange::Create { path, .. }, IndexChange::Delete { path: moved }]
+            if *path == at("src/main.rs") && *moved == at("src/lib.rs")
+    ));
+}
+
+#[test]
+fn deleting_a_file_leaves_entries_sharing_its_prefix() {
+    let mut index = Index::new();
+    index.insert("/data/report", false);
+    index.insert("/data/report.bak", false);
+    index.insert("/data/reports/q1.txt", false);
+
+    remove_deleted_path(&mut index, "/data/report");
+
+    assert!(index.id_by_path("/data/report").is_none());
+    assert!(index.id_by_path("/data/report.bak").is_some());
+    assert!(index.id_by_path("/data/reports/q1.txt").is_some());
 }

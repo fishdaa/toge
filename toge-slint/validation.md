@@ -191,3 +191,71 @@ the first keystroke. Remaining time for broad queries is the matcher's scan.
 Cached orders produce exactly the same order as `sort_ids`, which the tests
 check across result sizes, both directions, ties, and merged insertions. The
 native visual run passed all 17 assertions again.
+
+## Progressive session previews — 2026-09-27
+
+Session opening previously waited for every matching ID and its final sort before
+any rows could be shown. The Slint client now opts into `OpenSessionPreview`.
+During the matching pass, the daemon sends the first match and growing previews
+(up to 256 rows), then opens the normal sorted, paged session. Previews use index
+order and cached metadata; the footer stays `Searching… (preview)` until the
+final state arrives. Exact totals and final ordering still require completion.
+Legacy `OpenSession` connections retain their original response sequence.
+
+- Automated suites passed: 169 core, 27 Slint, 37 daemon, two workspace smoke
+  checks and four daemon lifecycle tests. New tests prove preview consumption
+  precedes completion, bounded storage, selection retention, cancellation, and
+  real daemon preview frames followed by sorted page fetching. Strict Clippy,
+  formatting and diff whitespace checks passed.
+- Native Winit/Skia verification used the shared `ui/main.slint` and the actual
+  client, model, worker and preferences modules against a controlled session
+  fixture. It exercised keyboard search, visible rows while busy, final results,
+  focus and selection, wheel scrolling and End to row 4,095, cancellation by a
+  replacement query, empty results, errors and recovery. All assertions passed.
+- Captured native window frames were inspected for clipping, visible selection,
+  focus, scroll position, loading status and errors. The recording is available
+  only on the tailnet at
+  [search-preview.mp4](https://fedora.taila85941.ts.net:8916/search-preview.mp4).
+  Fixture sources, frames and logs are outside version control under
+  `/tmp/toge-preview-visual/`. Input was injected as Slint WindowEvents and daemon
+  timing was controlled; this is not a production filesystem latency benchmark.
+  Frames were captured at a nominal 10 Hz and encoded at 10 fps.
+
+Both GUI and daemon must be rebuilt/restarted to enable the new request. An old
+daemon displays an instruction to restart or rebuild `toged`.
+
+## Daemon rebuild cost and blank handoff — 2026-09-27
+
+The preview alone did not fix the multi-second daemon rebuild. Date sorting was
+re-reading filesystem metadata for every match while holding the shared index
+lock. Query opening, re-sorting and live rebuilding now use timestamps maintained
+by indexing, reconciliation and watcher events, and hydrate only missing date
+fields. Metadata-only watcher changes now bump the index revision so live date
+and size orders refresh correctly.
+
+The GUI also keeps its existing rows until the sorted first page arrives. Initial
+opening and sorted/live rebuilds publish their first page together with the final
+model state, preventing a temporary table of empty placeholders at the handoff.
+
+- All automated suites passed: 170 core, 27 Slint, 38 daemon, two workspace smoke
+  checks and four lifecycle tests. Strict Clippy passed. The timestamp regression
+  covers cached date sorting, progressive opening and reordering after a
+  metadata-only watcher update.
+- Release-mode isolated Modified-sort comparison (median of three full queries):
+  35,072 entries from the existing fixture snapshot took 65.8 ms before versus
+  0.477 ms after. A synthetic scale test repeating those snapshot entries to
+  2,000,000 entries took 4.025 s before versus 92.3 ms after. The scaled test
+  uses repeated paths and warm filesystem metadata, not the production index.
+  Sources and measurements are under `/tmp/toge-daemon-benchmark/`.
+- The native shared Slint UI, real client and worker passed a recording with
+  deliberate 1.5-second first-page delays and 500 ms live-refresh page delays.
+  Assertions verify visible preview rows throughout the delayed handoff and no
+  empty first page after final publication or live refresh. Keyboard/focus,
+  scrolling to the last row, cancellation, empty results, errors and recovery
+  also passed. Captured frames were inspected for clipping, focus, scroll
+  position, loading status and final visible rows.
+- Tailnet-only recording:
+  [search-handoff.mp4](https://fedora.taila85941.ts.net:8916/search-handoff.mp4).
+  Artifacts are in `/tmp/toge-preview-visual/`. This uses injected Slint
+  WindowEvents and controlled daemon timing; production watcher throughput and
+  absence of fanotify overflow have not been measured in this fixture.

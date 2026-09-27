@@ -112,3 +112,80 @@ fn cached_orders_merge_insertions_without_a_rebuild() {
     }
     assert!(format!("{cache:?}").contains(&format!("epoch: {}", idx.epoch())));
 }
+
+#[test]
+fn cached_orders_replay_removals_and_renumbered_ties() {
+    let mut idx = Index::new();
+    let names = ["dup", "a", "dup", "z", "m", "dup", "b"];
+    for i in 0..40 {
+        idx.insert(&format!("/{i}/{}", names[i % names.len()]), false);
+    }
+    let mut cache = OrderCache::default();
+    let check = |idx: &Index, cache: &mut OrderCache| {
+        for key in [SortKey::Name, SortKey::Path] {
+            for ascending in [true, false] {
+                let all: Vec<u32> = (0..idx.count() as u32).collect();
+                let mut expected = all.clone();
+                sort_ids(idx, &mut expected, key, ascending);
+                let mut actual = all;
+                cache.sort(idx, &mut actual, key, ascending);
+                assert_eq!(actual, expected, "{key:?} {ascending}");
+            }
+        }
+    };
+    check(&idx, &mut cache);
+    // Deterministic mix: removals move the last ID into low slots (including
+    // entries appended after the cache was built), interleaved with inserts.
+    let mut seed = 7u32;
+    for step in 0..60 {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let id = (seed >> 8) % idx.count() as u32;
+        let path = idx.get_path(id).unwrap().to_string();
+        idx.remove(&path);
+        if step % 3 == 0 {
+            idx.insert(&format!("/new{step}/{}", names[step % names.len()]), false);
+        }
+        if step % 4 == 0 {
+            check(&idx, &mut cache);
+        }
+    }
+    assert!(idx.removals_since(0).is_some());
+    check(&idx, &mut cache);
+
+    // A replaced index cannot be replayed; the cache rebuilds.
+    let mut replacement = Index::new();
+    replacement.insert("/only/one", false);
+    replacement.succeed(&idx);
+    assert!(replacement.removals_since(idx.epoch()).is_none());
+    check(&replacement, &mut cache);
+}
+
+#[test]
+fn small_match_sets_skip_a_stale_cache_but_sort_identically() {
+    let mut idx = Index::new();
+    for i in 0..128 {
+        idx.insert(&format!("/d/{}.txt", 127 - i), false);
+    }
+    let mut cache = OrderCache::default();
+    let mut all: Vec<u32> = (0..idx.count() as u32).collect();
+    cache.sort(&idx, &mut all, SortKey::Name, true);
+    let built_at = cache.name.as_ref().unwrap().epoch;
+
+    idx.remove("/d/5.txt");
+    for ascending in [true, false] {
+        let mut small: Vec<u32> = vec![3, 40, 90];
+        let mut expected = small.clone();
+        sort_ids(&idx, &mut expected, SortKey::Name, ascending);
+        cache.sort(&idx, &mut small, SortKey::Name, ascending);
+        assert_eq!(small, expected);
+    }
+    assert_eq!(cache.name.as_ref().unwrap().epoch, built_at);
+
+    // A large set still brings the cache up to date.
+    let mut all: Vec<u32> = (0..idx.count() as u32).collect();
+    let mut expected = all.clone();
+    sort_ids(&idx, &mut expected, SortKey::Name, true);
+    cache.sort(&idx, &mut all, SortKey::Name, true);
+    assert_eq!(all, expected);
+    assert_eq!(cache.name.as_ref().unwrap().epoch, idx.epoch());
+}

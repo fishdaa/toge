@@ -215,8 +215,12 @@ enum Reply {
         focus: Focus,
         position: Option<usize>,
     },
-    Rebuilt,
-    Synced,
+    Rebuilt {
+        rows: Vec<toge_core::ipc::session::SessionRow>,
+    },
+    Synced {
+        rows: Option<Vec<toge_core::ipc::session::SessionRow>>,
+    },
 }
 
 fn run_session(
@@ -237,12 +241,32 @@ fn run_session(
                 sort: sort_key(sort),
             },
             |socket| mailbox.register(q.id, socket),
+            |rows| {
+                if !mailbox.current(q.id) {
+                    return Err(std::io::Error::other("superseded"));
+                }
+                let (m, id) = (mailbox.clone(), q.id);
+                ui.upgrade_in_event_loop(move |ui| {
+                    if m.current(id) {
+                        results(&ui).set_size_indexed(size_indexed);
+                        if results(&ui).preview(rows, ui.get_selected()) {
+                            ui.invoke_select_row(-1);
+                        }
+                        ui.set_busy(true);
+                        ui.set_status("Searching… (preview)".into());
+                    }
+                })
+                .map_err(|error| std::io::Error::other(error.to_string()))
+            },
         )?;
+        // Keep the preview until the sorted first page is ready. Opening only
+        // supplies IDs/totals; fetching may rebuild after an index mutation.
+        let rows = first_page(&mut session)?;
         let (commands, inbox) = channel();
         let (m, id, state) = (mailbox.clone(), q.id, session.state());
         ui.upgrade_in_event_loop(move |ui| {
             if m.current(id) {
-                opened(&ui, &m, commands, state, sort, size_indexed);
+                opened(&ui, &m, commands, state, rows, sort, size_indexed);
             }
         })
         .map_err(|error| std::io::Error::other(error.to_string()))?;
@@ -259,6 +283,18 @@ fn run_session(
                 ui.set_status(format!("{error} — Retry to reconnect").into());
             }
         });
+    }
+}
+
+fn first_page(
+    session: &mut toge_core::ipc::session::SessionClient<std::os::unix::net::UnixStream>,
+) -> std::io::Result<Vec<toge_core::ipc::session::SessionRow>> {
+    match session.request(&SessionRequest::Fetch {
+        offset: 0,
+        len: PAGE,
+    })? {
+        SessionResponse::Rows { rows, .. } => Ok(rows),
+        _ => Err(std::io::Error::other("unexpected first page response")),
     }
 }
 
@@ -280,8 +316,14 @@ fn serve_commands(
             Err(RecvTimeoutError::Disconnected) => return Ok(()),
         };
         let Some(first) = first else {
+            let before = session.state();
             session.request(&SessionRequest::Sync)?;
-            post(mailbox, ui, q.id, session.state(), Reply::Synced)?;
+            let rows = if session.state() != before {
+                Some(first_page(session)?)
+            } else {
+                None
+            };
+            post(mailbox, ui, q.id, session.state(), Reply::Synced { rows })?;
             continue;
         };
         let backlog = std::iter::once(first).chain(inbox.try_iter()).collect();
@@ -309,14 +351,16 @@ fn serve_commands(
                     session.request(&SessionRequest::Resort {
                         sort: sort_key(sort),
                     })?;
-                    post(mailbox, ui, q.id, session.state(), Reply::Rebuilt)?;
+                    let rows = first_page(session)?;
+                    post(mailbox, ui, q.id, session.state(), Reply::Rebuilt { rows })?;
                 }
                 Command::Locate { path, focus } => {
                     locate(session, mailbox, ui, q.id, path, focus)?;
                 }
                 Command::Reconcile { paths, select } => {
                     session.request(&SessionRequest::Reconcile { paths })?;
-                    post(mailbox, ui, q.id, session.state(), Reply::Rebuilt)?;
+                    let rows = first_page(session)?;
+                    post(mailbox, ui, q.id, session.state(), Reply::Rebuilt { rows })?;
                     match select {
                         Some(path) => locate(session, mailbox, ui, q.id, path, Focus::Scroll)?,
                         None => post(
@@ -397,13 +441,17 @@ fn opened(
     mailbox: &Mailbox,
     commands: std::sync::mpsc::Sender<Command>,
     state: SessionState,
+    rows: Vec<toge_core::ipc::session::SessionRow>,
     sort: Option<(i32, bool)>,
     size_indexed: bool,
 ) {
     let results = results(ui);
-    let previous = results.path(ui.get_selected());
+    let previous = results
+        .take_preview_selection()
+        .or_else(|| results.path(ui.get_selected()));
     results.set_size_indexed(size_indexed);
     results.attach(commands, state);
+    results.fill(state.generation, 0, rows);
     // A header click while the session was opening was sent to the old session.
     if mailbox.sort() != sort {
         results.send(Command::Resort(mailbox.sort()));
@@ -441,7 +489,7 @@ fn apply(ui: &crate::AppWindow, state: SessionState, reply: Reply) {
         // Live refreshes keep the selected file selected wherever it moved.
         // Explicit rebuilds (sort, rename, delete) set the selection themselves
         // and keep the action's status message.
-        if !matches!(reply, Reply::Rebuilt) {
+        if !matches!(reply, Reply::Rebuilt { .. }) {
             ui.set_status(status_text(state.total_count).into());
             if let Some(path) = selected {
                 results.send(Command::Locate {
@@ -469,11 +517,13 @@ fn apply(ui: &crate::AppWindow, state: SessionState, reply: Reply) {
                 Focus::Rename => crate::actions::place_rename(ui, position),
             }
         }
-        Reply::Rebuilt | Reply::Synced => {
+        Reply::Rebuilt { rows } | Reply::Synced { rows: Some(rows) } => {
+            results.fill(state.generation, 0, rows);
             if ui.get_selected() >= total {
                 ui.set_selected(total - 1);
             }
         }
+        Reply::Synced { rows: None } => {}
     }
     ui.set_has_error(false);
 }

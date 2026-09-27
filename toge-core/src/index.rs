@@ -192,7 +192,15 @@ pub struct Index {
     pub(crate) epoch: u64,
     /// Bumped whenever the set of entries changes.
     pub(crate) revision: u64,
+    /// Recent removals as `(removed_id, moved_from_id)`: record `i` moved the
+    /// index from epoch `removal_base + i` to the next. Lets ID-keyed caches
+    /// renumber in place instead of rebuilding.
+    pub(crate) removals: Vec<(u32, u32)>,
+    pub(crate) removal_base: u64,
 }
+
+/// Removal records kept for [`Index::removals_since`]; older caches rebuild.
+const REMOVAL_LOG_LIMIT: usize = 1 << 16;
 
 impl Index {
     pub fn new() -> Self {
@@ -214,6 +222,17 @@ impl Index {
     pub fn succeed(&mut self, previous: &Index) {
         self.epoch = previous.epoch.max(self.epoch) + 1;
         self.revision = previous.revision.max(self.revision) + 1;
+        self.removals.clear();
+        self.removal_base = self.epoch;
+    }
+
+    /// The removals that took this index from `epoch` to the current one, as
+    /// `(removed_id, moved_from_id)` in order, or `None` if they are no longer
+    /// known (the index was replaced, or too much has changed since).
+    pub fn removals_since(&self, epoch: u64) -> Option<&[(u32, u32)]> {
+        let start = epoch.checked_sub(self.removal_base)?;
+        let start = usize::try_from(start).ok()?;
+        self.removals.get(start..)
     }
 
     pub fn insert(&mut self, path: &str, is_dir: bool) -> u32 {
@@ -233,6 +252,11 @@ impl Index {
         if let Some(&id) = self.path_to_id.get(&path_hash) {
             let entry = &mut self.entries[id as usize];
             if entry.path == path && entry.is_dir == is_dir {
+                if (entry.size, entry.modified, entry.created, entry.accessed)
+                    != (size, modified, created, accessed)
+                {
+                    self.revision += 1;
+                }
                 entry.size = size;
                 entry.modified = modified;
                 entry.created = created;
@@ -302,6 +326,15 @@ impl Index {
         }
 
         self.path_to_id.remove(&path_hash);
+        if self.removal_base + self.removals.len() as u64 != self.epoch {
+            self.removals.clear();
+            self.removal_base = self.epoch;
+        }
+        if self.removals.len() >= REMOVAL_LOG_LIMIT {
+            self.removals.drain(..REMOVAL_LOG_LIMIT / 2);
+            self.removal_base += (REMOVAL_LOG_LIMIT / 2) as u64;
+        }
+        self.removals.push((id, self.entries.len() as u32 - 1));
         self.epoch += 1;
         self.revision += 1;
 

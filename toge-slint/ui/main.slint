@@ -79,6 +79,7 @@ export component AppWindow inherits Window {
     in property <bool> busy: true;
     in property <bool> has-error: false;
     in-out property <int> selected: -1;
+    in-out property <int> hovered-row: -1;
     in-out property <bool> context-menu-open: false;
     in-out property <length> context-menu-x: 0px;
     in-out property <length> context-menu-y: 0px;
@@ -256,6 +257,7 @@ export component AppWindow inherits Window {
                     sort-ascending(column) => { root.sort-results(column, true); }
                     sort-descending(column) => { root.sort-results(column, false); }
                     row-pointer-event(index, event, position) => {
+                        if (event.kind == PointerEventKind.move) { root.hovered-row = index; }
                         if (event.kind == PointerEventKind.down) { root.cancel-rename(false); }
                         if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
                             root.selected = index;
@@ -271,6 +273,19 @@ export component AppWindow inherits Window {
                             table.focus();
                             root.selected = index; root.row-clicked(index);
                         }
+                    }
+                }
+                // Give the pointer row a clear tint over the table's subtle built-in hover fill.
+                if root.hovered-row >= 0 && root.hovered-row < root.rows.length && root.hovered-row != root.selected: Rectangle {
+                    x: 0px; y: table.height - table.visible-height;
+                    width: table.visible-width; height: table.visible-height;
+                    clip: true;
+                    Rectangle {
+                        y: table.viewport-y + root.hovered-row * self.height;
+                        width: parent.width;
+                        height: table.viewport-height / max(1, root.rows.length);
+                        background: Palette.selection-background;
+                        opacity: 0.16;
                     }
                 }
                 // StandardTableView's selection fill can match its row stripes.
@@ -377,8 +392,8 @@ export component AppWindow inherits Window {
                             background: Palette.foreground;
                             opacity: 0.12;
                         }
-                        ContextMenuItem { label: "Copy"; activated => { root.context-menu-open = false; root.action("copy"); } }
                         ContextMenuItem { label: "Cut"; activated => { root.context-menu-open = false; root.action("cut"); } }
+                        ContextMenuItem { label: "Copy"; activated => { root.context-menu-open = false; root.action("copy"); } }
                         ContextMenuItem { label: "Rename"; activated => { root.context-menu-open = false; root.action("rename"); } }
                         ContextMenuItem { label: "Delete"; activated => { root.context-menu-open = false; root.action("delete"); } }
                       }

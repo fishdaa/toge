@@ -269,17 +269,23 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
             } else {
                 entry.name()
             };
-            let target = if query.match_case {
-                text.to_string()
+            // The pattern is already lowercased. ASCII text is folded while
+            // matching instead of copying every entry's name to lowercase it.
+            let lowered;
+            let (target, fold) = if query.match_case {
+                (text, false)
+            } else if text.is_ascii() {
+                (text, true)
             } else {
-                text.to_lowercase()
+                lowered = text.to_lowercase();
+                (lowered.as_str(), false)
             };
             if query.whole_filename {
-                glob_match(&target, pattern)
+                glob_match_from(target.as_bytes(), pattern.as_bytes(), false, fold)
             } else if query.match_whole_word {
-                glob_match_word(&target, pattern)
+                glob_match_word(target, pattern, fold)
             } else {
-                glob_match_substring(&target, pattern)
+                glob_match_substring(target, pattern, fold)
             }
         }
         CompiledTerm::Regex(re) => {
@@ -342,10 +348,10 @@ fn regex_matches(re: &Regex, text: &str, whole_word: bool) -> bool {
     })
 }
 
-fn glob_match_word(text: &str, pattern: &str) -> bool {
-    word_spans(text)
-        .into_iter()
-        .any(|(start, end)| glob_match(&text[start..end], pattern))
+fn glob_match_word(text: &str, pattern: &str, fold: bool) -> bool {
+    word_spans(text).into_iter().any(|(start, end)| {
+        glob_match_from(&text.as_bytes()[start..end], pattern.as_bytes(), false, fold)
+    })
 }
 
 fn contains_whole_word(text: &str, needle: &str) -> bool {
@@ -404,59 +410,63 @@ fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
+#[cfg(test)]
 fn glob_match(text: &str, pattern: &str) -> bool {
-    let mut chars = text.chars().peekable();
-    let mut pat = pattern.chars().peekable();
-
-    while let Some(p) = pat.next() {
-        match p {
-            '*' => {
-                while pat.peek() == Some(&'*') {
-                    pat.next();
-                }
-                let next = pat.peek().copied();
-                if next.is_none() {
-                    return true;
-                }
-                while let Some(c) = chars.peek().copied() {
-                    if Some(c) == next {
-                        let text_rest: String = chars.clone().collect();
-                        let pat_rest: String = pat.clone().collect();
-                        if glob_match(&text_rest, &pat_rest) {
-                            return true;
-                        }
-                    }
-                    chars.next();
-                }
-                return false;
-            }
-            '?' => {
-                if chars.next().is_none() {
-                    return false;
-                }
-            }
-            c => {
-                if chars.next() != Some(c) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    chars.next().is_none()
+    glob_match_from(text.as_bytes(), pattern.as_bytes(), false, false)
 }
 
-fn glob_match_substring(text: &str, pattern: &str) -> bool {
+/// Whether `pattern` matches some suffix of `text`, i.e. `*` + `pattern`.
+fn glob_match_substring(text: &str, pattern: &str, fold: bool) -> bool {
     if !pattern.contains('*') && !pattern.contains('?') {
-        return text.contains(pattern);
+        return if fold {
+            contains_ignore_case(text, pattern.as_bytes())
+        } else {
+            text.contains(pattern)
+        };
     }
-    for i in 0..text.chars().count() {
-        let suffix: String = text.chars().skip(i).collect();
-        if glob_match(&suffix, pattern) {
-            return true;
+    glob_match_from(text.as_bytes(), pattern.as_bytes(), true, fold)
+}
+
+/// Iterative `*`/`?` matching with single-star backtracking: O(text × pattern)
+/// at worst and allocation-free, since it runs once per indexed entry. Works on
+/// UTF-8 bytes; `?` and backtracking step whole characters, so literal bytes are
+/// only ever compared from a character boundary. With `fold`, text bytes are
+/// ASCII-lowercased before comparing with the (lowercase) pattern.
+fn glob_match_from(text: &[u8], pattern: &[u8], leading_star: bool, fold: bool) -> bool {
+    let char_len = |lead: u8| match lead {
+        0xF0.. => 4,
+        0xE0.. => 3,
+        0xC0.. => 2,
+        _ => 1,
+    };
+    let (mut ti, mut pi) = (0, 0);
+    // Pattern index after the last `*`, and the text index it is retried from.
+    let mut star = leading_star.then_some((0, 0));
+    while ti < text.len() {
+        match pattern.get(pi) {
+            Some(b'*') => {
+                pi += 1;
+                star = Some((pi, ti));
+            }
+            Some(b'?') => {
+                ti += char_len(text[ti]);
+                pi += 1;
+            }
+            Some(&byte) if byte == text[ti] || (fold && byte == text[ti].to_ascii_lowercase()) => {
+                ti += 1;
+                pi += 1;
+            }
+            _ => {
+                let Some((star_pi, star_ti)) = star else {
+                    return false;
+                };
+                let retry = star_ti + char_len(text[star_ti]);
+                star = Some((star_pi, retry));
+                (pi, ti) = (star_pi, retry);
+            }
         }
     }
-    false
+    pattern[pi..].iter().all(|&byte| byte == b'*')
 }
 
 #[cfg(test)]

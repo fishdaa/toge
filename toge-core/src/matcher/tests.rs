@@ -322,3 +322,34 @@ fn candidate_seeds_match_a_full_index_order_scan() {
     assert!(candidate_ids(&idx, &mkv).unwrap().len() < idx.count());
     assert!(candidate_ids(&idx, &Query::parse("so").unwrap()).is_none());
 }
+
+#[test]
+fn test_glob_match_patterns() {
+    assert!(glob_match("song.mp3", "*.mp3"));
+    assert!(!glob_match("song.mp3.bak", "*.mp3"));
+    assert!(glob_match("abx", "*?x"));
+    assert!(glob_match("aaab", "*a*b"));
+    assert!(glob_match("mississippi", "m*iss*ppi"));
+    assert!(!glob_match("mississippi", "m*iss*ppx"));
+    assert!(glob_match("", "**"));
+    assert!(!glob_match("", "?"));
+    assert!(glob_match("naïve", "na?ve"));
+    assert!(glob_match("日本語.txt", "??語*"));
+    assert!(!glob_match("日本語.txt", "?語*"));
+}
+
+#[test]
+fn test_glob_match_substring_matches_any_suffix() {
+    assert!(glob_match_substring("main.rs", "*.rs", false));
+    // A match must run to the end of the text, as with the former suffix scan.
+    assert!(!glob_match_substring("main.rs", "a?n", false));
+    assert!(glob_match_substring("main.rs", "a?n*", false));
+    assert!(!glob_match_substring("main.rs.orig", "*.rs", false));
+    assert!(glob_match_substring("main.rs.orig", "*.rs*", false));
+    assert!(glob_match_substring("résumé.pdf", "?.pdf", false));
+    assert!(!glob_match_substring("main.rs", "x?", false));
+    // Folding lowercases ASCII text against an already-lowercase pattern.
+    assert!(glob_match_substring("Main.RS", "*.rs", true));
+    assert!(glob_match_substring("README.md", "readme", true));
+    assert!(!glob_match_substring("Main.RS", "*.rs", false));
+}

@@ -95,6 +95,17 @@ fn query_count(sock: &Path, query: &str) -> usize {
     }
 }
 
+fn wait_for_count(sock: &Path, query: &str, expected: usize, timeout_ms: u64) -> bool {
+    let deadline = std::time::Instant::now() + Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        if query_count(sock, query) == expected {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 fn setup(name: &str) -> (PathBuf, PathBuf, PathBuf) {
     let dir = test_dir(name);
     let _ = fs::remove_dir_all(&dir);
@@ -283,8 +294,15 @@ fn daemon_startup_reconciles_changes_made_while_stopped() {
 
     let mut child = spawn_needled(&args);
     assert!(wait_for_ready(&sock, 10_000), "restarted daemon not ready");
-    assert_eq!(query_count(&sock, "foo.txt"), 0);
-    assert_eq!(query_count(&sock, "bar.txt"), 1);
+    // The cached index is served while the reconcile catches up.
+    assert!(
+        wait_for_count(&sock, "foo.txt", 0, 10_000),
+        "stale entry not reconciled"
+    );
+    assert!(
+        wait_for_count(&sock, "bar.txt", 1, 10_000),
+        "new entry not reconciled"
+    );
 
     cleanup(&dir, &mut child);
 }

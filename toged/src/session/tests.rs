@@ -17,6 +17,7 @@ fn daemon(paths: &[(&str, u64)]) -> DaemonState {
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
         orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
     }
 }
 
@@ -303,4 +304,138 @@ fn superseded_open_is_skipped_without_running_the_query() {
     assert!(format!("{:?}", state.lock().unwrap().orders).contains("name: None"));
     let (live, _peer) = UnixStream::pair().unwrap();
     assert!(!client_gone(&live));
+}
+
+#[test]
+fn progressive_open_previews_before_sort_and_keeps_exact_final_results() {
+    let paths: Vec<_> = (0..600)
+        .rev()
+        .map(|i| (format!("/r/{i:04}.txt"), i as u64))
+        .collect();
+    let refs: Vec<_> = paths
+        .iter()
+        .map(|(path, size)| (path.as_str(), *size))
+        .collect();
+    let mut st = daemon(&refs);
+    let request = SessionOpen {
+        raw: "txt".into(),
+        sort: Some((SortKey::Name, true)),
+    };
+    let mut previews = Vec::new();
+    let session = Session::open_preview(&mut st, &request, false, |index, ids| {
+        assert!(ids.len() <= SESSION_PREVIEW_ROWS);
+        if !ids.is_empty() {
+            previews.push(index.entries[ids[0] as usize].path.clone());
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(previews[0], "/r/0599.txt");
+    assert_eq!(session.state().total_count, 600);
+    assert_eq!(session.state().total_size, (0..600u64).sum());
+    assert_eq!(
+        st.index.entries[session.ids[0] as usize].path,
+        "/r/0000.txt"
+    );
+    assert_eq!(session.ids, open(&mut st, "txt", request.sort).ids);
+    let mut calls = 0;
+    let error = Session::open_preview(&mut st, &request, false, |_, _| {
+        calls += 1;
+        Err(io::Error::other("cancelled"))
+    })
+    .err()
+    .unwrap();
+    assert_eq!(error.to_string(), "cancelled");
+    assert_eq!(calls, 1);
+}
+
+#[test]
+fn progressive_wire_session_switches_from_preview_to_sorted_pages() {
+    let config = Config::default_config();
+    let state = Mutex::new(daemon(&[("/r/z.txt", 2), ("/r/a.txt", 1)]));
+    std::thread::scope(|scope| {
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let (state, config) = (&state, &config);
+        let daemon = scope.spawn(move || {
+            let bytes = read_frame(&mut server, MAX_SESSION_FRAME_SIZE)?.unwrap();
+            let toge_core::ipc::Request::OpenSessionPreview(open) =
+                toge_core::ipc::Request::decode(&bytes).unwrap()
+            else {
+                panic!("expected progressive open")
+            };
+            let dir = Path::new("/nonexistent");
+            let env = SessionEnv::new(config, dir, dir);
+            serve_session_with_preview(&mut server, &open, &env, state, true)
+        });
+        let mut previewed = false;
+        let mut session = SessionClient::open_with_preview(
+            client,
+            SessionOpen {
+                raw: "txt".into(),
+                sort: Some((SortKey::Name, true)),
+            },
+            |rows| {
+                assert_eq!(rows[0].path, "/r/z.txt");
+                previewed = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(previewed);
+        assert_eq!(session.state().total_count, 2);
+        let SessionResponse::Rows { rows, .. } = session
+            .request(&SessionRequest::Fetch { offset: 0, len: 2 })
+            .unwrap()
+        else {
+            panic!("expected sorted rows")
+        };
+        assert_eq!(rows[0].path, "/r/a.txt");
+        drop(session);
+        daemon.join().unwrap().unwrap();
+    });
+}
+
+#[test]
+fn date_sessions_use_indexed_metadata_and_sync_watcher_changes() {
+    let dir = tempfile::tempdir().unwrap();
+    let a = dir.path().join("a.txt");
+    let b = dir.path().join("b.txt");
+    fs::write(&a, "a").unwrap();
+    fs::write(&b, "b").unwrap();
+    let (a, b) = (a.to_str().unwrap(), b.to_str().unwrap());
+    let mut st = daemon(&[(a, 1), (b, 2)]);
+    // Deliberately distinct indexed timestamps: querying must not overwrite
+    // watcher-maintained values with another full filesystem scan.
+    st.index.insert_with_metadata(a, false, 1, 20, 30, 40);
+    st.index.insert_with_metadata(b, false, 2, 10, 20, 30);
+    let mut session = open(&mut st, "", Some((SortKey::Modified, true)));
+    assert_eq!(
+        st.index.entries[st.index.id_by_path(a).unwrap() as usize].modified,
+        20
+    );
+    assert_eq!(session.ids[0], st.index.id_by_path(b).unwrap());
+    let config = Config::default_config();
+    let env = SessionEnv::new(&config, dir.path(), dir.path());
+    session.resort(&mut st, Some((SortKey::Modified, false)), true);
+    assert_eq!(session.ids[0], st.index.id_by_path(a).unwrap());
+    // The watcher updates an existing entry rather than adding/removing it.
+    st.index.insert_with_metadata(b, false, 2, 50, 20, 30);
+    session.built_at = Instant::now() - Duration::from_secs(2);
+    session.handle(&mut st, SessionRequest::Sync, &env);
+    assert_eq!(session.ids[0], st.index.id_by_path(b).unwrap());
+    let before = st.index.entries[st.index.id_by_path(a).unwrap() as usize].modified;
+    Session::open_preview(
+        &mut st,
+        &SessionOpen {
+            raw: "".into(),
+            sort: Some((SortKey::Modified, true)),
+        },
+        true,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    assert_eq!(
+        st.index.entries[st.index.id_by_path(a).unwrap() as usize].modified,
+        before
+    );
 }

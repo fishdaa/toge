@@ -23,7 +23,10 @@ use toge_core::query::Query;
 use toge_core::sort::{OrderCache, SortKey};
 use toge_core::sys::FsWatcher;
 use toge_core::sys::{FanotifyWatcher, WatchEvent};
-use toge_core::walker::{Excludes, has_hidden_ancestor_dir, reconcile, walk};
+use toge_core::walker::{
+    Excludes, excluded_under_roots, has_hidden_ancestor_dir, is_hidden_dir_path, reconcile_live,
+    walk,
+};
 
 mod session;
 
@@ -37,6 +40,9 @@ struct DaemonState {
     watcher_log: Vec<String>,
     /// Whole-index name/path orders shared by all queries.
     orders: OrderCache,
+    /// Bumped by [`replace_index`], so a background reconcile can tell that the
+    /// index it was updating is gone.
+    index_generation: u64,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -157,34 +163,30 @@ fn discover_roots(config: &Config) -> Vec<PathBuf> {
         .collect()
 }
 
-fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>>) -> (Index, u64) {
-    let index_path = state_dir.join("index.bin");
-    let start = Instant::now();
-    let excludes = Excludes {
+fn index_excludes(config: &Config) -> Excludes {
+    Excludes {
         skip_hidden: config.exclude_hidden,
         skip_system_paths: true,
         patterns: config.exclude_patterns.clone(),
         folders: config.exclude_folders.clone(),
         paths: Vec::new(),
         include_only: config.include_only.clone(),
-    };
+    }
+}
 
-    let roots = discover_roots(config);
-    let fetch_metadata = config.index_size
+fn fetches_metadata(config: &Config) -> bool {
+    config.index_size
         || config.index_date_modified
         || config.index_date_created
-        || config.index_date_accessed;
+        || config.index_date_accessed
+}
 
-    if let Ok(mut index) = Index::load(&index_path) {
-        {
-            let mut st = state.lock().unwrap();
-            st.status = DaemonStatus::Indexing;
-            st.status_message = format!("Reconciling {} cached entries", index.count());
-        }
-        reconcile(&roots, &mut index, &excludes, fetch_metadata);
-        index.compact();
-        return (index, start.elapsed().as_millis() as u64);
-    }
+/// Walk the configured roots into a fresh index.
+fn build_index(config: &Config, state: &Arc<Mutex<DaemonState>>) -> (Index, u64) {
+    let start = Instant::now();
+    let excludes = index_excludes(config);
+    let fetch_metadata = fetches_metadata(config);
+    let roots = discover_roots(config);
 
     let mut index = Index::new();
     let total_roots = roots.len();
@@ -200,6 +202,102 @@ fn build_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>
     index.compact();
     let duration_ms = start.elapsed().as_millis() as u64;
     (index, duration_ms)
+}
+
+/// Swap in a newly built index, invalidating IDs handed out by the old one.
+fn replace_index(st: &mut DaemonState, mut index: Index) {
+    index.succeed(&st.index);
+    st.index = index;
+    st.index_generation += 1;
+}
+
+/// Load the startup index and hand over to the watcher.
+///
+/// A cached index is served immediately and then reconciled with the disk in the
+/// background, since changes made while the daemon was stopped can only be found
+/// by walking. Without a usable cache, a fresh index is built first.
+fn start_index(state_dir: &Path, config: &Config, state: &Arc<Mutex<DaemonState>>) {
+    let start = Instant::now();
+    let Ok(cached) = Index::load(&state_dir.join("index.bin")) else {
+        let (index, duration) = build_index(config, state);
+        let _ = save_index(&index, state_dir);
+        let mut st = state.lock().unwrap();
+        replace_index(&mut st, index);
+        st.build_duration_ms = duration;
+        st.last_updated_unix = current_unix_time();
+        st.status = DaemonStatus::StartingWatcher;
+        st.status_message = "Setting up file watcher".to_string();
+        return;
+    };
+
+    let generation = {
+        let mut st = state.lock().unwrap();
+        replace_index(&mut st, cached);
+        st.build_duration_ms = start.elapsed().as_millis() as u64;
+        st.last_updated_unix = current_unix_time();
+        st.status = DaemonStatus::StartingWatcher;
+        st.status_message = "Setting up file watcher".to_string();
+        st.index_generation
+    };
+
+    // Walk only once the watcher is installed: every change after that point is
+    // seen by the watcher, and every change before it by the walk.
+    loop {
+        {
+            let mut st = state.lock().unwrap();
+            if st.status != DaemonStatus::StartingWatcher {
+                if st.watcher.is_healthy {
+                    st.status_message = format!("Reconciling {} cached entries", st.index.count());
+                }
+                break;
+            }
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+
+    if !reconcile_served_index(config, state, generation) {
+        return;
+    }
+    let mut st = state.lock().unwrap();
+    let _ = save_index(&st.index, state_dir);
+    st.build_duration_ms = start.elapsed().as_millis() as u64;
+    st.last_updated_unix = current_unix_time();
+    if st.status == DaemonStatus::Ready && st.watcher.is_healthy {
+        st.status_message = format!(
+            "Indexed {} entries in {}ms",
+            st.index.count(),
+            st.build_duration_ms
+        );
+    }
+}
+
+/// Reconcile the served index with the disk while it stays searchable.
+/// Returns false, leaving the rest to the new owner, if the index was
+/// replaced (generation `generation` ended) in the meantime.
+fn reconcile_served_index(
+    config: &Config,
+    state: &Arc<Mutex<DaemonState>>,
+    generation: u64,
+) -> bool {
+    reconcile_live(
+        &discover_roots(config),
+        &index_excludes(config),
+        fetches_metadata(config),
+        |step| {
+            let mut st = state.lock().unwrap();
+            if st.index_generation != generation {
+                return false;
+            }
+            step(&mut st.index);
+            true
+        },
+    );
+    let mut st = state.lock().unwrap();
+    if st.index_generation != generation {
+        return false;
+    }
+    st.index.compact();
+    true
 }
 
 fn save_index(index: &Index, state_dir: &Path) -> io::Result<()> {
@@ -267,7 +365,19 @@ fn metadata_snapshot(path: &str) -> (u64, i64, i64, i64) {
 }
 
 fn index_created_path(st: &mut DaemonState, path: &str, is_dir: bool, config: &Config) {
-    let (size, modified, created, accessed) = metadata_snapshot(path);
+    index_created_path_with(st, path, is_dir, metadata_snapshot(path), config);
+}
+
+/// [`index_created_path`] with metadata the caller already read, so the
+/// `stat` can happen before the index lock is taken.
+fn index_created_path_with(
+    st: &mut DaemonState,
+    path: &str,
+    is_dir: bool,
+    metadata: (u64, i64, i64, i64),
+    config: &Config,
+) {
+    let (size, modified, created, accessed) = metadata;
     st.index
         .insert_with_metadata(path, is_dir, size, modified, created, accessed);
 
@@ -293,11 +403,31 @@ fn index_created_path(st: &mut DaemonState, path: &str, is_dir: bool, config: &C
 }
 
 fn remove_deleted_path(index: &mut Index, path: &str) {
+    // Only an indexed directory needs the scan over every entry: a file has no
+    // descendants, and a directory is always indexed before its contents, so
+    // an unindexed path has none either. (Entries left behind by lost watcher
+    // events are removed by the reconcile that an overflow triggers.)
+    match index.id_by_path(path) {
+        Some(id) if index.entries[id as usize].path == path => {
+            if !index.entries[id as usize].is_dir {
+                index.remove(path);
+                return;
+            }
+        }
+        _ => return,
+    }
     let deleted = Path::new(path);
+    // Indexed paths are normalized, so every descendant starts with the
+    // normalized path as a string; that cheap check skips parsing components
+    // of every entry while the index lock is held.
+    let prefix: PathBuf = deleted.components().collect();
+    let prefix = prefix.to_string_lossy();
     let paths: Vec<String> = index
         .entries
         .iter()
-        .filter(|entry| Path::new(&entry.path).starts_with(deleted))
+        .filter(|entry| {
+            entry.path.starts_with(prefix.as_ref()) && Path::new(&entry.path).starts_with(deleted)
+        })
         .map(|entry| entry.path.clone())
         .collect();
     for path in paths {
@@ -378,14 +508,12 @@ fn handle_request(
             st.status = DaemonStatus::Indexing;
             st.status_message = "Reindexing".to_string();
             drop(st);
-            let (new_index, duration) = build_index(state_dir, config, state);
+            let (new_index, duration) = build_index(config, state);
             if let Err(e) = save_index(&new_index, state_dir) {
                 return Response::Error(e.to_string());
             }
             let mut st = state.lock().unwrap();
-            let mut new_index = new_index;
-            new_index.succeed(&st.index);
-            st.index = new_index;
+            replace_index(&mut st, new_index);
             st.build_duration_ms = duration;
             st.last_updated_unix = current_unix_time();
             st.status = DaemonStatus::Ready;
@@ -404,7 +532,7 @@ fn handle_request(
             let st = &mut *st;
             handle_query(&mut st.index, &mut st.orders, &q, config.index_size)
         }
-        Request::StreamQuery(_) | Request::OpenSession(_) => {
+        Request::StreamQuery(_) | Request::OpenSession(_) | Request::OpenSessionPreview(_) => {
             Response::Error("stream request requires a streaming connection".into())
         }
         Request::Quit => unreachable!(),
@@ -452,16 +580,17 @@ fn prepare_query_ids(
 ) -> Vec<u32> {
     let (sort_key, ascending) = sort_params(query.sort);
 
-    // Metadata tiers may be disabled while a query still explicitly asks for
-    // a date filter or date ordering. Refresh before matching/sorting so those
-    // operations use current filesystem values instead of zero/stale cache
-    // entries.
+    // Indexing, reconciliation and watcher events maintain cached metadata.
+    // Hydrate missing date fields instead of stat-ing every match on every
+    // query/rebuild while holding the shared index lock.
     let needs_all_metadata = query.date_modified.is_some()
         || query.date_created.is_some()
         || query.date_accessed.is_some();
     if needs_all_metadata {
         for id in 0..index.count() as u32 {
-            index.update_metadata_by_id(id);
+            if missing_query_dates(&index.entries[id as usize], query) {
+                index.update_metadata_by_id(id);
+            }
         }
     }
 
@@ -473,7 +602,9 @@ fn prepare_query_ids(
     ) && !needs_all_metadata
     {
         for &id in &ids {
-            index.update_metadata_by_id(id);
+            if missing_sort_date(&index.entries[id as usize], sort_key) {
+                index.update_metadata_by_id(id);
+            }
         }
     } else if index_size {
         for id in &ids {
@@ -488,6 +619,21 @@ fn prepare_query_ids(
     orders.sort(index, &mut ids, sort_key, ascending);
 
     ids
+}
+
+fn missing_sort_date(entry: &toge_core::index::Entry, key: SortKey) -> bool {
+    match key {
+        SortKey::Modified => entry.modified == 0,
+        SortKey::Created => entry.created == 0,
+        SortKey::Accessed => entry.accessed == 0,
+        _ => false,
+    }
+}
+
+fn missing_query_dates(entry: &toge_core::index::Entry, query: &Query) -> bool {
+    (query.date_modified.is_some() && entry.modified == 0)
+        || (query.date_created.is_some() && entry.created == 0)
+        || (query.date_accessed.is_some() && entry.accessed == 0)
 }
 
 fn result_row(entry: &toge_core::index::Entry, query: &Query, highlight: bool) -> ResultRow {
@@ -850,9 +996,11 @@ fn serve(
                 // lets clients distinguish an interrupted stream from success.
                 let _ = handle_stream_request(&mut s, &request, &config, &state);
             }
-            Request::OpenSession(open) => {
+            ref request @ (Request::OpenSession(ref open)
+            | Request::OpenSessionPreview(ref open)) => {
+                let preview = matches!(request, Request::OpenSessionPreview(_));
                 let env = session::SessionEnv::new(&config, &state_dir, &config_dir);
-                let _ = session::serve_session(&mut s, &open, &env, &state);
+                let _ = session::serve_session_with_preview(&mut s, open, &env, &state, preview);
             }
             req => {
                 let resp = handle_request(req, &state_dir, &config, &state);
@@ -919,6 +1067,7 @@ fn main() {
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
         orders: OrderCache::default(),
+        index_generation: 0,
     }));
 
     {
@@ -941,40 +1090,6 @@ fn main() {
 
     let socket = socket_path.unwrap_or_else(|| state_dir.join("toged.sock"));
 
-    let index_state_dir = state_dir.clone();
-    let index_config = config.clone();
-    let index_state = Arc::clone(&state);
-    let spawn_result = thread::Builder::new().spawn(move || {
-        let (index, duration) = build_index(&index_state_dir, &index_config, &index_state);
-        let _ = save_index(&index, &index_state_dir);
-        let mut st = index_state.lock().unwrap();
-        let mut index = index;
-        index.succeed(&st.index);
-        st.index = index;
-        st.build_duration_ms = duration;
-        st.last_updated_unix = current_unix_time();
-        st.status = DaemonStatus::StartingWatcher;
-        st.status_message = "Setting up file watcher".to_string();
-    });
-
-    if let Err(err) = spawn_result {
-        eprintln!("background indexing unavailable: {}", err);
-        let mut st = state.lock().unwrap();
-        st.status = DaemonStatus::Indexing;
-        st.status_message = "Scanning filesystem (foreground)".to_string();
-        drop(st);
-        let (index, duration) = build_index(&state_dir, &config, &state);
-        let _ = save_index(&index, &state_dir);
-        let mut st = state.lock().unwrap();
-        let mut index = index;
-        index.succeed(&st.index);
-        st.index = index;
-        st.build_duration_ms = duration;
-        st.last_updated_unix = current_unix_time();
-        st.status = DaemonStatus::StartingWatcher;
-        st.status_message = "Setting up file watcher".to_string();
-    }
-
     let watcher_state = Arc::clone(&state);
     let watcher_state_dir = state_dir.clone();
     let watcher_config_dir = config_dir.clone();
@@ -986,7 +1101,259 @@ fn main() {
         watcher_config,
     );
 
+    let index_state_dir = state_dir.clone();
+    let index_config = config.clone();
+    let index_state = Arc::clone(&state);
+    let spawn_result = thread::Builder::new()
+        .spawn(move || start_index(&index_state_dir, &index_config, &index_state));
+
+    if let Err(err) = spawn_result {
+        eprintln!("background indexing unavailable: {}", err);
+        start_index(&state_dir, &config, &state);
+    }
+
     serve(state_dir, config_dir, config, state, socket).unwrap();
+}
+
+/// Watcher events applied per index-lock acquisition.
+const WATCH_APPLY_BATCH: usize = 256;
+
+/// What the watcher indexes: the configured roots and exclusions, minus the
+/// daemon's own files. Directories are resolved once up front: fanotify reports
+/// resolved paths, and resolving every event's path would cost a syscall per
+/// component while the kernel queue fills.
+struct WatchScope {
+    /// Roots as configured and as resolved.
+    roots: Vec<PathBuf>,
+    excludes: Excludes,
+    /// The state and config directories, as given and as resolved.
+    own_dirs: Vec<PathBuf>,
+}
+
+impl WatchScope {
+    fn new(roots: &[PathBuf], excludes: Excludes, state_dir: &Path, config_dir: &Path) -> Self {
+        let with_resolved = |dirs: &[&Path]| {
+            let mut all = Vec::new();
+            for dir in dirs {
+                all.push(dir.to_path_buf());
+                if let Ok(resolved) = fs::canonicalize(dir)
+                    && resolved != *dir
+                {
+                    all.push(resolved);
+                }
+            }
+            all
+        };
+        let roots: Vec<&Path> = roots.iter().map(PathBuf::as_path).collect();
+        Self {
+            roots: with_resolved(&roots),
+            excludes,
+            own_dirs: with_resolved(&[state_dir, config_dir]),
+        }
+    }
+
+    fn covers(&self, path: &str, is_dir: bool) -> bool {
+        let path = Path::new(path);
+        self.roots.iter().any(|root| path.starts_with(root))
+            && !self.own_dirs.iter().any(|dir| path.starts_with(dir))
+            && !is_hidden_dir_path(path, is_dir)
+            && !excluded_under_roots(path, &self.roots, &self.excludes)
+    }
+}
+
+/// Overflow reconciles run off the watcher thread, which must keep draining
+/// the kernel queue; an overflow during a run schedules one more run.
+#[derive(Default)]
+struct Resync {
+    running: bool,
+    again: bool,
+}
+
+fn request_resync(
+    resync: &Arc<Mutex<Resync>>,
+    state: &Arc<Mutex<DaemonState>>,
+    config: &Config,
+    state_dir: &Path,
+) {
+    {
+        let mut pending = resync.lock().unwrap();
+        if pending.running {
+            pending.again = true;
+            return;
+        }
+        pending.running = true;
+    }
+    let (resync, state, config, state_dir) = (
+        Arc::clone(resync),
+        Arc::clone(state),
+        config.clone(),
+        state_dir.to_path_buf(),
+    );
+    thread::spawn(move || {
+        loop {
+            resync_after_overflow(&state, &config, &state_dir);
+            let mut pending = resync.lock().unwrap();
+            if !pending.again {
+                pending.running = false;
+                break;
+            }
+            pending.again = false;
+        }
+        let mut st = state.lock().unwrap();
+        st.watcher.is_healthy = st.watcher.watch_failure_count == 0;
+    });
+}
+
+/// Lost events can only be recovered by walking. The current index keeps
+/// serving queries meanwhile, as at startup.
+fn resync_after_overflow(state: &Arc<Mutex<DaemonState>>, config: &Config, state_dir: &Path) {
+    let generation = {
+        let mut st = state.lock().unwrap();
+        st.status_message = "Reconciling after watcher overflow".to_string();
+        st.index_generation
+    };
+    let start = Instant::now();
+    if reconcile_served_index(config, state, generation) {
+        let mut st = state.lock().unwrap();
+        let _ = save_index(&st.index, state_dir);
+        st.build_duration_ms = start.elapsed().as_millis() as u64;
+        st.last_updated_unix = current_unix_time();
+        st.status_message = format!("Reindexed {} entries", st.index.count());
+        append_watcher_log(&mut st, "reindex completed after watcher overflow");
+    }
+}
+
+/// A watcher event checked against the [`WatchScope`], with its disk reads
+/// already done, so applying it under the index lock stays cheap.
+#[derive(Debug)]
+enum IndexChange {
+    Create {
+        path: String,
+        is_dir: bool,
+        metadata: (u64, i64, i64, i64),
+    },
+    Delete {
+        path: String,
+    },
+    Modify {
+        path: String,
+        metadata: (u64, i64, i64, i64),
+    },
+    Move {
+        from: String,
+        to: String,
+    },
+    Overflow,
+}
+
+/// Resolve raw events without holding the index lock. Events outside the
+/// scope (e.g. build output in an excluded folder) are dropped here.
+fn resolve_events(
+    events: Vec<WatchEvent>,
+    scope: &WatchScope,
+    watcher: &mut impl FsWatcher,
+) -> Vec<IndexChange> {
+    let mut changes = Vec::new();
+    for event in events {
+        match event {
+            WatchEvent::Create { path, is_dir } => {
+                if scope.covers(&path, is_dir) {
+                    let metadata = metadata_snapshot(&path);
+                    changes.push(IndexChange::Create {
+                        path,
+                        is_dir,
+                        metadata,
+                    });
+                }
+            }
+            WatchEvent::Delete { path } => {
+                if scope.covers(&path, false) {
+                    let _ = watcher.unwatch(Path::new(&path));
+                    changes.push(IndexChange::Delete { path });
+                }
+            }
+            WatchEvent::Modify { path } => {
+                if scope.covers(&path, false) {
+                    let metadata = metadata_snapshot(&path);
+                    changes.push(IndexChange::Modify { path, metadata });
+                }
+            }
+            WatchEvent::Move { from, to } => {
+                let from_covered = scope.covers(&from, false);
+                let to_is_dir = Path::new(&to).is_dir();
+                let to_covered = scope.covers(&to, to_is_dir);
+                if from_covered {
+                    let _ = watcher.unwatch(Path::new(&from));
+                }
+                match (from_covered, to_covered) {
+                    (false, false) => {}
+                    (true, false) => changes.push(IndexChange::Delete { path: from }),
+                    (false, true) => {
+                        let metadata = metadata_snapshot(&to);
+                        changes.push(IndexChange::Create {
+                            path: to,
+                            is_dir: to_is_dir,
+                            metadata,
+                        });
+                    }
+                    (true, true) => changes.push(IndexChange::Move { from, to }),
+                }
+            }
+            WatchEvent::Overflow { .. } => changes.push(IndexChange::Overflow),
+        }
+    }
+    changes
+}
+
+/// Apply one resolved change. Returns true when events were lost and the
+/// index must be reconciled with the disk.
+fn apply_change(st: &mut DaemonState, change: &IndexChange, config: &Config) -> bool {
+    match change {
+        IndexChange::Create {
+            path,
+            is_dir,
+            metadata,
+        } => {
+            append_watcher_log(
+                st,
+                format!("create {}{}", path, if *is_dir { " (dir)" } else { "" }),
+            );
+            index_created_path_with(st, path, *is_dir, *metadata, config);
+        }
+        IndexChange::Delete { path } => {
+            append_watcher_log(st, format!("delete {}", path));
+            remove_deleted_path(&mut st.index, path);
+        }
+        IndexChange::Modify { path, metadata } => {
+            append_watcher_log(st, format!("modify {}", path));
+            // Refresh only entries already indexed, with the same type.
+            if let Some(id) = st.index.id_by_path(path) {
+                let entry = &st.index.entries[id as usize];
+                if entry.path == *path {
+                    let is_dir = entry.is_dir;
+                    let (size, modified, created, accessed) = *metadata;
+                    st.index
+                        .insert_with_metadata(path, is_dir, size, modified, created, accessed);
+                }
+            }
+        }
+        IndexChange::Move { from, to } => {
+            append_watcher_log(st, format!("move {} -> {}", from, to));
+            remove_deleted_path(&mut st.index, from);
+            index_created_path(st, to, Path::new(to).is_dir(), config);
+        }
+        IndexChange::Overflow => {
+            eprintln!("fanotify queue overflow — some events may have been lost");
+            st.watcher.watch_overflow_count += 1;
+            st.watcher.is_healthy = false;
+            append_watcher_log(
+                st,
+                "overflow: fanotify queue overflow — some events may have been lost",
+            );
+            return true;
+        }
+    }
+    false
 }
 
 fn start_watcher(
@@ -1019,6 +1386,8 @@ fn start_watcher(
             };
 
             let dirs = discover_roots(&config);
+            let scope = WatchScope::new(&dirs, index_excludes(&config), &state_dir, &config_dir);
+            let resync = Arc::new(Mutex::new(Resync::default()));
             let watcher_status = install_watches(&mut watcher, &dirs);
             {
                 let mut st = state.lock().unwrap();
@@ -1057,103 +1426,18 @@ fn start_watcher(
                     continue;
                 }
 
-                let mut needs_reindex = false;
-                {
+                let changes = resolve_events(events, &scope, &mut watcher);
+                let mut overflowed = false;
+                // Release the lock between chunks so queries are not stuck
+                // behind a burst of filesystem activity.
+                for chunk in changes.chunks(WATCH_APPLY_BATCH) {
                     let mut st = state.lock().unwrap();
-                    for event in events {
-                        match &event {
-                            WatchEvent::Create { path, is_dir } => {
-                                if !is_within_roots(path, &dirs) {
-                                    continue;
-                                }
-                                if is_ignored_path(path, &state_dir, &config_dir, *is_dir) {
-                                    continue;
-                                }
-                                append_watcher_log(
-                                    &mut st,
-                                    format!("create {}{}", path, if *is_dir { " (dir)" } else { "" }),
-                                );
-                                index_created_path(&mut st, path, *is_dir, &config);
-                            }
-                            WatchEvent::Delete { path } => {
-                                if !is_within_roots(path, &dirs) {
-                                    continue;
-                                }
-                                if is_ignored_path(path, &state_dir, &config_dir, false) {
-                                    continue;
-                                }
-                                append_watcher_log(&mut st, format!("delete {}", path));
-                                remove_deleted_path(&mut st.index, path);
-                                let _ = watcher.unwatch(Path::new(path));
-                            }
-                            WatchEvent::Modify { path } => {
-                                if !is_within_roots(path, &dirs) {
-                                    continue;
-                                }
-                                if is_ignored_path(path, &state_dir, &config_dir, false) {
-                                    continue;
-                                }
-                                append_watcher_log(&mut st, format!("modify {}", path));
-                                st.index.update_metadata(path);
-                            }
-                            WatchEvent::Move { from, to } => {
-                                let from_in_roots = is_within_roots(from, &dirs);
-                                let to_in_roots = is_within_roots(to, &dirs);
-                                if !from_in_roots && !to_in_roots {
-                                    continue;
-                                }
-                                let from_ignored =
-                                    is_ignored_path(from, &state_dir, &config_dir, false);
-                                let to_ignored =
-                                    is_ignored_path(
-                                        to,
-                                        &state_dir,
-                                        &config_dir,
-                                        std::path::Path::new(to).is_dir(),
-                                    );
-                                append_watcher_log(&mut st, format!("move {} -> {}", from, to));
-                                if from_in_roots && !from_ignored {
-                                    remove_deleted_path(&mut st.index, from);
-                                    let _ = watcher.unwatch(Path::new(from));
-                                }
-                                if to_in_roots && !to_ignored {
-                                    let is_dir = std::path::Path::new(to).is_dir();
-                                    index_created_path(&mut st, to, is_dir, &config);
-                                }
-                            }
-                            WatchEvent::Overflow { .. } => {
-                                eprintln!(
-                                    "fanotify queue overflow — some events may have been lost"
-                                );
-                                st.watcher.watch_overflow_count += 1;
-                                st.watcher.is_healthy = false;
-                                append_watcher_log(
-                                    &mut st,
-                                    "overflow: fanotify queue overflow — some events may have been lost",
-                                );
-                                needs_reindex = true;
-                            }
-                        }
+                    for change in chunk {
+                        overflowed |= apply_change(&mut st, change, &config);
                     }
-                    st.watcher.is_healthy = st.watcher.watch_failure_count == 0 && !needs_reindex;
                 }
-
-                if needs_reindex {
-                    let _ = fs::remove_file(state_dir.join("index.bin"));
-                    let (new_index, duration) = build_index(&state_dir, &config, &state);
-                    let _ = save_index(&new_index, &state_dir);
-                    let watcher_status = install_watches(&mut watcher, &dirs);
-                    {
-                        let mut st = state.lock().unwrap();
-                        let mut new_index = new_index;
-                        new_index.succeed(&st.index);
-                        st.index = new_index;
-                        st.build_duration_ms = duration;
-                        st.status = DaemonStatus::Ready;
-                        st.status_message = format!("Reindexed {} entries", st.index.count());
-                        st.watcher = watcher_status;
-                        append_watcher_log(&mut st, "reindex completed after watcher overflow");
-                    }
+                if overflowed {
+                    request_resync(&resync, &state, &config, &state_dir);
                 }
             }
         });

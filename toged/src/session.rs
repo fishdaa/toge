@@ -3,7 +3,7 @@
 
 use crate::{
     DaemonState, discover_roots, index_created_path, is_ignored_path, is_within_roots,
-    prepare_query_ids, remove_deleted_path, sort_params,
+    missing_query_dates, missing_sort_date, prepare_query_ids, remove_deleted_path, sort_params,
 };
 use std::io;
 use std::os::unix::net::UnixStream;
@@ -13,10 +13,12 @@ use std::time::{Duration, Instant};
 use toge_core::config::Config;
 use toge_core::index::Index;
 use toge_core::ipc::DaemonStatus;
+use toge_core::ipc::session::SESSION_PREVIEW_ROWS;
 use toge_core::ipc::session::{
     MAX_SESSION_FETCH, MAX_SESSION_FRAME_SIZE, SessionOpen, SessionRequest, SessionResponse,
     SessionRow, SessionState, read_frame, write_frame,
 };
+use toge_core::matcher::{QueryMatcher, candidate_ids};
 use toge_core::query::{Query, Sort};
 use toge_core::sort::{OrderCache, SortKey};
 
@@ -99,6 +101,83 @@ impl Session {
         Ok(session)
     }
 
+    fn open_preview(
+        st: &mut DaemonState,
+        open: &SessionOpen,
+        index_size: bool,
+        mut preview: impl FnMut(&Index, &[u32]) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        if st.status != DaemonStatus::Ready {
+            return Err(io::Error::other("daemon not ready"));
+        }
+        let started = Instant::now();
+        let mut query = Query::parse(&open.raw).map_err(io::Error::other)?;
+        if let Some((key, ascending)) = open.sort {
+            query.sort = query_sort(key, ascending);
+        }
+        let matcher = QueryMatcher::new(query.clone());
+        let dates = query.date_modified.is_some()
+            || query.date_created.is_some()
+            || query.date_accessed.is_some();
+        let candidates = candidate_ids(&st.index, &query);
+        let count = candidates.as_ref().map_or(st.index.count(), Vec::len);
+        let mut ids = Vec::new();
+        for position in 0..count {
+            let id = candidates
+                .as_ref()
+                .map_or(position as u32, |ids| ids[position]);
+            if dates && missing_query_dates(&st.index.entries[id as usize], &query) {
+                st.index.update_metadata_by_id(id);
+            }
+            if matcher.matches(&st.index.entries[id as usize]) {
+                ids.push(id);
+                if ids.len() <= SESSION_PREVIEW_ROWS && (ids.len() == 1 || ids.len() % 32 == 0) {
+                    preview(&st.index, &ids)?;
+                }
+            }
+            // Check disconnects even after the preview page is full.
+            if position % 4096 == 0 {
+                preview(&st.index, &ids[..ids.len().min(SESSION_PREVIEW_ROWS)])?;
+            }
+        }
+        if !ids.is_empty() {
+            preview(&st.index, &ids[..ids.len().min(SESSION_PREVIEW_ROWS)])?;
+        }
+        let (key, ascending) = sort_params(query.sort);
+        if matches!(
+            key,
+            SortKey::Modified | SortKey::Created | SortKey::Accessed
+        ) && !dates
+        {
+            for &id in &ids {
+                if missing_sort_date(&st.index.entries[id as usize], key) {
+                    st.index.update_metadata_by_id(id);
+                }
+            }
+        } else if key == SortKey::Size && index_size {
+            for &id in &ids {
+                let entry = &st.index.entries[id as usize];
+                if !entry.is_dir && entry.size == 0 {
+                    st.index.update_metadata_by_id(id);
+                }
+            }
+        }
+        st.orders.sort(&st.index, &mut ids, key, ascending);
+        let mut session = Self {
+            query,
+            sort: open.sort,
+            ids,
+            total_size: 0,
+            epoch: st.index.epoch(),
+            revision: st.index.revision(),
+            generation: 1,
+            built_at: Instant::now(),
+            build_cost: started.elapsed(),
+        };
+        session.recount(&st.index);
+        Ok(session)
+    }
+
     pub fn state(&self) -> SessionState {
         SessionState {
             generation: self.generation,
@@ -153,7 +232,9 @@ impl Session {
             SortKey::Modified | SortKey::Created | SortKey::Accessed
         ) {
             for &id in &self.ids {
-                index.update_metadata_by_id(id);
+                if missing_sort_date(&index.entries[id as usize], key) {
+                    index.update_metadata_by_id(id);
+                }
             }
             self.recount(index);
         } else if key == SortKey::Size && index_size {
@@ -278,11 +359,22 @@ fn client_gone(stream: &UnixStream) -> bool {
 
 /// Serve one session until the client disconnects or goes idle. The index
 /// lock is held only while a single request is answered, never while writing.
+#[cfg(test)]
 pub(crate) fn serve_session(
     stream: &mut UnixStream,
     open: &SessionOpen,
     env: &SessionEnv,
     state: &Mutex<DaemonState>,
+) -> io::Result<()> {
+    serve_session_with_preview(stream, open, env, state, false)
+}
+
+pub(crate) fn serve_session_with_preview(
+    stream: &mut UnixStream,
+    open: &SessionOpen,
+    env: &SessionEnv,
+    state: &Mutex<DaemonState>,
+    progressive: bool,
 ) -> io::Result<()> {
     stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
@@ -294,7 +386,46 @@ pub(crate) fn serve_session(
         if client_gone(stream) {
             return Ok(());
         }
-        Session::open(&mut st, open, env.config.index_size)
+        if progressive {
+            let mut sent = 0;
+            Session::open_preview(&mut st, open, env.config.index_size, |index, ids| {
+                if client_gone(stream) {
+                    return Err(io::Error::other("superseded"));
+                }
+                if ids.len() <= sent {
+                    return Ok(());
+                }
+                sent = ids.len();
+                let rows = ids
+                    .iter()
+                    .map(|&id| {
+                        let entry = &index.entries[id as usize];
+                        SessionRow {
+                            path: entry.path.clone(),
+                            is_dir: entry.is_dir,
+                            size: entry.size,
+                            modified_unix: entry.modified,
+                        }
+                    })
+                    .collect();
+                write_frame(
+                    stream,
+                    &SessionResponse::Rows {
+                        state: SessionState {
+                            generation: 0,
+                            total_count: sent,
+                            total_size: 0,
+                        },
+                        offset: 0,
+                        rows,
+                    }
+                    .encode(),
+                )
+            })
+            .map_err(|error| error.to_string())
+        } else {
+            Session::open(&mut st, open, env.config.index_size)
+        }
     };
     let mut session = match opened {
         Ok(session) => session,

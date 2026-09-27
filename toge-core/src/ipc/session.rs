@@ -5,6 +5,8 @@
 //! connection. The daemon answers with a [`SessionResponse::State`] and then
 //! serves [`SessionRequest`]s on that connection, one response per request,
 //! until the client disconnects, which discards the session.
+//! [`Request::OpenSessionPreview`] additionally emits bounded generation-zero
+//! row previews in index order during matching, before the sorted state.
 
 use super::{Request, push_string, push_u64, push_usize, take_string, take_u64, take_usize};
 use crate::sort::SortKey;
@@ -12,6 +14,8 @@ use std::io::{self, Read, Write};
 
 /// Largest row range a single fetch may request.
 pub const MAX_SESSION_FETCH: usize = 1024;
+/// Preview storage stays bounded while the daemon finishes matching and sorting.
+pub const SESSION_PREVIEW_ROWS: usize = 256;
 /// Largest number of paths a single reconcile may name.
 pub const MAX_SESSION_RECONCILE: usize = 256;
 pub const MAX_SESSION_FRAME_SIZE: usize = 4 * 1024 * 1024;
@@ -336,7 +340,29 @@ pub struct SessionClient<S> {
 impl<S: Read + Write> SessionClient<S> {
     /// Send the open request and wait for the initial state.
     pub fn open(mut stream: S, open: SessionOpen) -> io::Result<Self> {
-        write_frame(&mut stream, &Request::OpenSession(open).encode())?;
+        Self::open_request(&mut stream, Request::OpenSession(open))?;
+        Self::finish_open(stream, |_| Ok(()))
+    }
+
+    /// Preview rows are in index order, generation zero, and bounded to one page.
+    /// The final state replaces the preview with the requested sorted session.
+    pub fn open_with_preview(
+        mut stream: S,
+        open: SessionOpen,
+        preview: impl FnMut(Vec<SessionRow>) -> io::Result<()>,
+    ) -> io::Result<Self> {
+        Self::open_request(&mut stream, Request::OpenSessionPreview(open))?;
+        Self::finish_open(stream, preview)
+    }
+
+    fn open_request(stream: &mut S, request: Request) -> io::Result<()> {
+        write_frame(stream, &request.encode())
+    }
+
+    fn finish_open(
+        stream: S,
+        mut preview: impl FnMut(Vec<SessionRow>) -> io::Result<()>,
+    ) -> io::Result<Self> {
         let mut client = Self {
             stream,
             state: SessionState {
@@ -345,15 +371,29 @@ impl<S: Read + Write> SessionClient<S> {
                 total_size: 0,
             },
         };
-        match client.read()? {
-            SessionResponse::State(state) => {
-                client.state = state;
-                Ok(client)
+        loop {
+            match client.read()? {
+                SessionResponse::State(state) => {
+                    client.state = state;
+                    return Ok(client);
+                }
+                SessionResponse::Rows {
+                    state,
+                    offset: 0,
+                    rows,
+                } if state.generation == 0
+                    && state.total_count == rows.len()
+                    && rows.len() <= SESSION_PREVIEW_ROWS =>
+                {
+                    preview(rows)?
+                }
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unexpected session response",
+                    ));
+                }
             }
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "unexpected session response",
-            )),
         }
     }
 
@@ -494,6 +534,58 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn preview_reaches_callback_before_daemon_can_send_completion() {
+        use std::os::unix::net::UnixStream;
+        let (client, mut daemon) = UnixStream::pair().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let bytes = read_frame(&mut daemon, MAX_SESSION_FRAME_SIZE)
+                .unwrap()
+                .unwrap();
+            let request = Request::decode(&bytes).unwrap();
+            assert!(matches!(request, Request::OpenSessionPreview(_)));
+            assert_eq!(Request::decode(&request.encode()).unwrap(), request);
+            write_frame(
+                &mut daemon,
+                &SessionResponse::Rows {
+                    state: SessionState {
+                        generation: 0,
+                        total_count: 1,
+                        total_size: 0,
+                    },
+                    offset: 0,
+                    rows: vec![SessionRow {
+                        path: "/early.txt".into(),
+                        is_dir: false,
+                        size: 1,
+                        modified_unix: 0,
+                    }],
+                }
+                .encode(),
+            )
+            .unwrap();
+            // Completion cannot be sent until the consumer has handled the preview.
+            rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+            write_frame(&mut daemon, &SessionResponse::State(state(1)).encode()).unwrap();
+        });
+        let session = SessionClient::open_with_preview(
+            client,
+            SessionOpen {
+                raw: String::new(),
+                sort: None,
+            },
+            |rows| {
+                assert_eq!(rows[0].path, "/early.txt");
+                tx.send(()).unwrap();
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(session.state(), state(1));
+        server.join().unwrap();
     }
 
     #[test]

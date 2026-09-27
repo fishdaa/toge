@@ -2,6 +2,7 @@
 
 use crate::index::Index;
 use std::cmp::Ordering;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
@@ -89,10 +90,15 @@ pub fn sort_ids(index: &Index, ids: &mut [u32], key: SortKey, ascending: bool) {
     }
 }
 
+/// A stale [`OrderCache`] is skipped for match sets of at most
+/// 1/`DIRECT_SORT_DIVISOR` of the index.
+const DIRECT_SORT_DIVISOR: usize = 32;
+
 /// Name and path orders of the whole index, reused across queries. Sorting a
 /// query's matches by a cached order is a rank lookup instead of a string sort,
-/// which dominates query time for large result sets. The cache rebuilds itself
-/// whenever entries were added or removed since it was built.
+/// which dominates query time for large result sets. The cache merges entries
+/// added since it was built, replays recent removals, and rebuilds only when
+/// the index was replaced or the removal log no longer reaches back far enough.
 #[derive(Debug, Default)]
 pub struct OrderCache {
     name: Option<CachedOrder>,
@@ -174,22 +180,27 @@ impl CachedOrder {
         }
     }
 
-    /// Merge entries appended since the cache was built. Removals change the
-    /// epoch and force a full rebuild instead, since they renumber IDs.
+    /// Merge entries appended since the cache was built.
     fn extend(&mut self, index: &Index, key: KeyFn) {
-        let old = &self.ascending.order;
-        let first_new = old.len() as u32;
-        let mut added: Vec<u32> = (first_new..index.count() as u32).collect();
-        added
-            .sort_by(|&a, &b| key(&index.entries[a as usize]).cmp(key(&index.entries[b as usize])));
+        let added = (self.ascending.order.len() as u32..index.count() as u32).collect();
+        let old = std::mem::take(&mut self.ascending.order);
+        self.merge(index, key, old, added);
+    }
+
+    /// Merge `added` IDs into `old`, an order of every other current entry.
+    fn merge(&mut self, index: &Index, key: KeyFn, old: Vec<u32>, mut added: Vec<u32>) {
+        let key_of = |id: u32| key(&index.entries[id as usize]);
+        added.sort_by(|&a, &b| key_of(a).cmp(key_of(b)).then(a.cmp(&b)));
         let mut order = Vec::with_capacity(index.count());
         let mut copied = 0;
         for id in added {
-            let text = key(&index.entries[id as usize]);
-            // New IDs sort after every existing ID with an equal key.
+            let text = key_of(id);
+            // Equal keys stay in ascending ID order.
             let at = copied
-                + old[copied..]
-                    .partition_point(|&existing| key(&index.entries[existing as usize]) <= text);
+                + old[copied..].partition_point(|&existing| {
+                    let existing_text = key_of(existing);
+                    existing_text < text || (existing_text == text && existing < id)
+                });
             order.extend_from_slice(&old[copied..at]);
             order.push(id);
             copied = at;
@@ -197,7 +208,80 @@ impl CachedOrder {
         order.extend_from_slice(&old[copied..]);
         self.ascending = Ranked::new(order);
         self.descending = None;
+        self.epoch = index.epoch();
         self.revision = index.revision();
+    }
+
+    /// Replay `removals` (see [`Index::removals_since`]) onto the cached order:
+    /// drop removed IDs and renumber moved ones. Keys never change, so only
+    /// ties involving a renumbered ID need reordering, instead of a full sort.
+    fn renumber(&mut self, index: &Index, key: KeyFn, removals: &[(u32, u32)]) {
+        let key_of = |id: u32| key(&index.entries[id as usize]);
+        let cached_len = self.ascending.order.len() as u32;
+        // Which cached ID currently occupies a slot, for slots touched so far.
+        let mut owner: HashMap<u32, Option<u32>> = HashMap::new();
+        // Cached ID -> its current ID, or None once removed.
+        let mut remap: HashMap<u32, Option<u32>> = HashMap::new();
+        for &(removed, moved_from) in removals {
+            let owner_of = |owner: &HashMap<u32, Option<u32>>, slot: u32| {
+                owner
+                    .get(&slot)
+                    .copied()
+                    .unwrap_or((slot < cached_len).then_some(slot))
+            };
+            if let Some(cached) = owner_of(&owner, removed) {
+                remap.insert(cached, None);
+            }
+            if removed != moved_from {
+                let moved = owner_of(&owner, moved_from);
+                owner.insert(removed, moved);
+                if let Some(cached) = moved {
+                    remap.insert(cached, Some(removed));
+                }
+            }
+            owner.insert(moved_from, None);
+        }
+        let mut order: Vec<u32> = self
+            .ascending
+            .order
+            .iter()
+            .filter_map(|&id| remap.get(&id).copied().unwrap_or(Some(id)))
+            .collect();
+
+        let count = index.count();
+        let mut moved = vec![false; count];
+        for &id in remap.values().flatten() {
+            moved[id as usize] = true;
+        }
+        let mut position = 0;
+        while position < order.len() {
+            if !moved[order[position] as usize] {
+                position += 1;
+                continue;
+            }
+            let text = key_of(order[position]);
+            let mut start = position;
+            while start > 0 && key_of(order[start - 1]) == text {
+                start -= 1;
+            }
+            let mut end = position + 1;
+            while end < order.len() && key_of(order[end]) == text {
+                end += 1;
+            }
+            order[start..end].sort_unstable();
+            position = end;
+        }
+
+        // Entries appended after the cache was built may have moved into
+        // lower slots, so find them by absence rather than by ID range.
+        let mut present = vec![false; count];
+        for &id in &order {
+            present[id as usize] = true;
+        }
+        let added = (0..count as u32)
+            .filter(|&id| !present[id as usize])
+            .collect();
+        self.merge(index, key, order, added);
     }
 
     fn descending(&mut self, index: &Index, key: KeyFn) -> &Ranked {
@@ -228,6 +312,16 @@ impl OrderCache {
             SortKey::Path => (&mut self.path, |entry| entry.path.as_str()),
             _ => return sort_ids(index, ids, key, ascending),
         };
+        // Bringing a stale order up to date costs time proportional to the
+        // whole index, which a small match set does not repay while the index
+        // keeps changing; sort those matches directly and leave the cache for
+        // a larger query.
+        let current = slot.as_ref().is_some_and(|cached| {
+            cached.epoch == index.epoch() && cached.revision == index.revision()
+        });
+        if !current && ids.len() <= index.count() / DIRECT_SORT_DIVISOR {
+            return sort_ids(index, ids, key, ascending);
+        }
         match slot {
             Some(cached)
                 if cached.epoch == index.epoch()
@@ -236,6 +330,11 @@ impl OrderCache {
                 if cached.revision != index.revision() {
                     cached.extend(index, key_fn);
                 }
+            }
+            // Removals renumber IDs; patch the order rather than re-sorting
+            // every entry while the caller holds the index.
+            Some(cached) if let Some(removals) = index.removals_since(cached.epoch) => {
+                cached.renumber(index, key_fn, removals);
             }
             _ => *slot = Some(CachedOrder::build(index, key_fn)),
         }

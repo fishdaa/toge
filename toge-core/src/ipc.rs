@@ -12,6 +12,8 @@ pub enum Request {
     StreamQuery(StreamQueryRequest),
     /// Start a result session on this connection; see [`session`].
     OpenSession(session::SessionOpen),
+    /// Open with bounded preview rows before the final sorted state.
+    OpenSessionPreview(session::SessionOpen),
     Status,
     Flush,
     Reindex,
@@ -249,8 +251,12 @@ impl Request {
                     StreamOrder::Sorted => 1,
                 });
             }
-            Request::OpenSession(open) => {
-                buf.push(7);
+            Request::OpenSession(open) | Request::OpenSessionPreview(open) => {
+                buf.push(if matches!(self, Request::OpenSessionPreview(_)) {
+                    8
+                } else {
+                    7
+                });
                 push_string(&mut buf, &open.raw);
                 session::push_sort(&mut buf, open.sort);
             }
@@ -303,13 +309,18 @@ impl Request {
                     Ok(Request::Query(query))
                 }
             }
-            7 => {
+            7 | 8 => {
                 let raw = take_string(bytes, &mut off).ok_or("missing raw")?;
                 let sort = session::take_sort(bytes, &mut off).ok_or("invalid sort")?;
                 if off != bytes.len() {
                     return Err("trailing session bytes".into());
                 }
-                Ok(Request::OpenSession(session::SessionOpen { raw, sort }))
+                let open = session::SessionOpen { raw, sort };
+                Ok(if bytes[0] == 8 {
+                    Request::OpenSessionPreview(open)
+                } else {
+                    Request::OpenSession(open)
+                })
             }
             2 => Ok(Request::Status),
             3 => Ok(Request::Flush),

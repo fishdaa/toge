@@ -83,6 +83,7 @@ impl Pages {
 #[derive(Default)]
 pub struct Results {
     generation: Cell<u64>,
+    preview_selection: RefCell<Option<String>>,
     total: Cell<usize>,
     pages: RefCell<Pages>,
     session: RefCell<Option<Sender<Command>>>,
@@ -95,6 +96,26 @@ impl Results {
     pub fn attach(&self, session: Sender<Command>, state: SessionState) {
         *self.session.borrow_mut() = Some(session);
         self.reset(state);
+    }
+
+    /// Display a bounded provisional page while the query is still being built.
+    pub fn preview(&self, rows: Vec<SessionRow>, selected: i32) -> bool {
+        let first = self.generation.get() != 0 || self.session.borrow().is_some();
+        if self.session.borrow().is_some() {
+            *self.preview_selection.borrow_mut() = self.path(selected);
+        }
+        self.detach();
+        self.reset(SessionState {
+            generation: 0,
+            total_count: rows.len(),
+            total_size: 0,
+        });
+        self.fill(0, 0, rows);
+        first
+    }
+
+    pub fn take_preview_selection(&self) -> Option<String> {
+        self.preview_selection.borrow_mut().take()
     }
 
     /// Stop sending requests to a session that is gone.
@@ -287,6 +308,27 @@ mod tests {
             .unwrap()
             .text
             .to_string()
+    }
+
+    #[test]
+    fn preview_is_visible_without_fetching_and_final_state_discards_it() {
+        let (model, rx) = attached(10);
+        model.fill(1, 0, rows(0, 10));
+        model.preview(rows(20, 32), 3);
+        assert_eq!(model.row_count(), 32);
+        assert_eq!(text(&model, 0, 0), "20.txt");
+        assert!(!model.send(Command::Fetch(1)));
+        model.preview(rows(20, 64), -1);
+        assert_eq!(
+            model.take_preview_selection().as_deref(),
+            Some("/tmp/dir/3.txt")
+        );
+        assert_eq!(rx.try_iter().count(), 0);
+        let (tx, _) = channel();
+        model.attach(tx, state(1, 100));
+        assert!(model.path(0).is_none());
+        model.fill(1, 0, rows(0, 100));
+        assert_eq!(text(&model, 0, 0), "0.txt");
     }
 
     #[test]
