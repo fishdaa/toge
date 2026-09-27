@@ -23,11 +23,12 @@ If you are evaluating the project today, think of it as an early open source bui
 
 ## Workspace
 
-Toge is split into three crates:
+Toge is split into four crates:
 
 - `toge-core`: indexing, matching, sorting, config, and IPC primitives
 - `toged`: background daemon that builds and serves the index
 - `toge`: command-line client for querying the daemon
+- `toge-slint`: Slint desktop client for the daemon
 
 Repository layout:
 
@@ -36,6 +37,7 @@ Repository layout:
 ├── toge-core/     # shared library
 ├── toged/         # daemon binary sources
 ├── toge/          # CLI binary sources
+├── toge-slint/    # desktop GUI sources
 ├── needle-docs/   # architecture and design notes
 └── .github/       # CI, release, and repo automation
 ```
@@ -67,41 +69,32 @@ cd needle
 cargo build --workspace
 ```
 
-### Linux GUI Packages
+### Desktop GUI
 
-Stable releases include x86_64 and ARM64 DEB, RPM, and AppImage packages. Each
-package includes the desktop application, the `toge` CLI, and the `toged` daemon
-the GUI starts on demand. DEB and RPM installation grants `toged` the Linux
-capabilities required for filesystem-wide fanotify marks. Release assets also
-include SHA-256 checksum files.
+Linux binary archives include `toge-slint`, `toge`, and `toged` for x86_64 and
+ARM64. Extract the archive and run `./toge-slint`; keep the bundled daemon beside
+it. The client uses Slint's software renderer and does not require Node or
+WebKit. See [the Slint guide](toge-slint/README.md) for system dependencies,
+keyboard controls, live-update setup, and current limitations. Release assets
+also include SHA-256 checksum files.
 
-AppImage cannot apply this privileged installation step; use the DEB or RPM
-package when live fanotify indexing is required.
-
-Source builds must grant those capabilities after rebuilding the daemon:
+`toged` needs Linux capabilities for filesystem-wide fanotify marks. Grant them
+after extracting or rebuilding the daemon:
 
 ```bash
 sudo ./scripts/setcap-toged.sh target/debug/toged
 ```
 
-To build all GUI release formats locally:
-
-```bash
-npm ci --prefix toge-gui
-make gui-package V=0.1.12
-```
-
 ### GUI Development Profiles
 
-`make gui` keeps its settings separate from an installed Toge instance. Its
-configuration persists under `~/.config/toge-dev/default/toge`, while its
-socket and index are temporary and are removed when the development session
-ends. Assign the development instance a different global shortcut in Options
-to exercise both applications side by side.
+`make gui` (alias `make slint`) keeps its settings separate from an installed
+Toge instance. Its configuration persists under `~/.config/toge-dev/slint/toge`
+and its index under `~/.local/state/toge-dev/slint/toge`; only the temporary
+socket directory is removed when the development session ends.
 
 Use `make gui-release` for performance testing. It uses the same isolated
-development profile and Vite frontend, but builds both the Tauri application
-and `toged` with Rust release optimizations.
+development profile, but builds both `toge-slint` and `toged` with Rust
+release optimizations.
 
 Use a named profile when you need another independent set of development
 settings:
@@ -110,8 +103,8 @@ settings:
 TOGE_DEV_PROFILE=alternate make gui
 ```
 
-Set `TOGE_DEV_CONFIG_ROOT` to override the parent directory for all development
-profiles.
+Set `TOGE_DEV_CONFIG_ROOT` or `TOGE_DEV_STATE_ROOT` to override the parent
+directory for all development profiles.
 
 ### Development Checks
 
@@ -203,11 +196,3 @@ For security-sensitive reports, follow the guidance in [SECURITY.md](SECURITY.md
 ## License
 
 Toge is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
-
-### Slint desktop client
-
-Linux binary archives include `toge-slint`, `toge`, and `toged` for x86_64 and
-ARM64. Extract the archive and run `./toge-slint`; keep the bundled daemon beside
-it. This experimental client uses the software renderer and does not require
-Node or WebKit. See [the Slint guide](toge-slint/README.md) for system dependencies,
-keyboard controls, live-update setup, and current limitations.

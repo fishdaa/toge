@@ -14,11 +14,14 @@
 
 ### Changed
 
-- Updated serde to 1.0.229 (#28), serde_json to 1.0.151 (#29), libc to 0.2.189 (#30), time to 0.3.55 (#33), and Tauri to 2.11.6 (#34).
+- Updated serde to 1.0.229 (#28), serde_json to 1.0.151 (#29), libc to 0.2.189 (#30), and time to 0.3.55 (#33).
 - Updated the stale-issue action to v11 (#32).
 - CLI and daemon version output now follows the compiled workspace version.
 
+### Removed
+
+- The Tauri desktop GUI and its DEB, RPM, and AppImage packages. The Slint client in the binary archive replaces it; built-in global shortcuts, autostart, settings editing, and diagnostics are not yet available there.
+
 ### Notes
 
-- Tauri installer packages remain available; the Slint client is distributed in the binary archive.
 - Keep the bundled daemon beside the Slint executable. Older daemons do not support result sessions.

@@ -1,5 +1,5 @@
 [workspace]
-members = ["toge-core", "toged", "toge", "toge-gui/src-tauri", "toge-slint"]
+members = ["toge-core", "toged", "toge", "toge-slint"]
 resolver = "2"
 
 [workspace.package]

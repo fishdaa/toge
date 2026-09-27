@@ -540,7 +540,7 @@ fn status_text(state: SessionState, size_indexed: bool) -> String {
     crate::format::search_status(state.total_count, state.total_size, size_indexed)
 }
 
-/// Keep the status bar's index summary current, as toge-gui does every 3s.
+/// Keep the status bar's index summary current, refreshing every 3s.
 /// Only reads daemon status; searches are what start the daemon. Stops when
 /// the window closes.
 fn poll_index_status(

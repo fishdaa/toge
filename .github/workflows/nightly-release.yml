@@ -33,31 +33,18 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: toge-gui/package-lock.json
-
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libfontconfig1-dev \
-            libxkbcommon-dev \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libappindicator3-dev \
-            librsvg2-dev \
-            patchelf \
-            rpm
+            libxkbcommon-dev
 
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
           # Do not restore target/: a stale cache can leave Cargo fingerprints
-          # without the matching dependency artifacts (for example Tauri rlibs).
+          # without the matching dependency artifacts.
           cache-targets: false
 
       - name: Compute nightly version
@@ -74,14 +61,8 @@ jobs:
       - name: Build release binaries
         run: cargo build --workspace --release
 
-      - name: Install GUI dependencies
-        run: npm ci --prefix toge-gui
-
       - name: Package nightly artifacts
         run: scripts/release/package-artifacts.sh "${{ steps.nightly.outputs.version }}" nightly
-
-      - name: Package nightly Linux GUI (DEB, RPM, AppImage)
-        run: scripts/release/package-gui-artifacts.sh "${{ steps.nightly.outputs.version }}"
 
       - name: Move rolling nightly tag
         run: |
@@ -104,10 +85,6 @@ jobs:
           files: |
             dist/toge-*.tar.gz
             dist/toge-*.sha256
-            dist/toge-gui_*.deb
-            dist/toge-gui-*.rpm
-            dist/Toge_*.AppImage
-            dist/Toge_*.sha256
 
   package-binaries-arm64:
     needs: publish-nightly
@@ -118,13 +95,4 @@ jobs:
       tag_name: nightly
       target_triple: linux-aarch64
       channel: nightly
-    secrets: inherit
-
-  package-arm64:
-    needs: publish-nightly
-    uses: ./.github/workflows/package-gui-arm64.yml
-    with:
-      ref: nightly
-      version: ${{ needs.publish-nightly.outputs.version }}
-      tag_name: nightly
     secrets: inherit

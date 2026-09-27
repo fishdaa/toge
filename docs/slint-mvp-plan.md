@@ -1,8 +1,8 @@
 # Slint Rust GUI migration MVP
 
-Status: experimental MVP implemented on branch `slint`. See
-[`toge-slint/validation.md`](../toge-slint/validation.md) for completed checks and
-remaining performance/desktop validation. The targets below remain acceptance goals.
+Status: implemented. `toge-slint` has replaced the Tauri GUI, which has been
+removed; references to Tauri and `make gui` below describe the plan as written.
+See [`toge-slint/validation.md`](../toge-slint/validation.md) for completed checks.
 
 ## Objective
 

@@ -1,16 +1,16 @@
-# Toge Slint MVP
+# Toge Slint
 
-Experimental Linux desktop client for the existing `toged` daemon. Uses Rust,
-Slint 1.17.1, Winit and the software renderer. Release archives include `toge-slint` alongside the CLI and daemon; Tauri
-installer packages remain available separately.
+Linux desktop client for the `toged` daemon. Uses Rust, Slint 1.17.1, Winit and
+the software renderer. Release archives include `toge-slint` alongside the CLI
+and daemon.
 
 Download the archive for your Linux architecture from GitHub Releases, extract
 it, and run `./toge-slint` from the extracted directory. Keep the bundled `toged`
 next to it so the client uses a daemon with the matching session protocol.
 
 ```bash
-make slint                # isolated development daemon and settings
-make slint-release       # same, optimized
+make gui                  # isolated development daemon and settings
+make gui-release          # same, optimized
 ```
 
 The launcher rebuilds both binaries and runs the executable paths reported by
@@ -138,9 +138,9 @@ query. Session requests have a 30-second read timeout; status checks have a
 two-second timeout and retry while the daemon is busy, within the readiness
 deadline.
 
-This MVP does not implement built-in global shortcuts, autostart, settings editing,
-diagnostics, or installer packages. Edit configuration with the existing GUI or configuration
-file. Keyboard bindings in this experimental shell are fixed.
+The client does not yet implement built-in global shortcuts, autostart, settings
+editing, diagnostics, or installer packages. Edit configuration in the configuration
+file. Keyboard bindings are fixed.
 
 Slint is used under its Royalty-free Desktop, Mobile, and Web Applications license;
 the About dialog includes the `AboutSlint` attribution. See

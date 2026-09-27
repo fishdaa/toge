@@ -1,5 +1,5 @@
-.PHONY: help build build-release test test-coverage watcher-test clippy fmt \
-       gui gui-release gui-package \
+.PHONY: help build build-release test test-coverage clippy fmt \
+       gui gui-release \
        bench bench-compare perf perf-compare \
        set-version publish package verify-tag next-beta changelog
 
@@ -19,10 +19,6 @@ build-release: ## Build all crates (release)
 test: ## Run all Rust tests
 	cargo test
 
-watcher-test: ## Run watcher self-test coverage (Rust + GUI store test)
-	cargo test -p toge-gui-lib
-	cd toge-gui && npm test -- --run tests/stores/search.test.ts
-
 test-coverage: ## Run Rust tests with coverage
 	cargo llvm-cov --html
 
@@ -36,14 +32,11 @@ fmt: ## Format all code
 
 # ── GUI ────────────────────────────────────────────────
 
-gui: ## Run GUI in dev mode (Vite + Tauri)
-	./dev-gui.sh
+gui: ## Run the Slint GUI with isolated development settings
+	bash scripts/dev-slint.sh
 
-gui-release: ## Run GUI in dev mode with optimized Tauri and daemon binaries
-	./dev-gui.sh --release
-
-gui-package: ## Build DEB, RPM, and AppImage packages (usage: make gui-package V=0.1.12)
-	bash scripts/release/package-gui-artifacts.sh $(V)
+gui-release: ## Run the optimized Slint GUI with isolated development settings
+	bash scripts/dev-slint.sh --release
 
 # ── Bench / Perf ───────────────────────────────────────
 
@@ -80,8 +73,6 @@ changelog: ## Update changelog (usage: make changelog V=0.1.11 NOTES=notes.md)
 	bash scripts/release/update-changelog.sh $(V) $(NOTES)
 
 .PHONY: slint slint-release
-slint: ## Run the experimental Slint GUI with isolated development settings
-	bash scripts/dev-slint.sh
+slint: gui ## Alias for gui
 
-slint-release: ## Run the optimized experimental Slint GUI
-	bash scripts/dev-slint.sh --release
+slint-release: gui-release ## Alias for gui-release

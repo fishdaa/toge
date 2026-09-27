@@ -245,7 +245,7 @@ export component AppWindow inherits Window {
 
     FocusScope {
         width: 100%; height: 100%;
-        // Like toge-gui, Up/Down step through results from anywhere in the
+        // Up/Down step through results from anywhere in the
         // window, including the search field, without moving keyboard focus.
         capture-key-pressed(event) => {
             if (root.rename-row >= 0 || root.context-menu-open || root.delete-path != "" || root.rows.length == 0) { return reject; }
