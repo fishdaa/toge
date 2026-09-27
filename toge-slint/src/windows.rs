@@ -141,7 +141,8 @@ pub fn open() -> Result<AppWindow, slint::PlatformError> {
     Ok(ui)
 }
 
-/// Close one window for good; the GUI exits once no window remains.
+/// Close one window for good; the GUI exits once no window remains, unless
+/// the tray icon keeps it running.
 fn close(id: u64) {
     let entry = APP.with_borrow_mut(|app| {
         let index = app.windows.iter().position(|entry| entry.id == id)?;
@@ -152,7 +153,7 @@ fn close(id: u64) {
     entry.mailbox.close();
     // The component is still running its close handler; drop it afterwards.
     slint::Timer::single_shot(std::time::Duration::ZERO, move || drop(entry));
-    if count() == 0 {
+    if count() == 0 && !crate::tray::resident() {
         let _ = slint::quit_event_loop();
     }
 }
@@ -168,7 +169,7 @@ pub fn shutdown() {
     }
 }
 
-fn show_about() {
+pub fn show_about() {
     let about = match APP.with_borrow(|app| app.about.as_ref().map(|ui| ui.clone_strong())) {
         Some(ui) => ui,
         None => match AboutWindow::new() {

@@ -61,7 +61,17 @@ shortcuts (for example niri `spawn`) in place of global hotkeys. Ctrl+N opens a 
 window from inside the app. Each window has its own query, results, selection and
 daemon session; table sort and column widths are shared. Toggle acts on the most
 recently opened window and keeps its query and results while hidden. Closing a
-window discards it; the GUI exits when no window, including hidden ones, remains. Build requires Rust and Linux development
+window discards it; the GUI exits when no window, including hidden ones, remains, unless
+the tray icon is registered.
+
+The tray icon uses the freedesktop StatusNotifierItem protocol over D-Bus (KDE, most
+Wayland panels such as Waybar or Noctalia, and GNOME with the AppIndicator extension).
+Clicking it shows the current window; its menu offers Show Window, New Window, Toggle
+Window, About Toge and Quit. While the icon is registered, closing the last window keeps
+the GUI running in the tray, and Quit exits. Without a StatusNotifierItem host, or if the
+host goes away while no window is open, the GUI exits as before.
+
+Build requires Rust and Linux development
 libraries for Winit rendering (including fontconfig and xkbcommon).
 No Node, WebKit or Qt is needed for the Slint build. Runtime file actions use
 `xdg-open` and `gio trash`; the clipboard supports Wayland and X11 directly.
@@ -120,7 +130,7 @@ query. Session requests have a 30-second read timeout; status checks have a
 two-second timeout and retry while the daemon is busy, within the readiness
 deadline.
 
-This MVP does not implement a tray, built-in global shortcuts, autostart, settings editing,
+This MVP does not implement built-in global shortcuts, autostart, settings editing,
 diagnostics, or installer packages. Edit configuration with the existing GUI or configuration
 file. Keyboard bindings in this experimental shell are fixed.
 

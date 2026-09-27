@@ -5,6 +5,7 @@ mod format;
 mod instance;
 mod model;
 mod preferences;
+mod tray;
 mod windows;
 mod worker;
 slint::include_modules!();
@@ -44,9 +45,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = slint::invoke_from_event_loop(move || windows::handle(request));
         });
     }
-    // Hidden (toggled) windows keep the GUI running; closing the last window quits.
+    tray::start();
+    // Hidden (toggled) windows keep the GUI running; closing the last window
+    // quits unless the tray icon is registered.
     let result = slint::run_event_loop_until_quit();
     windows::shutdown();
+    tray::stop();
     if owns_socket {
         let _ = std::fs::remove_file(&socket);
     }
