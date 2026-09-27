@@ -24,6 +24,7 @@ pub struct NdlOptions {
     pub highlight: bool,
     pub highlight_color: u8,
     pub stream: bool,
+    pub no_wait: bool,
     pub status: bool,
     pub save_db: bool,
     pub reindex: bool,
@@ -43,6 +44,8 @@ pub enum OutputFormat {
     Tsv,
     Txt,
     Efu,
+    /// One JSON object per result row (and a single object for `--status`).
+    Jsonl,
 }
 
 impl Default for NdlOptions {
@@ -70,6 +73,7 @@ impl Default for NdlOptions {
             highlight: false,
             highlight_color: 2,
             stream: false,
+            no_wait: false,
             status: false,
             save_db: false,
             reindex: false,
@@ -97,6 +101,12 @@ impl NdlOptions {
         iter.next();
 
         while let Some(arg) = iter.next() {
+            // `--` ends option parsing so search text may start with `-` or `/`.
+            if arg == "--" {
+                positional.extend(iter.by_ref());
+                break;
+            }
+
             if arg.starts_with('/') {
                 parse_windows_flag(&arg, &mut positional)?;
                 continue;
@@ -146,6 +156,7 @@ impl NdlOptions {
                 "tsv" => opts.format = OutputFormat::Tsv,
                 "txt" => opts.format = OutputFormat::Txt,
                 "efu" => opts.format = OutputFormat::Efu,
+                "json" | "jsonl" => opts.format = OutputFormat::Jsonl,
                 "export-csv" => {
                     let value = iter.next().ok_or("missing export file")?;
                     opts.export_file = Some(value);
@@ -174,6 +185,7 @@ impl NdlOptions {
                     opts.highlight_color = value.parse().map_err(|_| "invalid highlight color")?;
                 }
                 "stream" => opts.stream = true,
+                "no-wait" => opts.no_wait = true,
                 "status" => opts.status = true,
                 "save-db" => opts.save_db = true,
                 "reindex" => opts.reindex = true,

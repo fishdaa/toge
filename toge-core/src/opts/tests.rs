@@ -180,3 +180,35 @@ fn test_parse_negative_max_results_is_error() {
     let result = NdlOptions::parse(["toge".into(), "-n".into(), "-5".into(), "foo".into()]);
     assert!(result.is_err());
 }
+
+#[test]
+fn test_parse_double_dash_keeps_following_args_as_search_text() {
+    let opts = NdlOptions::parse([
+        "toge".into(),
+        "-n".into(),
+        "5".into(),
+        "--".into(),
+        "-foo".into(),
+        "/home/user".into(),
+        "--json".into(),
+    ])
+    .unwrap();
+    assert_eq!(opts.max_results, 5);
+    assert_eq!(opts.search, "-foo /home/user --json");
+    assert_eq!(opts.format, OutputFormat::Default);
+}
+
+#[test]
+fn test_parse_json_flags() {
+    for flag in ["--json", "--jsonl", "-json"] {
+        let opts = NdlOptions::parse(["toge".into(), flag.into(), "foo".into()]).unwrap();
+        assert_eq!(opts.format, OutputFormat::Jsonl, "{flag}");
+    }
+}
+
+#[test]
+fn test_parse_no_wait_flag() {
+    let opts = NdlOptions::parse(["toge".into(), "--no-wait".into(), "foo".into()]).unwrap();
+    assert!(opts.no_wait);
+    assert_eq!(opts.search, "foo");
+}

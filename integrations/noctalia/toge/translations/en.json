@@ -1,0 +1,34 @@
+{
+  "launcher": {
+    "error": "Search failed",
+    "gui_title": "Open Toge",
+    "gui_subtitle": "Show the Toge search window",
+    "hint_subtitle": "Examples: ext:pdf report · folder: src · regex:^main\\.rs$ · sort:dm",
+    "hint_title": "Type to search the toge index",
+    "indexing": "Toge is indexing…",
+    "missing": "toge not found",
+    "missing_subtitle": "Install toge or set the toge command in the plugin settings",
+    "no_results": "No matches",
+    "reindex_started": "Rebuilding the toge index",
+    "reindex_subtitle": "Rescan every indexed folder",
+    "reindex_title": "Rebuild index",
+    "status_ready": "{count} entries indexed",
+    "status_title": "Toge index",
+    "timed_out": "toge did not answer in time"
+  },
+  "settings": {
+    "gui_command": {
+      "description": "Program started by the Open Toge row.",
+      "label": "Toge GUI command"
+    },
+    "max_results": {
+      "description": "How many matches the launcher lists at most.",
+      "label": "Max results"
+    },
+    "toge_command": {
+      "description": "Name or path of the toge CLI. It must support --json and --no-wait.",
+      "label": "toge command"
+    }
+  },
+  "title": "Toge"
+}
