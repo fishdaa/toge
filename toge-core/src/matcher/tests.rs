@@ -233,8 +233,8 @@ fn test_long_substring_uses_selective_trigram_candidates() {
     for i in 0..2_000 {
         idx.insert(&format!("/tmp/document-{i:04}.txt"), false);
     }
-    let first = idx.insert("/videos/movie-one.mkv", false);
-    let second = idx.insert("/videos/movie-two.MKV", false);
+    let first = idx.insert("/videos/movie-one.mkv", false).unwrap();
+    let second = idx.insert("/videos/movie-two.MKV", false).unwrap();
     let query = substring_query(".mkv");
 
     let candidates = idx.search_substring(".mkv");
@@ -246,7 +246,7 @@ fn test_long_substring_uses_selective_trigram_candidates() {
 fn test_trigram_seed_preserves_case_sensitive_semantics() {
     let mut idx = Index::new();
     idx.insert("/videos/lower.mkv", false);
-    let upper = idx.insert("/videos/upper.MKV", false);
+    let upper = idx.insert("/videos/upper.MKV", false).unwrap();
     let mut query = substring_query(".MKV");
     query.match_case = true;
 

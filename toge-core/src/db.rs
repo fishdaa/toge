@@ -1,7 +1,8 @@
 //! Index persistence: save/load binary format.
 
 use crate::index::{
-    Entry, Index, fnv1a_64, fnv1a_extend, lowered_bytes, push_index_value, unique_trigrams,
+    Entry, Index, entry_id, fnv1a_64, fnv1a_extend, lowered_bytes, push_index_value,
+    unique_trigrams,
 };
 use std::collections::HashMap;
 use std::fs;
@@ -296,6 +297,16 @@ impl Index {
             let name_off = u16::from_le_bytes([data[meta_off], data[meta_off + 1]]);
             let ext_off = u16::from_le_bytes([data[meta_off + 2], data[meta_off + 3]]);
             let is_dir = data[meta_off + 4] != 0;
+            // `Entry::name` and `Entry::extension` slice `path` at these offsets.
+            let ext_start = usize::from(ext_off);
+            if !path.is_char_boundary(usize::from(name_off))
+                || (ext_off > name_off && !path.is_char_boundary(ext_start))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "entry offset outside its path",
+                ));
+            }
             entries.push(Entry {
                 path: path.to_string(),
                 name_off,
@@ -460,26 +471,14 @@ impl Index {
         let mut path_to_id = HashMap::with_capacity(entry_count);
         for (id, entry) in entries.iter().enumerate() {
             let path_hash = fnv1a_64(entry.path.as_bytes());
-            // `id` is bounded by `entry_count`, which was checked above against
-            // `MAX_ENTRY_COUNT` (10,000,000), far below `u32::MAX`.
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "id < entry_count <= MAX_ENTRY_COUNT, which fits in u32"
-            )]
-            path_to_id.insert(path_hash, id as u32);
+            path_to_id.insert(path_hash, entry_id(id));
         }
 
         // Rebuild trigram and prefix indexes from loaded entries.
         let mut trigrams = HashMap::new();
         let mut prefix_first_byte = HashMap::new();
         for (id, entry) in entries.iter().enumerate() {
-            // `id` is bounded by `entry_count`, which was checked above against
-            // `MAX_ENTRY_COUNT` (10,000,000), far below `u32::MAX`.
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "id < entry_count <= MAX_ENTRY_COUNT, which fits in u32"
-            )]
-            let id = id as u32;
+            let id = entry_id(id);
             let name_lower = lowered_bytes(entry.name());
             for trigram in unique_trigrams(&name_lower) {
                 push_index_value(trigrams.entry(trigram).or_insert_with(Vec::new), id);

@@ -1,7 +1,3 @@
-#![allow(
-    clippy::cast_possible_truncation,
-    reason = "test fixtures use tiny, well-known entry counts that always fit in u32"
-)]
 use super::*;
 
 fn sample_index() -> Index {
@@ -17,9 +13,9 @@ fn sample_index() -> Index {
 #[test]
 fn test_insert_assigns_sequential_ids() {
     let mut idx = Index::new();
-    assert_eq!(idx.insert("/a.txt", false), 0);
-    assert_eq!(idx.insert("/b.rs", false), 1);
-    assert_eq!(idx.insert("/dir", true), 2);
+    assert_eq!(idx.insert("/a.txt", false), Some(0));
+    assert_eq!(idx.insert("/b.rs", false), Some(1));
+    assert_eq!(idx.insert("/dir", true), Some(2));
 }
 
 #[test]
@@ -193,8 +189,12 @@ fn test_insert_directory_sets_is_dir() {
 fn test_duplicate_insert_updates_existing_entry_in_place() {
     let mut idx = Index::new();
 
-    let first = idx.insert_with_metadata("/tmp/video.mkv", false, 10, 100, 100, 100);
-    let second = idx.insert_with_metadata("/tmp/video.mkv", false, 20, 200, 300, 400);
+    let first = idx
+        .insert_with_metadata("/tmp/video.mkv", false, 10, 100, 100, 100)
+        .unwrap();
+    let second = idx
+        .insert_with_metadata("/tmp/video.mkv", false, 20, 200, 300, 400)
+        .unwrap();
 
     assert_eq!(first, second);
     assert_eq!(idx.count(), 1);
@@ -240,7 +240,7 @@ fn compaction_releases_capacity_and_preserves_mutable_search_indexes() {
     assert_eq!(idx.search_prefix("document"), prefix);
     assert_eq!(idx.by_extension("txt").unwrap(), extensions);
     for (id, entry) in idx.entries.iter().enumerate() {
-        assert_eq!(idx.id_by_path(&entry.path), Some(id as u32));
+        assert_eq!(idx.id_by_path(&entry.path), Some(entry_id(id)));
     }
     let entry_capacity = idx.entries.capacity();
     let posting_capacity = idx.by_ext["txt"].capacity();
@@ -260,9 +260,24 @@ fn metadata_refresh_by_id_preserves_paths_and_handles_missing_ids() {
     let path = dir.path().join("file.txt");
     std::fs::write(&path, "updated content").unwrap();
     let mut idx = Index::new();
-    let id = idx.insert(path.to_str().unwrap(), false);
+    let id = idx.insert(path.to_str().unwrap(), false).unwrap();
     assert!(idx.update_metadata_by_id(id));
     assert_eq!(idx.entries[id as usize].size, 15);
     assert_eq!(idx.get_path(id), path.to_str());
     assert!(!idx.update_metadata_by_id(u32::MAX));
+}
+
+#[test]
+fn test_insert_rejects_names_starting_past_u16_offsets() {
+    let mut idx = Index::new();
+    let deep = format!("/{}/file.txt", "d".repeat(usize::from(u16::MAX)));
+    assert_eq!(idx.insert(&deep, false), None);
+    assert_eq!(idx.count(), 0);
+    assert_eq!(idx.id_by_path(&deep), None);
+
+    // Only the offsets need to fit, not the whole path.
+    let long_name = format!("/{}", "n".repeat(usize::from(u16::MAX) + 1));
+    let id = idx.insert(&long_name, false).unwrap();
+    assert_eq!(idx.entries[id as usize].name(), &long_name[1..]);
+    assert_eq!(idx.entries[id as usize].extension(), "");
 }

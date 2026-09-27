@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use toge_core::config::Config;
-use toge_core::index::Index;
+use toge_core::index::{Index, entry_id};
 use toge_core::ipc::{
     DaemonStatus, MAX_IPC_MESSAGE_SIZE, MAX_STREAM_FRAME_SIZE, QueryRequest, Request, Response,
     ResultRow, ResultsResponse, STREAM_BATCH_SIZE, StatusResponse, StreamEvent, StreamOrder,
@@ -345,17 +345,6 @@ fn elapsed_ms(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
-/// Convert an entry index/count to the `u32` IDs used throughout `toge-core`
-/// (see `Index::entries`/`id_by_path`). Saturates rather than wrapping, since
-/// an index with more than `u32::MAX` entries is not otherwise supported.
-#[allow(
-    clippy::cast_possible_truncation,
-    reason = "toge-core entry IDs are u32; saturating is a safe fallback if that invariant is ever broken"
-)]
-pub(crate) fn as_entry_id(n: usize) -> u32 {
-    n.min(u32::MAX as usize) as u32
-}
-
 fn is_ignored_path(path: &str, state_dir: &Path, config_dir: &Path, is_dir: bool) -> bool {
     let path = Path::new(path);
     canonical_starts_with(path, state_dir)
@@ -627,7 +616,7 @@ fn prepare_query_ids(
         || query.date_created.is_some()
         || query.date_accessed.is_some();
     if needs_all_metadata {
-        for id in 0..as_entry_id(index.count()) {
+        for id in 0..entry_id(index.count()) {
             if missing_query_dates(&index.entries[id as usize], query) {
                 index.update_metadata_by_id(id);
             }
@@ -785,9 +774,7 @@ fn stream_results(
                 "stream deadline exceeded",
             ));
         }
-        let id = ids
-            .as_ref()
-            .map_or(as_entry_id(position), |ids| ids[position]);
+        let id = ids.as_ref().map_or(entry_id(position), |ids| ids[position]);
         if !matched && needs_dates && missing_query_dates(&index.entries[id as usize], &query) {
             index.update_metadata_by_id(id);
         }

@@ -1,6 +1,6 @@
 //! Sorting utilities and fast-sort indexes.
 
-use crate::index::Index;
+use crate::index::{Index, entry_id};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
@@ -127,13 +127,7 @@ impl Ranked {
     fn new(order: Vec<u32>) -> Self {
         let mut rank = vec![0u32; order.len()];
         for (position, &id) in order.iter().enumerate() {
-            // `position` is bounded by `order.len()`, well under `u32::MAX`;
-            // see `Index::entry_count_u32`.
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "position < order.len(), which fits in u32; see Index::entry_count_u32"
-            )]
-            let position = position as u32;
+            let position = entry_id(position);
             rank[id as usize] = position;
         }
         Self { order, rank }
@@ -164,14 +158,6 @@ type KeyFn = fn(&crate::index::Entry) -> &str;
 
 impl CachedOrder {
     fn build(index: &Index, key: KeyFn) -> Self {
-        // An 8-byte big-endian prefix orders like the string itself, so most
-        // comparisons avoid chasing the string pointer.
-        // `id` is bounded by `index.entries.len()`, well under `u32::MAX`;
-        // see `Index::entry_count_u32`.
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "id < index.entries.len(), which fits in u32; see Index::entry_count_u32"
-        )]
         let mut keyed: Vec<(u64, u32, &str)> = index
             .entries
             .iter()
@@ -181,7 +167,7 @@ impl CachedOrder {
                 let mut prefix = [0u8; 8];
                 let len = text.len().min(8);
                 prefix[..len].copy_from_slice(&text.as_bytes()[..len]);
-                (u64::from_be_bytes(prefix), id as u32, text)
+                (u64::from_be_bytes(prefix), entry_id(id), text)
             })
             .collect();
         keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(b.2)).then(a.1.cmp(&b.1)));
@@ -195,13 +181,8 @@ impl CachedOrder {
 
     /// Merge entries appended since the cache was built.
     fn extend(&mut self, index: &Index, key: KeyFn) {
-        // Bounded by `index.count()`, well under `u32::MAX`; see `Index::entry_count_u32`.
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "order.len() and index.count() fit in u32; see Index::entry_count_u32"
-        )]
         let mut added: Vec<u32> =
-            (self.ascending.order.len() as u32..index.count() as u32).collect();
+            (entry_id(self.ascending.order.len())..entry_id(index.count())).collect();
         let old = std::mem::take(&mut self.ascending.order);
         self.merge(index, key, &old, &mut added);
     }
@@ -236,12 +217,7 @@ impl CachedOrder {
     /// ties involving a renumbered ID need reordering, instead of a full sort.
     fn renumber(&mut self, index: &Index, key: KeyFn, removals: &[(u32, u32)]) {
         let key_of = |id: u32| key(&index.entries[id as usize]);
-        // Bounded by `index.count()`, well under `u32::MAX`; see `Index::entry_count_u32`.
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "order.len() fits in u32; see Index::entry_count_u32"
-        )]
-        let cached_len = self.ascending.order.len() as u32;
+        let cached_len = entry_id(self.ascending.order.len());
         // Which cached ID currently occupies a slot, for slots touched so far.
         let mut owner: HashMap<u32, Option<u32>> = HashMap::new();
         // Cached ID -> its current ID, or None once removed.
@@ -302,12 +278,7 @@ impl CachedOrder {
         for &id in &order {
             present[id as usize] = true;
         }
-        // Bounded by `index.count()`, well under `u32::MAX`; see `Index::entry_count_u32`.
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "count fits in u32; see Index::entry_count_u32"
-        )]
-        let mut added: Vec<u32> = (0..count as u32)
+        let mut added: Vec<u32> = (0..entry_id(count))
             .filter(|&id| !present[id as usize])
             .collect();
         self.merge(index, key, &order, &mut added);

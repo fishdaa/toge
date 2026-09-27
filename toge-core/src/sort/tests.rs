@@ -1,7 +1,3 @@
-#![allow(
-    clippy::cast_possible_truncation,
-    reason = "test fixtures use tiny, well-known entry counts that always fit in u32"
-)]
 use super::*;
 use crate::index::Index;
 
@@ -17,7 +13,7 @@ fn sample_index() -> Index {
 #[test]
 fn test_sort_by_name_ascending() {
     let idx = sample_index();
-    let mut ids: Vec<u32> = (0..idx.count() as u32).collect();
+    let mut ids: Vec<u32> = (0..entry_id(idx.count())).collect();
     sort_ids(&idx, &mut ids, SortKey::Name, true);
     let names: Vec<&str> = ids.iter().map(|id| idx.get_path(*id).unwrap()).collect();
     assert_eq!(
@@ -34,7 +30,7 @@ fn test_sort_by_name_ascending() {
 #[test]
 fn test_sort_by_path_ascending() {
     let idx = sample_index();
-    let mut ids: Vec<u32> = (0..idx.count() as u32).collect();
+    let mut ids: Vec<u32> = (0..entry_id(idx.count())).collect();
     sort_ids(&idx, &mut ids, SortKey::Path, true);
     let names: Vec<&str> = ids.iter().map(|id| idx.get_path(*id).unwrap()).collect();
     assert_eq!(
@@ -51,7 +47,7 @@ fn test_sort_by_path_ascending() {
 #[test]
 fn test_sort_by_size_descending() {
     let idx = sample_index();
-    let mut ids: Vec<u32> = (0..idx.count() as u32).collect();
+    let mut ids: Vec<u32> = (0..entry_id(idx.count())).collect();
     sort_ids(&idx, &mut ids, SortKey::Size, false);
     // Largest first. Placeholder sizes may all be zero, so just ensure it doesn't panic.
     assert_eq!(ids.len(), 4);
@@ -69,7 +65,7 @@ fn cached_orders_match_sort_ids_for_every_shape_and_track_index_changes() {
         idx.insert(&format!("/d{}/{name}", i % 3), false);
     }
     let mut cache = OrderCache::default();
-    let all: Vec<u32> = (0..idx.count() as u32).collect();
+    let all: Vec<u32> = (0..entry_id(idx.count())).collect();
     // Large (bitmap pass) and small (rank sort) result sets, both directions.
     for ids in [all.clone(), vec![6, 1, 3], vec![]] {
         for key in [SortKey::Name, SortKey::Path, SortKey::Size] {
@@ -86,7 +82,7 @@ fn cached_orders_match_sort_ids_for_every_shape_and_track_index_changes() {
     }
     idx.remove("/d1/a");
     idx.insert("/d2/0-first", false);
-    let mut ids: Vec<u32> = (0..idx.count() as u32).collect();
+    let mut ids: Vec<u32> = (0..entry_id(idx.count())).collect();
     let mut expected = ids.clone();
     sort_ids(&idx, &mut expected, SortKey::Name, true);
     cache.sort(&idx, &mut ids, SortKey::Name, true);
@@ -107,7 +103,7 @@ fn cached_orders_merge_insertions_without_a_rebuild() {
         idx.insert(&format!("/{}/{name}", idx.count()), false);
     }
     for ascending in [true, false] {
-        let all: Vec<u32> = (0..idx.count() as u32).collect();
+        let all: Vec<u32> = (0..entry_id(idx.count())).collect();
         let mut expected = all.clone();
         sort_ids(&idx, &mut expected, SortKey::Name, ascending);
         let mut actual = all;
@@ -128,7 +124,7 @@ fn cached_orders_replay_removals_and_renumbered_ties() {
     let check = |idx: &Index, cache: &mut OrderCache| {
         for key in [SortKey::Name, SortKey::Path] {
             for ascending in [true, false] {
-                let all: Vec<u32> = (0..idx.count() as u32).collect();
+                let all: Vec<u32> = (0..entry_id(idx.count())).collect();
                 let mut expected = all.clone();
                 sort_ids(idx, &mut expected, key, ascending);
                 let mut actual = all;
@@ -143,7 +139,7 @@ fn cached_orders_replay_removals_and_renumbered_ties() {
     let mut seed = 7u32;
     for step in 0..60 {
         seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-        let id = (seed >> 8) % idx.count() as u32;
+        let id = (seed >> 8) % entry_id(idx.count());
         let path = idx.get_path(id).unwrap().to_string();
         idx.remove(&path);
         if step % 3 == 0 {
@@ -171,7 +167,7 @@ fn small_match_sets_skip_a_stale_cache_but_sort_identically() {
         idx.insert(&format!("/d/{}.txt", 127 - i), false);
     }
     let mut cache = OrderCache::default();
-    let mut all: Vec<u32> = (0..idx.count() as u32).collect();
+    let mut all: Vec<u32> = (0..entry_id(idx.count())).collect();
     cache.sort(&idx, &mut all, SortKey::Name, true);
     let built_at = cache.name.as_ref().unwrap().epoch;
 
@@ -186,7 +182,7 @@ fn small_match_sets_skip_a_stale_cache_but_sort_identically() {
     assert_eq!(cache.name.as_ref().unwrap().epoch, built_at);
 
     // A large set still brings the cache up to date.
-    let mut all: Vec<u32> = (0..idx.count() as u32).collect();
+    let mut all: Vec<u32> = (0..entry_id(idx.count())).collect();
     let mut expected = all.clone();
     sort_ids(&idx, &mut expected, SortKey::Name, true);
     cache.sort(&idx, &mut all, SortKey::Name, true);

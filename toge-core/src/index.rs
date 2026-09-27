@@ -199,6 +199,14 @@ pub struct Index {
     pub(crate) removal_base: u64,
 }
 
+/// Converts a position in [`Index::entries`] to its entry ID.
+///
+/// [`Index::insert_with_metadata`] refuses to grow an index to `u32::MAX`
+/// entries, so every position and the entry count itself fit in a `u32`.
+pub fn entry_id(position: usize) -> u32 {
+    u32::try_from(position).expect("an index holds fewer than u32::MAX entries")
+}
+
 /// Removal records kept for [`Index::removals_since`]; older caches rebuild.
 const REMOVAL_LOG_LIMIT: usize = 1 << 16;
 
@@ -207,17 +215,8 @@ impl Index {
         Self::default()
     }
 
-    /// `entries.len()` as a `u32`, the width used for entry IDs throughout
-    /// the index. Entry IDs are handed out sequentially starting from 0, so
-    /// this would only truncate past 4 billion entries, which is far beyond
-    /// what this in-memory structure (or the on-disk format, capped at 10
-    /// million entries in `db::load`) is built to hold.
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "entry ids stay well under u32::MAX in practice; see doc comment"
-    )]
     fn entry_count_u32(&self) -> u32 {
-        self.entries.len() as u32
+        entry_id(self.entries.len())
     }
 
     /// Counter that changes whenever previously returned IDs may be stale.
@@ -248,10 +247,18 @@ impl Index {
         self.removals.get(start..)
     }
 
-    pub fn insert(&mut self, path: &str, is_dir: bool) -> u32 {
+    /// Insert or update `path`, returning its entry ID. See
+    /// [`Index::insert_with_metadata`] for when this returns `None`.
+    pub fn insert(&mut self, path: &str, is_dir: bool) -> Option<u32> {
         self.insert_with_metadata(path, is_dir, 0, 0, 0, 0)
     }
 
+    /// Insert or update `path` with its metadata, returning its entry ID.
+    ///
+    /// Returns `None`, leaving the index unchanged, when the path cannot be
+    /// stored: its filename or extension starts past byte `u16::MAX` (entries
+    /// keep those offsets as `u16`), or the index already holds
+    /// `u32::MAX - 1` entries and has no ID left to hand out.
     pub fn insert_with_metadata(
         &mut self,
         path: &str,
@@ -260,11 +267,13 @@ impl Index {
         modified: i64,
         created: i64,
         accessed: i64,
-    ) -> u32 {
+    ) -> Option<u32> {
         let path_hash = fnv1a_64(path.as_bytes());
+        let mut replaces_existing = false;
         if let Some(&id) = self.path_to_id.get(&path_hash) {
             let entry = &mut self.entries[id as usize];
-            if entry.path == path && entry.is_dir == is_dir {
+            replaces_existing = entry.path == path;
+            if replaces_existing && entry.is_dir == is_dir {
                 if (entry.size, entry.modified, entry.created, entry.accessed)
                     != (size, modified, created, accessed)
                 {
@@ -274,34 +283,29 @@ impl Index {
                 entry.modified = modified;
                 entry.created = created;
                 entry.accessed = accessed;
-                return id;
-            }
-            if entry.path == path {
-                self.remove(path);
+                return Some(id);
             }
         }
 
-        let id = self.entry_count_u32();
-        self.revision += 1;
-        // `name_off`/`ext_off` are u16 byte offsets into `path`. Real filesystem paths
-        // stay far below u16::MAX (65535) bytes (PATH_MAX is a few thousand bytes at
-        // most on the platforms this crate targets), so this cast does not truncate
-        // in practice; it preserves the existing on-disk `Entry` layout.
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "path byte offsets stay well under u16::MAX in practice; see comment above"
-        )]
-        let name_off = path.rfind('/').map_or(0, |i| i + 1) as u16;
-        let name = &path[name_off as usize..];
-        #[allow(
-            clippy::cast_possible_truncation,
-            reason = "path byte offsets stay well under u16::MAX in practice; see comment above"
-        )]
-        let ext_off = if is_dir {
+        let name_start = path.rfind('/').map_or(0, |i| i + 1);
+        let name = &path[name_start..];
+        let ext_start = if is_dir {
             0
         } else {
-            name.rfind('.').map_or(0, |i| name_off as usize + i + 1) as u16
+            name.rfind('.').map_or(0, |i| name_start + i + 1)
         };
+        let (Ok(name_off), Ok(ext_off)) = (u16::try_from(name_start), u16::try_from(ext_start))
+        else {
+            return None;
+        };
+        if self.entry_count_u32() == u32::MAX {
+            return None;
+        }
+        if replaces_existing {
+            self.remove(path);
+        }
+        let id = self.entry_count_u32();
+        self.revision += 1;
 
         let entry = Entry {
             path: path.to_string(),
@@ -335,7 +339,7 @@ impl Index {
             push_index_value(self.prefix_first_byte.entry(first_byte).or_default(), id);
         }
 
-        id
+        Some(id)
     }
 
     pub fn remove(&mut self, path: &str) -> bool {
@@ -478,19 +482,12 @@ impl Index {
         } else if needle_bytes.is_empty() {
             (0..self.entry_count_u32()).collect()
         } else {
-            // `i` is bounded by `self.entries.len()`; see `entry_count_u32`.
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "i < entries.len(), which fits in u32; see entry_count_u32"
-            )]
-            let ids: Vec<u32> = self
-                .entries
+            self.entries
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| contains_ignore_case(e.name(), needle_bytes))
-                .map(|(i, _)| i as u32)
-                .collect();
-            ids
+                .map(|(i, _)| entry_id(i))
+                .collect()
         }
     }
 
@@ -584,12 +581,7 @@ impl Index {
         self.trigrams.clear();
         self.prefix_first_byte.clear();
         for (id, entry) in self.entries.iter().enumerate() {
-            // `id` is bounded by `self.entries.len()`; see `entry_count_u32`.
-            #[allow(
-                clippy::cast_possible_truncation,
-                reason = "id < entries.len(), which fits in u32; see entry_count_u32"
-            )]
-            let id = id as u32;
+            let id = entry_id(id);
             let path_hash = fnv1a_64(entry.path.as_bytes());
             self.path_to_id.insert(path_hash, id);
             if !entry.is_dir {

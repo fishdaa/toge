@@ -134,7 +134,9 @@ mod tests {
     static EXEC_LOCK: Mutex<()> = Mutex::new(());
 
     fn exec_lock() -> MutexGuard<'static, ()> {
-        EXEC_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        EXEC_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn tool(dir: &Path, name: &str, body: &str) -> PathBuf {
