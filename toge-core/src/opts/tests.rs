@@ -102,7 +102,6 @@ fn test_parse_display_flags() {
     let opts = NdlOptions::parse([
         "toge".into(),
         "-no-header".into(),
-        "-pause".into(),
         "-highlight".into(),
         "-highlight-color".into(),
         "7".into(),
@@ -110,7 +109,6 @@ fn test_parse_display_flags() {
     ])
     .unwrap();
     assert!(opts.no_header);
-    assert!(opts.pause);
     assert!(opts.highlight);
     assert_eq!(opts.highlight_color, 7);
 }

@@ -25,6 +25,12 @@ cargo test --workspace --all-targets
 python3 -m unittest discover -s scripts/tests
 ```
 
+The Python suite includes `scripts/tests/test_docs.py`, which fails when the
+`toge`/`toged` README CLI blocks drift from each binary's `usage()` text, when a
+parsed CLI flag is missing from `toge/README.md`, when `release-notes.md` and the
+current `CHANGELOG.md` section disagree, or when a Markdown link points at a
+missing or gitignored file. Update the docs in the same change as the code.
+
 ## Versioning
 
 Toge follows Semantic Versioning:

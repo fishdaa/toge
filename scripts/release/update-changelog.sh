@@ -19,6 +19,7 @@ assert_clean_version "$version"
 
 python3 - "$version" "$notes_file" "$date_value" <<'PY'
 import pathlib
+import re
 import sys
 
 version = sys.argv[1]
@@ -41,6 +42,19 @@ if f"## [{version}] - " in text:
     raise SystemExit(f"CHANGELOG.md already contains {version}")
 
 updated = text.replace(marker, marker + "\n" + new_section, 1)
+
+# Keep the Keep a Changelog compare links current: point Unreleased at the new
+# tag and add a link comparing the new tag with the previous one.
+unreleased_link = re.compile(r"^\[Unreleased\]: (?P<base>\S+)/compare/(?P<prev>\S+)\.\.\.HEAD$", re.M)
+match = unreleased_link.search(updated)
+if match:
+    base, prev = match.group("base"), match.group("prev")
+    links = (
+        f"[Unreleased]: {base}/compare/v{version}...HEAD\n"
+        f"[{version}]: {base}/compare/{prev}...v{version}"
+    )
+    updated = updated[: match.start()] + links + updated[match.end() :]
+
 changelog_path.write_text(updated)
 PY
 

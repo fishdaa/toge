@@ -28,6 +28,11 @@ Search options:
   -n, -max-results <n>  Max results
   --stream             Stream results in index order (--sort enables sorting)
 
+Output:
+  --json                JSON Lines output (one object per result or status)
+  --no-wait             Exit with code 10 instead of waiting for the index
+  --                    Treat all following arguments as search text
+
 Info:
   -status               Daemon status
   -save-db              Force daemon to save index
@@ -59,6 +64,7 @@ flag may be written with one or two leading dashes.
 
 ```text
 Search:
+  -whole-word              Same as -w
   -a, -diacritics          Match diacritics
   -path <path>             Restrict results to a path
   -s                       Sort by path
@@ -70,6 +76,8 @@ Search:
 
 Columns and output:
   -size, -dm, -dc, -ext    Show size, date modified, date created, extension
+                           (long forms: -date-modified, -date-created,
+                           -extension)
   -csv, -tsv, -txt, -efu   Output format
   -export-csv <file>       Write results to a file (also -export-tsv,
                            -export-txt, -export-efu)
@@ -84,6 +92,24 @@ Totals and exit status:
   -hide-empty-search-results
                            Print nothing when there are no results
 ```
+
+### Machine-readable output
+
+`--json` (alias `-jsonl`) prints one JSON object per result:
+
+```json
+{"path":"/home/u/docs/a.pdf","name":"a.pdf","parent":"/home/u/docs","ext":"pdf","is_dir":false,"size":1024,"modified":1700000000}
+```
+
+With `--status`, it prints one object instead:
+`{"status":"ready","ready":true,"message":…,"indexed_count":…,"watcher_healthy":…,"watched_dir_count":…,"build_duration_ms":…}`.
+
+Normally a query waits up to 30 seconds for the daemon to finish loading or
+indexing. With `--no-wait`, `toge` exits right away with code 10 instead; with
+`--json`, it also prints the status object. Launchers and other interactive
+callers can then show progress instead of blocking. Everything after `--` is
+search text, even when it starts with `-` or `/`. When `toge` starts `toged`
+itself, the daemon runs in its own process group.
 
 Any sort request (`-sort`, `-s`, `/o…`, or an inline `sort:` modifier) makes
 `--stream` emit results in sorted order instead of index order.

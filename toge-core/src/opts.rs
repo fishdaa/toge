@@ -19,7 +19,6 @@ pub struct NdlOptions {
     pub sort_ascending: bool,
     pub format: OutputFormat,
     pub export_file: Option<String>,
-    pub pause: bool,
     pub no_header: bool,
     pub highlight: bool,
     pub highlight_color: u8,
@@ -34,7 +33,6 @@ pub struct NdlOptions {
     pub hide_empty: bool,
     pub help: bool,
     pub version: bool,
-    pub config_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,7 +66,6 @@ impl Default for NdlOptions {
             sort_ascending: false,
             format: OutputFormat::Default,
             export_file: None,
-            pause: false,
             no_header: false,
             highlight: false,
             highlight_color: 2,
@@ -83,7 +80,6 @@ impl Default for NdlOptions {
             hide_empty: false,
             help: false,
             version: false,
-            config_path: None,
         }
     }
 }
@@ -177,7 +173,6 @@ impl NdlOptions {
                     opts.export_file = Some(value);
                     opts.format = OutputFormat::Efu;
                 }
-                "pause" | "more" => opts.pause = true,
                 "no-header" => opts.no_header = true,
                 "highlight" => opts.highlight = true,
                 "highlight-color" => {
@@ -195,10 +190,6 @@ impl NdlOptions {
                 "hide-empty-search-results" => opts.hide_empty = true,
                 "h" | "help" => opts.help = true,
                 "v" | "version" => opts.version = true,
-                "config" => {
-                    let value = iter.next().ok_or("missing config path")?;
-                    opts.config_path = Some(value);
-                }
                 _ => return Err(format!("unknown flag: {}", arg)),
             }
         }

@@ -82,9 +82,14 @@ jobs:
               per_page: 100,
             });
 
+            // The search qualifier is day-granular, so drop PRs merged before the
+            // tagged commit on the same day; otherwise each release repeats them.
+            const since = Date.parse(sinceDate);
+            const releasePr = /^(chore\(release\): cut v|automation\/release v)/i;
             const prs = results
-              .filter((pr) => pr.pull_request)
-              .filter((pr) => !pr.title.startsWith("chore(release): cut v"))
+              .filter((pr) => pr.pull_request && pr.pull_request.merged_at)
+              .filter((pr) => Date.parse(pr.pull_request.merged_at) > since)
+              .filter((pr) => !releasePr.test(pr.title))
               .filter((pr) => !pr.labels.some((label) => label.name === "release:none"));
 
             const bumpRank = {

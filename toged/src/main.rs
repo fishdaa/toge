@@ -54,7 +54,7 @@ struct WatcherStatus {
 }
 
 const WATCHER_LOG_LIMIT: usize = 50;
-const WATCHER_REMEDIATION: &str = "Live updates unavailable: fanotify setup failed. Reinstall the DEB/RPM package or run `sudo setcap cap_sys_admin,cap_dac_read_search+ep /usr/bin/toged`, then restart Toge.";
+const WATCHER_REMEDIATION: &str = "Live updates unavailable: fanotify setup failed. Run `sudo setcap cap_sys_admin,cap_dac_read_search+ep <path-to-toged>` (the `toged` beside your Toge binaries, or `$(command -v toged)`), then restart Toge.";
 
 fn append_watcher_log(st: &mut DaemonState, message: impl Into<String>) {
     let timestamp = current_unix_time();
