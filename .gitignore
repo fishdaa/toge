@@ -24,3 +24,8 @@ Thumbs.db
 dist/
 node_modules/
 .vite
+visual-test-artifacts/
+
+# Python test cache and local release staging
+__pycache__/
+/release/

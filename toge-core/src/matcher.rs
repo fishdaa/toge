@@ -16,30 +16,89 @@ enum CompiledTerm {
     Or(Vec<CompiledTerm>),
 }
 
-fn compile_terms(terms: &[TextTerm]) -> CompiledTerms {
+// Case-insensitive needles are lowercased once here rather than per entry.
+fn compile_terms(terms: &[TextTerm], match_case: bool) -> CompiledTerms {
+    let cased = |text: &String| {
+        if match_case {
+            text.clone()
+        } else {
+            text.to_lowercase()
+        }
+    };
     let items = terms
         .iter()
         .map(|term| match term {
-            TextTerm::Substring(s) => CompiledTerm::Substring(s.clone()),
-            TextTerm::Wildcard(p) => CompiledTerm::Wildcard(p.clone()),
+            TextTerm::Substring(s) => CompiledTerm::Substring(cased(s)),
+            TextTerm::Wildcard(p) => CompiledTerm::Wildcard(cased(p)),
             TextTerm::Regex(p) => CompiledTerm::Regex(
                 Regex::new(p).expect("regex patterns should be validated during query parsing"),
             ),
             TextTerm::Not(inner) => CompiledTerm::Not(Box::new(
-                compile_terms(&[inner.as_ref().clone()])
+                compile_terms(&[inner.as_ref().clone()], match_case)
                     .items
                     .into_iter()
                     .next()
                     .unwrap(),
             )),
-            TextTerm::Or(items) => CompiledTerm::Or(compile_terms(items).items),
+            TextTerm::Or(items) => CompiledTerm::Or(compile_terms(items, match_case).items),
         })
         .collect();
     CompiledTerms { items }
 }
 
-pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
-    let mut ids = if let Some(exts) = &query.ext {
+/// A reusable matcher for incremental scans, without a result-ID buffer.
+/// Sorting and result limits are the caller's responsibility.
+pub struct QueryMatcher {
+    query: Query,
+    compiled: CompiledTerms,
+}
+
+impl QueryMatcher {
+    pub fn new(query: Query) -> Self {
+        let compiled = compile_terms(&query.terms, query.match_case);
+        Self { query, compiled }
+    }
+
+    pub fn matches(&self, entry: &Entry) -> bool {
+        if let Some(exts) = &self.query.ext
+            && (entry.is_dir || !exts.iter().any(|ext| ext == entry.extension()))
+        {
+            return false;
+        }
+        entry_matches(entry, &self.query, &self.compiled)
+    }
+}
+
+/// Lazily yield matching IDs in index order, using memory independent of index size.
+/// This scans entries rather than materializing trigram candidates. Dropping the
+/// iterator cancels the scan. Metadata is read as stored in the index.
+pub fn iter_query<'a>(index: &'a Index, query: &Query) -> impl Iterator<Item = u32> + 'a {
+    let matcher = QueryMatcher::new(query.clone());
+    index
+        .entries
+        .iter()
+        .enumerate()
+        .filter(move |(_, entry)| matcher.matches(entry))
+        .map(|(id, _)| id as u32)
+}
+
+/// Sorted (index-order) IDs that may match, taken from the extension and
+/// trigram indexes, or `None` when the query has no selective seed and every
+/// entry must be scanned. Candidates still need the full matcher.
+pub fn candidate_ids(index: &Index, query: &Query) -> Option<Vec<u32>> {
+    let seed = if query.match_path {
+        None
+    } else {
+        query
+            .terms
+            .iter()
+            .filter_map(|term| match term {
+                TextTerm::Substring(value) if value.len() >= 3 => Some(value.as_str()),
+                _ => None,
+            })
+            .max_by_key(|value| value.len())
+    };
+    if let Some(exts) = &query.ext {
         let mut ext_ids: Vec<u32> = Vec::new();
         for ext in exts {
             if let Some(ids_for_ext) = index.by_extension(ext) {
@@ -48,37 +107,29 @@ pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
         }
         ext_ids.sort_unstable();
         ext_ids.dedup();
-        ext_ids
-    } else {
-        (0..index.count() as u32).collect()
-    };
-
-    // Filename substring queries of three or more bytes can use the trigram
-    // postings already maintained by Index. The full matcher still runs below,
-    // so case-sensitive, whole-word, and additional filters keep their exact
-    // semantics; this only removes entries that cannot possibly match.
-    if !query.match_path
-        && let Some(seed) = query
-            .terms
-            .iter()
-            .filter_map(|term| match term {
-                TextTerm::Substring(value) if value.len() >= 3 => Some(value.as_str()),
-                _ => None,
-            })
-            .max_by_key(|value| value.len())
-    {
-        let substring_ids = index.search_substring(seed);
-        ids = intersect_sorted_ids(&ids, &substring_ids);
-    }
-
-    let compiled = compile_terms(&query.terms);
-
-    ids.into_iter()
-        .filter(|id| {
-            let entry = &index.entries[*id as usize];
-            entry_matches(entry, query, &compiled)
+        Some(if let Some(seed) = seed {
+            intersect_sorted_ids(&ext_ids, &index.search_substring(seed))
+        } else {
+            ext_ids
         })
-        .collect()
+    } else {
+        seed.map(|seed| index.search_substring(seed))
+    }
+}
+
+pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
+    // Seed directly from the trigram index so a selective filename query does
+    // not first allocate an ID vector for every entry in the filesystem.
+    // The full matcher below still enforces every query option.
+    let mut ids =
+        candidate_ids(index, query).unwrap_or_else(|| (0..index.count() as u32).collect());
+    let compiled = compile_terms(&query.terms, query.match_case);
+
+    ids.retain(|&id| {
+        let entry = &index.entries[id as usize];
+        entry_matches(entry, query, &compiled)
+    });
+    ids
 }
 
 fn intersect_sorted_ids(left: &[u32], right: &[u32]) -> Vec<u32> {
@@ -181,11 +232,7 @@ fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool
 fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> bool {
     match term {
         CompiledTerm::Substring(s) => {
-            let needle = if query.match_case {
-                s.as_bytes().to_vec()
-            } else {
-                s.to_lowercase().bytes().collect()
-            };
+            let needle = s.as_bytes();
             if needle.is_empty() {
                 return true;
             }
@@ -196,7 +243,7 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
                     entry.path.to_lowercase().bytes().collect()
                 };
                 if query.match_whole_word {
-                    contains_whole_word_bytes(&haystack, &needle)
+                    contains_whole_word_bytes(&haystack, needle)
                 } else {
                     haystack.windows(needle.len()).any(|w| w == needle)
                 }
@@ -208,11 +255,11 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
                     } else {
                         name.to_lowercase().bytes().collect()
                     };
-                    contains_whole_word_bytes(&haystack, &needle)
+                    contains_whole_word_bytes(&haystack, needle)
                 } else if query.match_case {
                     name.as_bytes().windows(needle.len()).any(|w| w == needle)
                 } else {
-                    contains_ignore_case(name, &needle)
+                    contains_ignore_case(name, needle)
                 }
             }
         }
@@ -222,22 +269,23 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
             } else {
                 entry.name()
             };
-            let pattern = if query.match_case {
-                pattern.clone()
+            // The pattern is already lowercased. ASCII text is folded while
+            // matching instead of copying every entry's name to lowercase it.
+            let lowered;
+            let (target, fold) = if query.match_case {
+                (text, false)
+            } else if text.is_ascii() {
+                (text, true)
             } else {
-                pattern.to_lowercase()
-            };
-            let target = if query.match_case {
-                text.to_string()
-            } else {
-                text.to_lowercase()
+                lowered = text.to_lowercase();
+                (lowered.as_str(), false)
             };
             if query.whole_filename {
-                glob_match(&target, &pattern)
+                glob_match_from(target.as_bytes(), pattern.as_bytes(), false, fold)
             } else if query.match_whole_word {
-                glob_match_word(&target, &pattern)
+                glob_match_word(target, pattern, fold)
             } else {
-                glob_match_substring(&target, &pattern)
+                glob_match_substring(target, pattern, fold)
             }
         }
         CompiledTerm::Regex(re) => {
@@ -300,10 +348,15 @@ fn regex_matches(re: &Regex, text: &str, whole_word: bool) -> bool {
     })
 }
 
-fn glob_match_word(text: &str, pattern: &str) -> bool {
-    word_spans(text)
-        .into_iter()
-        .any(|(start, end)| glob_match(&text[start..end], pattern))
+fn glob_match_word(text: &str, pattern: &str, fold: bool) -> bool {
+    word_spans(text).into_iter().any(|(start, end)| {
+        glob_match_from(
+            &text.as_bytes()[start..end],
+            pattern.as_bytes(),
+            false,
+            fold,
+        )
+    })
 }
 
 fn contains_whole_word(text: &str, needle: &str) -> bool {
@@ -362,59 +415,63 @@ fn is_word_char(ch: char) -> bool {
     ch.is_alphanumeric() || ch == '_'
 }
 
+#[cfg(test)]
 fn glob_match(text: &str, pattern: &str) -> bool {
-    let mut chars = text.chars().peekable();
-    let mut pat = pattern.chars().peekable();
-
-    while let Some(p) = pat.next() {
-        match p {
-            '*' => {
-                while pat.peek() == Some(&'*') {
-                    pat.next();
-                }
-                let next = pat.peek().copied();
-                if next.is_none() {
-                    return true;
-                }
-                while let Some(c) = chars.peek().copied() {
-                    if Some(c) == next {
-                        let text_rest: String = chars.clone().collect();
-                        let pat_rest: String = pat.clone().collect();
-                        if glob_match(&text_rest, &pat_rest) {
-                            return true;
-                        }
-                    }
-                    chars.next();
-                }
-                return false;
-            }
-            '?' => {
-                if chars.next().is_none() {
-                    return false;
-                }
-            }
-            c => {
-                if chars.next() != Some(c) {
-                    return false;
-                }
-            }
-        }
-    }
-
-    chars.next().is_none()
+    glob_match_from(text.as_bytes(), pattern.as_bytes(), false, false)
 }
 
-fn glob_match_substring(text: &str, pattern: &str) -> bool {
+/// Whether `pattern` matches some suffix of `text`, i.e. `*` + `pattern`.
+fn glob_match_substring(text: &str, pattern: &str, fold: bool) -> bool {
     if !pattern.contains('*') && !pattern.contains('?') {
-        return text.contains(pattern);
+        return if fold {
+            contains_ignore_case(text, pattern.as_bytes())
+        } else {
+            text.contains(pattern)
+        };
     }
-    for i in 0..text.chars().count() {
-        let suffix: String = text.chars().skip(i).collect();
-        if glob_match(&suffix, pattern) {
-            return true;
+    glob_match_from(text.as_bytes(), pattern.as_bytes(), true, fold)
+}
+
+/// Iterative `*`/`?` matching with single-star backtracking: O(text × pattern)
+/// at worst and allocation-free, since it runs once per indexed entry. Works on
+/// UTF-8 bytes; `?` and backtracking step whole characters, so literal bytes are
+/// only ever compared from a character boundary. With `fold`, text bytes are
+/// ASCII-lowercased before comparing with the (lowercase) pattern.
+fn glob_match_from(text: &[u8], pattern: &[u8], leading_star: bool, fold: bool) -> bool {
+    let char_len = |lead: u8| match lead {
+        0xF0.. => 4,
+        0xE0.. => 3,
+        0xC0.. => 2,
+        _ => 1,
+    };
+    let (mut ti, mut pi) = (0, 0);
+    // Pattern index after the last `*`, and the text index it is retried from.
+    let mut star = leading_star.then_some((0, 0));
+    while ti < text.len() {
+        match pattern.get(pi) {
+            Some(b'*') => {
+                pi += 1;
+                star = Some((pi, ti));
+            }
+            Some(b'?') => {
+                ti += char_len(text[ti]);
+                pi += 1;
+            }
+            Some(&byte) if byte == text[ti] || (fold && byte == text[ti].to_ascii_lowercase()) => {
+                ti += 1;
+                pi += 1;
+            }
+            _ => {
+                let Some((star_pi, star_ti)) = star else {
+                    return false;
+                };
+                let retry = star_ti + char_len(text[star_ti]);
+                star = Some((star_pi, retry));
+                (pi, ti) = (star_pi, retry);
+            }
         }
     }
-    false
+    pattern[pi..].iter().all(|&byte| byte == b'*')
 }
 
 #[cfg(test)]

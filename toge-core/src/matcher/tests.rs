@@ -252,3 +252,104 @@ fn test_trigram_seed_preserves_case_sensitive_semantics() {
 
     assert_eq!(match_query(&idx, &query), vec![upper]);
 }
+
+#[test]
+fn lazy_matching_agrees_with_materialized_queries() {
+    let idx = sample_index();
+    for raw in [
+        "",
+        "foo",
+        "FOO",
+        "ext:txt",
+        "ext:txt;rs",
+        "folder:",
+        "file:",
+        "path:alice",
+        "regex:^f",
+        "*.txt",
+        "!foo",
+        "foo|bar",
+        "size:>500",
+        "case:README",
+    ] {
+        let query = Query::parse(raw).unwrap();
+        assert_eq!(
+            iter_query(&idx, &query).collect::<Vec<_>>(),
+            match_query(&idx, &query),
+            "{raw}"
+        );
+    }
+    let query = Query::default();
+    assert_eq!(iter_query(&idx, &query).take(2).collect::<Vec<_>>(), [0, 1]);
+}
+
+#[test]
+fn candidate_seeds_match_a_full_index_order_scan() {
+    let mut idx = sample_index();
+    idx.insert("/home/bob/video/Movie.MKV", false);
+    idx.insert("/home/bob/video/notes.mkv.txt", false);
+    idx.insert("/home/bob/video/.mkv", true);
+    // Watcher removals swap-move the last entry; seeds must stay sorted.
+    idx.remove("/home/alice/docs/bar.rs");
+    for raw in [
+        ".mkv",
+        "MKV",
+        "ext:mkv",
+        "ext:mkv .mk",
+        "case:.MKV",
+        "file:.mkv",
+        "so",
+        "zzz",
+    ] {
+        let query = Query::parse(raw).unwrap();
+        let matcher = QueryMatcher::new(query.clone());
+        let seeded: Vec<u32> = match candidate_ids(&idx, &query) {
+            Some(ids) => {
+                assert!(ids.windows(2).all(|w| w[0] < w[1]), "{raw}: unsorted seed");
+                ids.into_iter()
+                    .filter(|&id| matcher.matches(&idx.entries[id as usize]))
+                    .collect()
+            }
+            None => iter_query(&idx, &query).collect(),
+        };
+        assert_eq!(
+            seeded,
+            iter_query(&idx, &query).collect::<Vec<_>>(),
+            "{raw}"
+        );
+    }
+    let mkv = Query::parse(".mkv").unwrap();
+    assert!(candidate_ids(&idx, &mkv).unwrap().len() < idx.count());
+    assert!(candidate_ids(&idx, &Query::parse("so").unwrap()).is_none());
+}
+
+#[test]
+fn test_glob_match_patterns() {
+    assert!(glob_match("song.mp3", "*.mp3"));
+    assert!(!glob_match("song.mp3.bak", "*.mp3"));
+    assert!(glob_match("abx", "*?x"));
+    assert!(glob_match("aaab", "*a*b"));
+    assert!(glob_match("mississippi", "m*iss*ppi"));
+    assert!(!glob_match("mississippi", "m*iss*ppx"));
+    assert!(glob_match("", "**"));
+    assert!(!glob_match("", "?"));
+    assert!(glob_match("naïve", "na?ve"));
+    assert!(glob_match("日本語.txt", "??語*"));
+    assert!(!glob_match("日本語.txt", "?語*"));
+}
+
+#[test]
+fn test_glob_match_substring_matches_any_suffix() {
+    assert!(glob_match_substring("main.rs", "*.rs", false));
+    // A match must run to the end of the text, as with the former suffix scan.
+    assert!(!glob_match_substring("main.rs", "a?n", false));
+    assert!(glob_match_substring("main.rs", "a?n*", false));
+    assert!(!glob_match_substring("main.rs.orig", "*.rs", false));
+    assert!(glob_match_substring("main.rs.orig", "*.rs*", false));
+    assert!(glob_match_substring("résumé.pdf", "?.pdf", false));
+    assert!(!glob_match_substring("main.rs", "x?", false));
+    // Folding lowercases ASCII text against an already-lowercase pattern.
+    assert!(glob_match_substring("Main.RS", "*.rs", true));
+    assert!(glob_match_substring("README.md", "readme", true));
+    assert!(!glob_match_substring("Main.RS", "*.rs", false));
+}

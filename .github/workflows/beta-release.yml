@@ -53,6 +53,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            libfontconfig1-dev \
+            libxkbcommon-dev \
             libgtk-3-dev \
             libwebkit2gtk-4.1-dev \
             libappindicator3-dev \
@@ -127,4 +129,15 @@ jobs:
       ref: ${{ needs.publish-beta.outputs.tag }}
       version: ${{ needs.publish-beta.outputs.version }}
       tag_name: ${{ needs.publish-beta.outputs.tag }}
+    secrets: inherit
+
+  package-binaries-arm64:
+    needs: publish-beta
+    uses: ./.github/workflows/package-binaries.yml
+    with:
+      ref: ${{ needs.publish-beta.outputs.tag }}
+      version: ${{ needs.publish-beta.outputs.version }}
+      tag_name: ${{ needs.publish-beta.outputs.tag }}
+      target_triple: linux-aarch64
+      channel: beta
     secrets: inherit

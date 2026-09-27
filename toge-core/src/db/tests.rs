@@ -181,3 +181,99 @@ fn test_load_rejects_legacy_index_version() {
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(err.to_string().contains("unsupported version"));
 }
+
+#[test]
+fn streamed_save_keeps_v3_checksum_metadata_and_search_indexes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    let mut original = sample_index();
+    original.insert_with_metadata("/tmp/日本語.txt", false, 123, 456, 789, 1011);
+    let stats = original.save(&path).unwrap();
+    let data = fs::read(&path).unwrap();
+    assert_eq!(stats.bytes_written, data.len() as u64);
+    assert_eq!(stats.entry_count as usize, original.count());
+    let legacy_checksum = fnv1a_64(&[&data[..12], &data[20..]].concat());
+    assert_eq!(&data[12..20], &legacy_checksum.to_le_bytes());
+    let loaded = Index::load(&path).unwrap();
+    assert_eq!(loaded.entries, original.entries);
+    for term in ["foo", "日本語", "song"] {
+        assert_eq!(
+            loaded.search_substring(term),
+            original.search_substring(term)
+        );
+    }
+    assert_eq!(loaded.search_prefix("bar"), original.search_prefix("bar"));
+    assert_eq!(loaded.by_extension("txt"), original.by_extension("txt"));
+    let mut corrupt = data;
+    *corrupt.last_mut().unwrap() ^= 1;
+    fs::write(&path, corrupt).unwrap();
+    assert!(
+        Index::load(&path)
+            .unwrap_err()
+            .to_string()
+            .contains("checksum mismatch")
+    );
+}
+
+#[test]
+fn streaming_checksum_handles_partial_writes_across_header_boundaries() {
+    struct PartialWriter(Vec<u8>);
+    impl Write for PartialWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let len = buf.len().min(7);
+            self.0.extend_from_slice(&buf[..len]);
+            Ok(len)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    let bytes: Vec<u8> = (0..100).collect();
+    let mut writer = IndexWriter {
+        inner: PartialWriter(Vec::new()),
+        checksum: fnv1a_64(&[]),
+        bytes_written: 0,
+    };
+    writer.write_all(&bytes).unwrap();
+    assert_eq!(writer.inner.0, bytes);
+    assert_eq!(writer.bytes_written, bytes.len() as u64);
+    assert_eq!(
+        writer.checksum,
+        fnv1a_64(&[&bytes[..12], &bytes[20..]].concat())
+    );
+}
+
+#[test]
+fn concurrent_saves_publish_one_complete_index_without_temp_collisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    let writers = 8;
+    let barrier = std::sync::Barrier::new(writers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for writer in 0..writers {
+            let (barrier, path) = (&barrier, &path);
+            handles.push(scope.spawn(move || {
+                let mut index = Index::new();
+                for row in 0..2_000 {
+                    index.insert(&format!("/writer-{writer}/row-{row:05}.txt"), false);
+                }
+                barrier.wait();
+                index.save(path).unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    });
+    let loaded = Index::load(&path).unwrap();
+    assert_eq!(loaded.count(), 2_000);
+    let prefix = loaded.entries[0].path.split('/').nth(1).unwrap();
+    assert!(
+        loaded
+            .entries
+            .iter()
+            .all(|entry| entry.path.split('/').nth(1) == Some(prefix))
+    );
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}

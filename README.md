@@ -203,3 +203,11 @@ For security-sensitive reports, follow the guidance in [SECURITY.md](SECURITY.md
 ## License
 
 Toge is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
+
+### Slint desktop client
+
+Linux binary archives include `toge-slint`, `toge`, and `toged` for x86_64 and
+ARM64. Extract the archive and run `./toge-slint`; keep the bundled daemon beside
+it. This experimental client uses the software renderer and does not require
+Node or WebKit. See [the Slint guide](toge-slint/README.md) for system dependencies,
+keyboard controls, live-update setup, and current limitations.

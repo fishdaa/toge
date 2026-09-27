@@ -11,6 +11,7 @@ use std::time::Duration;
 use toge_core::highlight::render_ansi;
 use toge_core::ipc::{
     DaemonStatus, MAX_IPC_MESSAGE_SIZE, OutputFormat as IpcFormat, QueryRequest, Request, Response,
+    StreamOrder, StreamQueryRequest, StreamSummary, stream_query,
 };
 use toge_core::opts::{NdlOptions, OutputFormat};
 
@@ -24,6 +25,7 @@ fn usage() {
     println!("  -p, -match-path       Match full path");
     println!("  -o, -offset <n>       Start from result n");
     println!("  -n, -max-results <n>  Max results");
+    println!("  --stream             Stream results in index order (--sort enables sorting)");
     println!();
     println!("Info:");
     println!("  -status               Daemon status");
@@ -34,7 +36,7 @@ fn usage() {
 }
 
 fn version() {
-    println!("toge 0.1.1");
+    println!("toge {}", env!("CARGO_PKG_VERSION"));
 }
 
 fn default_state_dir() -> PathBuf {
@@ -187,6 +189,63 @@ fn run_query(
     }
 }
 
+fn run_streamed_query<W: Write>(
+    sock: &Path,
+    opts: &NdlOptions,
+    output: &mut W,
+) -> io::Result<StreamSummary> {
+    let mut connection = connect(sock)?;
+    let mut header_written = opts.no_header;
+    let totals_only = opts.get_result_count || opts.get_total_size;
+    let request = StreamQueryRequest {
+        query: QueryRequest {
+            id: 1,
+            raw: opts.search.clone(),
+            max_results: if totals_only { 0 } else { opts.max_results },
+            offset: opts.offset,
+            // Format is rendered by the client, just as with paginated queries.
+            format: IpcFormat::Default,
+            highlight: opts.highlight && !totals_only,
+        },
+        // `--sort`, `/o` flags and inline `sort:` all land in the search text.
+        order: if opts
+            .search
+            .split_whitespace()
+            .any(|token| token.to_ascii_lowercase().starts_with("sort:"))
+        {
+            StreamOrder::Sorted
+        } else {
+            StreamOrder::Index
+        },
+    };
+    let summary = stream_query(&mut connection, &request, |rows| {
+        let paths: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                if opts.highlight {
+                    render_ansi(&row.path, opts.highlight_color)
+                } else {
+                    row.path.clone()
+                }
+            })
+            .collect();
+        output.write_all(render_results(&paths, opts.format, header_written).as_bytes())?;
+        header_written = true;
+        output.flush()
+    })?;
+    if totals_only {
+        if opts.get_result_count {
+            writeln!(output, "{}", summary.total_count)?;
+        } else {
+            writeln!(output, "{}", summary.total_size)?;
+        }
+    } else if !header_written && !(opts.hide_empty || opts.no_result_error) {
+        output.write_all(render_results(&[], opts.format, false).as_bytes())?;
+    }
+    output.flush()?;
+    Ok(summary)
+}
+
 fn render_results(paths: &[String], format: OutputFormat, no_header: bool) -> String {
     match format {
         OutputFormat::Csv => render_table(paths, "Name", ",", "\r\n", no_header),
@@ -319,6 +378,57 @@ fn main() {
             }
         }
         return;
+    }
+
+    if opts.stream {
+        let result = (|| -> io::Result<StreamSummary> {
+            wait_for_ready(&sock, Duration::from_secs(30))?;
+            if let Some(path) = opts
+                .export_file
+                .as_ref()
+                .filter(|_| !opts.get_result_count && !opts.get_total_size)
+            {
+                // Stream into a temporary file and rename on completion so an
+                // interrupted export does not replace an existing output file.
+                let target = Path::new(path);
+                let temporary = target.with_extension(format!("stream-{}.tmp", process::id()));
+                let mut created = false;
+                let result = (|| {
+                    let mut file = fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&temporary)?;
+                    created = true;
+                    let summary = run_streamed_query(&sock, &opts, &mut file)?;
+                    file.sync_all()?;
+                    drop(file);
+                    fs::rename(&temporary, target)?;
+                    Ok(summary)
+                })();
+                if result.is_err() && created {
+                    let _ = fs::remove_file(&temporary);
+                }
+                result
+            } else {
+                run_streamed_query(&sock, &opts, &mut io::stdout().lock())
+            }
+        })();
+        match result {
+            Ok(summary)
+                if opts.no_result_error
+                    && summary.returned_count == 0
+                    && !opts.get_result_count
+                    && !opts.get_total_size =>
+            {
+                process::exit(9)
+            }
+            Ok(_) => return,
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return,
+            Err(error) => {
+                eprintln!("stream query failed: {}", error);
+                process::exit(1);
+            }
+        }
     }
 
     if opts.get_result_count {

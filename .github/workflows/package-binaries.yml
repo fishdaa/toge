@@ -41,6 +41,11 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Slint system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev
+
       - name: Cache cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -53,7 +58,7 @@ jobs:
         run: scripts/release/set-version.sh "${RELEASE_VERSION#v}"
 
       - name: Build release binaries
-        run: cargo build --release -p toge -p toged
+        run: cargo build --release -p toge -p toged -p toge-slint
 
       - name: Package binaries
         run: scripts/release/package-artifacts.sh "${{ inputs.version }}" "${{ inputs.channel }}" "${{ inputs.target_triple }}"

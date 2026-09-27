@@ -78,3 +78,10 @@ next-beta: ## Print next beta tag (usage: make next-beta V=0.2.0)
 
 changelog: ## Update changelog (usage: make changelog V=0.1.11 NOTES=notes.md)
 	bash scripts/release/update-changelog.sh $(V) $(NOTES)
+
+.PHONY: slint slint-release
+slint: ## Run the experimental Slint GUI with isolated development settings
+	bash scripts/dev-slint.sh
+
+slint-release: ## Run the optimized experimental Slint GUI
+	bash scripts/dev-slint.sh --release

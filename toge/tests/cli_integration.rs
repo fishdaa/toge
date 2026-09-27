@@ -339,3 +339,120 @@ fn ndl_export_csv_creates_file() {
 
     cleanup(&dir, &mut child);
 }
+
+#[test]
+fn streaming_cli_matches_sorted_output_and_exports_multiple_batches() {
+    if !uds_available("stream") {
+        return;
+    }
+    let (dir, state, cfg, root) = setup("stream");
+    for i in 0..300 {
+        fs::write(root.join(format!("file-{i:04}.txt")), "abc").unwrap();
+    }
+    let sock = socket_path("stream");
+    let mut child = spawn_needled(&[
+        "--socket",
+        sock.to_str().unwrap(),
+        "--config",
+        cfg.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--clean",
+    ]);
+    assert!(wait_for_ready(&sock, 10_000));
+    let normal = run_ndl(&sock, &["--csv", "--sort", "name-asc", "file-"]);
+    let streamed = run_ndl(&sock, &["--stream", "--csv", "--sort", "name-asc", "file-"]);
+    assert!(
+        normal.status.success(),
+        "{}",
+        String::from_utf8_lossy(&normal.stderr)
+    );
+    assert!(
+        streamed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&streamed.stderr)
+    );
+    assert_eq!(normal.stdout, streamed.stdout);
+    assert_eq!(
+        String::from_utf8_lossy(&streamed.stdout)
+            .matches("Name\r\n")
+            .count(),
+        1
+    );
+    let limited = run_ndl(
+        &sock,
+        &[
+            "--stream",
+            "--sort",
+            "name-asc",
+            "--offset",
+            "10",
+            "--max-results",
+            "3",
+            "file-",
+        ],
+    );
+    assert!(limited.status.success());
+    assert_eq!(String::from_utf8_lossy(&limited.stdout).lines().count(), 3);
+    assert!(String::from_utf8_lossy(&limited.stdout).contains("file-0010.txt"));
+    let count = run_ndl(&sock, &["--stream", "--get-result-count", "file-"]);
+    assert!(count.status.success());
+    assert_eq!(String::from_utf8_lossy(&count.stdout).trim(), "300");
+    let size = run_ndl(&sock, &["--stream", "--get-total-size", "file-"]);
+    assert!(size.status.success());
+    assert_eq!(String::from_utf8_lossy(&size.stdout).trim(), "900");
+    let export = dir.join("stream.csv");
+    let output = run_ndl(
+        &sock,
+        &[
+            "--stream",
+            "--sort",
+            "name-asc",
+            "--export-csv",
+            export.to_str().unwrap(),
+            "file-",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read(&export).unwrap(), normal.stdout);
+    let failed = run_ndl(
+        &sock,
+        &[
+            "--stream",
+            "--export-csv",
+            export.to_str().unwrap(),
+            "regex:(",
+        ],
+    );
+    assert!(!failed.status.success());
+    assert_eq!(
+        fs::read(&export).unwrap(),
+        normal.stdout,
+        "failed stream replaced completed export"
+    );
+    assert!(!fs::read_dir(&dir).unwrap().any(|entry| {
+        entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .ends_with(".tmp")
+    }));
+    let empty = run_ndl(
+        &sock,
+        &[
+            "--stream",
+            "--csv",
+            "--hide-empty-search-results",
+            "no-match",
+        ],
+    );
+    assert!(empty.status.success());
+    assert!(empty.stdout.is_empty());
+    let missing = run_ndl(&sock, &["--stream", "--no-result-error", "no-match"]);
+    assert_eq!(missing.status.code(), Some(9));
+    cleanup(&dir, &mut child);
+}

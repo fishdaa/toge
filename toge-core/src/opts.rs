@@ -23,6 +23,7 @@ pub struct NdlOptions {
     pub no_header: bool,
     pub highlight: bool,
     pub highlight_color: u8,
+    pub stream: bool,
     pub status: bool,
     pub save_db: bool,
     pub reindex: bool,
@@ -68,6 +69,7 @@ impl Default for NdlOptions {
             no_header: false,
             highlight: false,
             highlight_color: 2,
+            stream: false,
             status: false,
             save_db: false,
             reindex: false,
@@ -171,6 +173,7 @@ impl NdlOptions {
                     let value = iter.next().ok_or("missing highlight color")?;
                     opts.highlight_color = value.parse().map_err(|_| "invalid highlight color")?;
                 }
+                "stream" => opts.stream = true,
                 "status" => opts.status = true,
                 "save-db" => opts.save_db = true,
                 "reindex" => opts.reindex = true,

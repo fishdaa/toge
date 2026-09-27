@@ -1,0 +1,626 @@
+import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette, ScrollView, Spinner } from "std-widgets.slint";
+
+component ContextMenuItem {
+    in property <string> label;
+    callback activated;
+    width: 100%; height: 30px;
+
+    highlight := Rectangle {
+        x: 4px; y: 1px;
+        width: parent.width - 8px; height: parent.height - 2px;
+        background: Palette.foreground;
+        opacity: touch-area.has-hover ? 0.10 : 0;
+        border-radius: 3px;
+    }
+    Text {
+        x: 14px; width: parent.width - 28px; height: parent.height;
+        text: root.label;
+        color: Palette.foreground;
+        vertical-alignment: center;
+        font-size: 13px;
+    }
+    touch-area := TouchArea {
+        width: 100%; height: 100%;
+        mouse-cursor: pointer;
+        clicked => { root.activated(); }
+    }
+}
+
+export component AccessWindow inherits Window {
+    title: "Toge — Live updates";
+    preferred-width: 460px; preferred-height: 320px;
+    min-width: 420px; min-height: 300px;
+    background: Palette.background;
+    in property <bool> granting: false;
+    in property <string> message: "";
+    callback approve();
+    callback cancel();
+    VerticalLayout {
+        padding: 24px; spacing: 16px;
+        Text { text: "Enable live file updates?"; font-size: 21px; font-weight: 700; color: Palette.foreground; }
+        Text {
+            text: "Toge needs administrator approval to monitor filesystem changes and keep search results up to date.";
+            wrap: word-wrap; color: Palette.foreground;
+        }
+        Text {
+            text: "This grants elevated filesystem access to the Toge background service. Approval applies to this build; rebuilding may require approval again.";
+            wrap: word-wrap; color: Palette.foreground;
+        }
+        Text {
+            text: root.granting ? "Waiting for system approval…" : root.message;
+            wrap: word-wrap; color: Palette.foreground;
+        }
+        HorizontalLayout {
+            spacing: 12px;
+            Button { text: "Cancel"; enabled: !root.granting; clicked => { root.cancel(); } }
+            Button { text: root.granting ? "Waiting…" : "Enable live updates"; enabled: !root.granting; clicked => { root.approve(); } }
+        }
+    }
+}
+
+export component AboutWindow inherits Window {
+    title: "About Toge";
+    width: 360px; height: 270px;
+    VerticalBox {
+        padding: 24px; spacing: 16px;
+        Text { text: "Toge"; font-size: 22px; font-weight: 700; horizontal-alignment: center; }
+        Text { text: "Fast local file search"; horizontal-alignment: center; }
+        AboutSlint { }
+    }
+}
+
+export component AppWindow inherits Window {
+    title: "Toge";
+    preferred-width: 900px; preferred-height: 580px;
+    min-width: 560px; min-height: 300px;
+    background: Palette.background;
+    in property <[[StandardListViewItem]]> rows;
+    in property <string> status: "Connecting to index…";
+    in property <string> index-status: "Index unavailable";
+    in property <bool> busy: true;
+    in property <bool> has-error: false;
+    in-out property <int> selected: -1;
+    // Where a Shift+arrow range started; -1 when only the current row is highlighted.
+    in-out property <int> selection-anchor: -1;
+    private property <int> range-start: min(root.selection-anchor, root.selected);
+    private property <int> range-end: min(root.rows.length - 1, max(root.selection-anchor, root.selected));
+    private property <bool> selected-details-visible: root.selected >= 0 && root.selected < root.rows.length
+        && root.rows[root.selected][1].text != "";
+    private property <bool> has-range: root.selection-anchor >= 0 && root.selected >= 0 && root.range-end > root.range-start;
+    in-out property <int> hovered-row: -1;
+    in-out property <bool> context-menu-open: false;
+    in-out property <length> context-menu-x: 0px;
+    in-out property <length> context-menu-y: 0px;
+    in-out property <int> sort-column: -1;
+    in-out property <bool> sort-ascending: true;
+    in-out property <int> rename-row: -1;
+    in-out property <string> rename-path;
+    in-out property <string> rename-name;
+    in-out property <bool> rename-working: false;
+    private property <int> rename-selection-end;
+    // Paths awaiting Shift+Delete confirmation; the dialog is open while non-empty.
+    in-out property <string> delete-path;
+    in-out property <string> delete-name;
+    in-out property <int> delete-count;
+    callback delete-confirmed();
+    callback column-widths-changed(float, float, float);
+    callback rename-commit(string);
+    callback query-edited(string);
+    callback submit(string);
+    callback sort-results(int, bool);
+    callback action(string);
+    callback resolved-action(string, [string]);
+    callback row-clicked(int);
+    callback about();
+    callback new-window();
+    forward-focus: search;
+    public function select-row(index: int) {
+        root.selection-anchor = -1;
+        root.selected = index;
+        selection-scroll.start();
+    }
+    // Move the current row while keeping the range anchored where it started.
+    function extend-selection(index: int) {
+        if (root.selection-anchor < 0) { root.selection-anchor = max(0, root.selected); }
+        root.selected = index;
+        selection-scroll.start();
+    }
+    // Select Home/End/Page targets, extending the range when Shift is held.
+    function move-to(index: int, extend: bool) {
+        if (extend) { root.extend-selection(index); } else { root.select-row(index); }
+    }
+    changed rows => { root.selection-anchor = -1; }
+    public function apply-sort(column: int, ascending: bool) {
+        root.cancel-rename(false);
+        root.context-menu-open = false;
+        root.sort-column = column;
+        root.sort-ascending = ascending;
+        table.columns[0].sort-order = column == 0 ? (ascending ? SortOrder.ascending : SortOrder.descending) : SortOrder.unsorted;
+        table.columns[1].sort-order = column == 1 ? (ascending ? SortOrder.ascending : SortOrder.descending) : SortOrder.unsorted;
+        table.columns[2].sort-order = column == 2 ? (ascending ? SortOrder.ascending : SortOrder.descending) : SortOrder.unsorted;
+        table.columns[3].sort-order = column == 3 ? (ascending ? SortOrder.ascending : SortOrder.descending) : SortOrder.unsorted;
+    }
+    public function begin-rename(index: int, name: string, selection-end: int) {
+        root.rename-row = index;
+        root.rename-name = name;
+        root.rename-selection-end = selection-end;
+        root.context-menu-open = false;
+        table.viewport-x = 0px;
+        table.set-current-row(index);
+        rename-focus.start();
+    }
+    public function focus-rename() { inline-name.focus(); }
+    public function apply-column-widths(name: float, path: float, size: float) {
+        table.columns[0].width = name * 1px;
+        table.columns[1].width = path * 1px;
+        table.columns[2].width = size * 1px;
+    }
+    public function confirm-delete(path: string, name: string, count: int) {
+        root.cancel-rename(false);
+        root.context-menu-open = false;
+        root.delete-path = path;
+        root.delete-name = name;
+        root.delete-count = count;
+        delete-focus.start();
+    }
+    public function close-delete-confirm() {
+        root.delete-path = "";
+        root.delete-name = "";
+        table.focus();
+    }
+    delete-focus := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => { self.stop(); if (root.delete-path != "") { delete-keys.focus(); } }
+    }
+
+    // Column resizing updates widths on every pointer move; save once the drag settles.
+    private property <length> name-width: table.columns[0].width;
+    private property <length> path-width: table.columns[1].width;
+    private property <length> size-width: table.columns[2].width;
+    changed name-width => { root.defer-width-save(); }
+    changed path-width => { root.defer-width-save(); }
+    changed size-width => { root.defer-width-save(); }
+    // Timer.restart() does nothing while stopped, and stop() followed by start()
+    // does not reset a running timer's delay.
+    function defer-width-save() {
+        if (width-save.running) { width-save.restart(); } else { width-save.start(); }
+    }
+    width-save := Timer {
+        interval: 400ms;
+        running: false;
+        triggered => {
+            self.stop();
+            root.column-widths-changed(root.name-width / 1px, root.path-width / 1px, root.size-width / 1px);
+        }
+    }
+    public function cancel-rename(return-focus: bool) {
+        if (root.rename-working) { return; }
+        rename-focus.stop();
+        root.rename-row = -1;
+        root.rename-path = "";
+        root.rename-name = "";
+        if (return-focus) { table.focus(); }
+    }
+    rename-focus := Timer {
+        interval: 1ms;
+        triggered => {
+            self.stop();
+            if (root.rename-row >= 0) {
+                inline-name.focus();
+                inline-name.set-selection-offsets(0, root.rename-selection-end);
+            }
+        }
+    }
+
+    // Wait for the new result model to lay out before calculating scroll offsets.
+    selection-scroll := Timer {
+        interval: 1ms;
+        running: false;
+        triggered => {
+            self.stop();
+            if (root.selected <= 0) { table.viewport-y = 0px; }
+            // set-current-row leaves the final row partly below the viewport.
+            else if (root.selected == root.rows.length - 1) {
+                table.set-current-row(root.selected);
+                table.viewport-y = min(0px, table.visible-height - table.viewport-height);
+                bottom-settle.start();
+            }
+            else { table.set-current-row(root.selected); }
+        }
+    }
+
+    // The virtual table re-estimates its height after jumping to the end;
+    // pin the viewport to the bottom again once that layout has settled.
+    bottom-settle := Timer {
+        interval: 16ms;
+        running: false;
+        triggered => {
+            self.stop();
+            if (root.rows.length > 0 && root.selected == root.rows.length - 1) {
+                table.viewport-y = min(0px, table.visible-height - table.viewport-height);
+            }
+        }
+    }
+
+    FocusScope {
+        width: 100%; height: 100%;
+        // Like toge-gui, Up/Down step through results from anywhere in the
+        // window, including the search field, without moving keyboard focus.
+        capture-key-pressed(event) => {
+            if (root.rename-row >= 0 || root.context-menu-open || root.delete-path != "" || root.rows.length == 0) { return reject; }
+            if (event.modifiers.control || event.modifiers.alt) { return reject; }
+            if (event.text == Key.DownArrow) {
+                root.move-to(min(root.rows.length - 1, root.selected + 1), event.modifiers.shift);
+                return accept;
+            }
+            if (event.text == Key.UpArrow) {
+                if (root.selected > 0) { root.move-to(root.selected - 1, event.modifiers.shift); }
+                return accept;
+            }
+            return reject;
+        }
+        key-pressed(event) => {
+            if (root.delete-path != "") { return reject; }
+            if (event.modifiers.control && event.text == "l") {
+                root.cancel-rename(false); search.focus(); search.select-all(); return accept;
+            }
+            if (event.modifiers.control && event.text == "n") { root.new-window(); return accept; }
+            return reject;
+        }
+        VerticalLayout {
+            width: 100%; height: 100%; spacing: 0px;
+            Rectangle {
+                height: 64px;
+                HorizontalLayout {
+                    padding-left: 16px; padding-right: 16px;
+                    padding-top: 14px; padding-bottom: 14px; spacing: 12px;
+                    Rectangle {
+                        width: logo.preferred-width;
+                        accessible-role: button;
+                        accessible-label: "About Toge";
+                        logo := Text {
+                            text: "toge"; font-size: 19px; font-weight: 700;
+                            color: Palette.foreground; vertical-alignment: center;
+                        }
+                        TouchArea {
+                            width: 100%; height: 100%; mouse-cursor: pointer;
+                            clicked => { root.cancel-rename(false); root.context-menu-open = false; root.about(); }
+                        }
+                    }
+                    search := LineEdit {
+                        horizontal-stretch: 1;
+                        placeholder-text: "Search files and folders…";
+                        enabled: !root.rename-working;
+                        edited(text) => { root.cancel-rename(false); root.query-edited(text); }
+                        accepted(text) => { root.submit(text); }
+                    }
+                    if root.has-error: Button {
+                        text: "Retry";
+                        clicked => { root.submit(search.text); }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Palette.foreground; opacity: 0.10; }
+            keys := FocusScope {
+                vertical-stretch: 1;
+                forward-focus: table;
+                key-pressed(event) => {
+                    // Let the inline field handle text shortcuts and Enter itself.
+                    if (root.rename-path != "") { return reject; }
+                    if (event.text == Key.Return) { root.action("open"); return accept; }
+                    if (event.modifiers.control && event.text == "c") { root.action(event.modifiers.shift ? "copy-path" : "copy"); return accept; }
+                    if (event.modifiers.control && event.text == "x") { root.action("cut"); return accept; }
+                    if (event.text == Key.F2) { root.action("rename"); return accept; }
+                    if (event.text == Key.Delete) { root.action(event.modifiers.shift ? "delete-permanently" : "delete"); return accept; }
+                    if (event.text == Key.Escape) { root.context-menu-open = false; return accept; }
+                    // StandardTableView handles only Up/Down itself.
+                    if (root.rows.length > 0) {
+                        if (event.text == Key.Home) { root.move-to(0, event.modifiers.shift); return accept; }
+                        if (event.text == Key.End) { root.move-to(root.rows.length - 1, event.modifiers.shift); return accept; }
+                        if (event.text == Key.PageDown) {
+                            root.move-to(min(root.rows.length - 1, max(0, root.selected) + self.page-rows), event.modifiers.shift);
+                            return accept;
+                        }
+                        if (event.text == Key.PageUp) {
+                            root.move-to(max(0, root.selected - self.page-rows), event.modifiers.shift);
+                            return accept;
+                        }
+                    }
+                    return reject;
+                }
+                // Rows that fit in the viewport, less one so a page step keeps context.
+                property <int> page-rows: max(1, floor(table.visible-height / max(1px, table.viewport-height / max(1, root.rows.length))) - 1);
+                table := StandardTableView {
+                    width: 100%; height: 100%;
+                    rows: root.rows;
+                    enabled: !root.rename-working;
+                    current-row <=> root.selected;
+                    columns: [
+                        { title: "Name", width: 220px, min-width: 140px },
+                        { title: "Path", width: 340px, min-width: 160px },
+                        { title: "Size", width: 90px, min-width: 70px },
+                        // Fill the remaining width even before any rows are loaded.
+                        { title: "Modified", width: 0px, min-width: 150px, horizontal-stretch: 1 }
+                    ];
+                    sort-ascending(column) => { root.sort-results(column, true); }
+                    sort-descending(column) => { root.sort-results(column, false); }
+                    row-pointer-event(index, event, position) => {
+                        if (event.kind == PointerEventKind.move) { root.hovered-row = index; }
+                        if (event.kind == PointerEventKind.down) { root.cancel-rename(false); }
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.right) {
+                            if (!root.has-range || index < root.range-start || index > root.range-end) { root.selection-anchor = -1; }
+                            root.selected = index;
+                            table.focus();
+                            root.context-menu-x = position.x;
+                            root.context-menu-y = position.y;
+                            root.context-menu-open = true;
+                        }
+                        if (event.kind == PointerEventKind.down && event.button == PointerEventButton.left) {
+                            root.context-menu-open = false;
+                            // Move keyboard focus off the search field so arrow keys,
+                            // Enter and shortcuts act on the clicked row.
+                            table.focus();
+                            root.selection-anchor = -1;
+                            root.selected = index; root.row-clicked(index);
+                        }
+                    }
+                }
+                // Give the pointer row a clear tint over the table's subtle built-in hover fill.
+                if root.hovered-row >= 0 && root.hovered-row < root.rows.length && root.hovered-row != root.selected: Rectangle {
+                    x: 0px; y: table.height - table.visible-height;
+                    width: table.visible-width; height: table.visible-height;
+                    clip: true;
+                    Rectangle {
+                        y: table.viewport-y + root.hovered-row * self.height;
+                        width: parent.width;
+                        height: table.viewport-height / max(1, root.rows.length);
+                        background: Palette.selection-background;
+                        opacity: 0.16;
+                    }
+                }
+                // Shift+arrow range, drawn beneath the stronger current-row tint.
+                if root.has-range: Rectangle {
+                    x: 0px; y: table.height - table.visible-height;
+                    width: table.visible-width; height: table.visible-height;
+                    clip: true;
+                    property <length> row-height: table.viewport-height / max(1, root.rows.length);
+                    Rectangle {
+                        // Keep geometry within the viewport: very large ranges
+                        // exceed the software renderer's rectangle coordinate limits.
+                        y: max(0px, min(parent.height, table.viewport-y + root.range-start * parent.row-height));
+                        width: parent.width;
+                        height: max(0px, min(parent.height, table.viewport-y + (root.range-end + 1) * parent.row-height) - self.y);
+                        background: Palette.selection-background;
+                        opacity: 0.20;
+                    }
+                }
+                // StandardTableView's selection fill can match its row stripes.
+                // Tint only the selected row, using the same virtual row geometry
+                // as the table's own scrolling and keyboard selection.
+                if root.selected >= 0 && root.selected < root.rows.length: Rectangle {
+                    x: 0px; y: table.height - table.visible-height;
+                    width: table.visible-width; height: table.visible-height;
+                    clip: true;
+                    Rectangle {
+                        y: table.viewport-y + root.selected * self.height;
+                        width: parent.width;
+                        height: table.viewport-height / max(1, root.rows.length);
+                        background: Palette.selection-background;
+                        opacity: 0.32;
+                    }
+                }
+                // Use the table's own viewport geometry so the editor follows
+                // the Name cell through scrolling, column resizing, and window resizing.
+                Rectangle {
+                    visible: root.rename-row >= 0;
+                    x: 0px; y: table.height - table.visible-height;
+                    width: table.visible-width; height: table.visible-height;
+                    clip: true;
+                    inline-name := LineEdit {
+                        x: table.viewport-x + 4px;
+                        y: table.viewport-y + root.rename-row * (table.viewport-height / max(1, root.rows.length)) + 1px;
+                        width: max(table.columns[0].width, table.columns[0].min-width) - 8px;
+                        height: max(1px, table.viewport-height / max(1, root.rows.length) - 2px);
+                        text <=> root.rename-name;
+                        enabled: !root.rename-working;
+                        accepted(text) => { root.rename-commit(text); }
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) { root.cancel-rename(true); return accept; }
+                            return reject;
+                        }
+                        changed has-focus => {
+                            if (!self.has-focus && root.rename-path != "" && !root.rename-working) {
+                                root.cancel-rename(false);
+                            }
+                        }
+                    }
+                }
+                if root.rows.length == 0: Rectangle {
+                    // StandardTableView keeps a roughly 42px header above its body.
+                    // Keep the empty state in the body so it does not overlap the headings.
+                    x: 0px; y: 42px;
+                    width: parent.width; height: parent.height - 42px;
+                    background: transparent;
+                    VerticalLayout {
+                        x: 24px; width: parent.width - 48px;
+                        height: self.preferred-height;
+                        y: (parent.height - self.height) / 2;
+                        spacing: 8px;
+                        Text {
+                            text: root.has-error ? "Couldn’t load results" : root.busy ? "Preparing your search" : "No matches";
+                            font-size: 18px; font-weight: 600;
+                            horizontal-alignment: center;
+                            color: Palette.foreground;
+                        }
+                        Text {
+                            text: root.has-error ? "Check the status below and try again." : root.busy ? "Results will appear when the index is ready." : "Try another name, or use ext:pdf or path:src.";
+                            horizontal-alignment: center;
+                            color: Palette.foreground; opacity: 0.55;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+                if root.context-menu-open: TouchArea {
+                    width: parent.width; height: parent.height;
+                    clicked => { root.context-menu-open = false; }
+                }
+                if root.context-menu-open: Rectangle {
+                    x: max(8px, min(root.context-menu-x, parent.width - self.width - 8px));
+                    y: max(8px, min(root.context-menu-y, parent.height - self.height - 8px));
+                    width: 184px; height: min(260px, parent.height - 16px);
+                    background: Palette.background;
+                    border-width: 1px;
+                    border-color: Palette.foreground;
+                    border-radius: 4px;
+                    drop-shadow-blur: 12px;
+                    drop-shadow-color: #40000000;
+                    ScrollView {
+                      width: parent.width; height: parent.height;
+                      viewport-width: self.visible-width;
+                      VerticalLayout {
+                        height: 260px;
+                        padding-top: 5px; padding-bottom: 5px;
+                        spacing: 1px;
+                        ContextMenuItem {
+                            label: "Open";
+                            activated => { root.context-menu-open = false; root.action("open"); }
+                        }
+                        ContextMenuItem {
+                            label: "Copy path";
+                            activated => { root.context-menu-open = false; root.action("copy-path"); }
+                        }
+                        ContextMenuItem {
+                            label: "Open folder";
+                            activated => { root.context-menu-open = false; root.action("parent"); }
+                        }
+                        Rectangle {
+                            height: 1px;
+                            background: Palette.foreground;
+                            opacity: 0.12;
+                        }
+                        ContextMenuItem { label: "Cut"; activated => { root.context-menu-open = false; root.action("cut"); } }
+                        ContextMenuItem { label: "Copy"; activated => { root.context-menu-open = false; root.action("copy"); } }
+                        ContextMenuItem { label: "Rename"; activated => { root.context-menu-open = false; root.action("rename"); } }
+                        ContextMenuItem { label: "Delete"; activated => { root.context-menu-open = false; root.action("delete"); } }
+                        ContextMenuItem { label: "Delete permanently…"; activated => { root.context-menu-open = false; root.action("delete-permanently"); } }
+                      }
+                    }
+                }
+            }
+            Rectangle { height: 1px; background: Palette.foreground; opacity: 0.10; }
+            // Keep search and action status visible alongside selected-row details.
+            Rectangle {
+                height: self.show-details ? 52px : 26px;
+                background: Palette.alternate-background;
+                property <bool> show-details: root.selected-details-visible;
+                VerticalLayout {
+                  HorizontalLayout {
+                    height: 26px;
+                    padding-left: 8px; padding-right: 8px;
+                    padding-top: 3px; padding-bottom: 3px; spacing: 16px;
+                    HorizontalLayout {
+                        horizontal-stretch: 1; spacing: 8px;
+                        Text {
+                            text: "Search"; font-size: 11px; font-weight: 600;
+                            vertical-alignment: center;
+                            color: Palette.foreground; opacity: 0.45;
+                        }
+                        Text {
+                            text: root.status; overflow: elide; horizontal-stretch: 1;
+                            font-size: 12px; vertical-alignment: center;
+                            color: Palette.foreground; opacity: 0.65;
+                        }
+                        // Reserve the spinner's space so the text does not shift.
+                        Spinner {
+                            width: 12px; height: 12px; y: (parent.height - self.height) / 2;
+                            indeterminate: true;
+                            opacity: root.busy ? 1 : 0;
+                            animate opacity { duration: 120ms; }
+                        }
+                    }
+                    if !root.selected-details-visible: HorizontalLayout {
+                        horizontal-stretch: 1; alignment: end; spacing: 8px;
+                        Text {
+                            text: "Index"; font-size: 11px; font-weight: 600;
+                            vertical-alignment: center;
+                            color: Palette.foreground; opacity: 0.45;
+                        }
+                        Text {
+                            text: root.index-status; overflow: elide;
+                            font-size: 12px; vertical-alignment: center;
+                            color: Palette.foreground; opacity: 0.65;
+                        }
+                    }
+                  }
+                  if root.selected-details-visible: HorizontalLayout {
+                    height: 26px;
+                    padding-left: 8px; padding-right: 8px;
+                    padding-top: 3px; padding-bottom: 3px; spacing: 16px;
+                    Text {
+                        text: "Size: " + (root.rows[root.selected][2].text == "—" ? "size unavailable" : root.rows[root.selected][2].text)
+                            + ", Date Modified: " + (root.rows[root.selected][3].text == "" ? "unknown" : root.rows[root.selected][3].text)
+                            + ", Path: " + root.rows[root.selected][1].text;
+                        overflow: elide; horizontal-stretch: 1;
+                        font-size: 12px; vertical-alignment: center;
+                        color: Palette.foreground; opacity: 0.65;
+                    }
+                    Text {
+                        text: (root.selected + 1) + " of " + root.rows.length;
+                        horizontal-alignment: right;
+                        font-size: 12px; vertical-alignment: center;
+                        color: Palette.foreground; opacity: 0.65;
+                    }
+                  }
+                }
+            }
+        }
+        Rectangle {
+            visible: root.delete-path != "";
+            width: 100%; height: 100%;
+            background: #00000060;
+            // Swallow clicks so the table cannot change underneath the dialog.
+            TouchArea { width: 100%; height: 100%; }
+            delete-keys := FocusScope {
+                width: 100%; height: 100%;
+                key-pressed(event) => {
+                    if (event.text == Key.Escape) { root.close-delete-confirm(); return accept; }
+                    if (event.text == Key.Return) { root.delete-confirmed(); return accept; }
+                    return accept;
+                }
+                Rectangle {
+                    width: min(420px, parent.width - 32px);
+                    height: dialog.preferred-height;
+                    background: Palette.background;
+                    border-width: 1px; border-color: Palette.border;
+                    border-radius: 6px;
+                    drop-shadow-blur: 16px; drop-shadow-color: #50000000;
+                    accessible-role: groupbox;
+                    accessible-label: "Delete permanently";
+                    dialog := VerticalLayout {
+                        padding: 20px; spacing: 12px;
+                        Text {
+                            text: root.delete-count > 1 ? "Delete " + root.delete-count + " items permanently?" : "Delete “" + root.delete-name + "” permanently?";
+                            font-size: 16px; font-weight: 700;
+                            wrap: word-wrap; color: Palette.foreground;
+                        }
+                        Text {
+                            text: "This skips the Trash and cannot be undone. Folders are deleted with all their contents.";
+                            wrap: word-wrap; color: Palette.foreground; opacity: 0.75;
+                        }
+                        Text {
+                            text: root.delete-path;
+                            wrap: word-wrap; font-size: 12px;
+                            color: Palette.foreground; opacity: 0.55;
+                        }
+                        HorizontalLayout {
+                            alignment: end; spacing: 8px; padding-top: 4px;
+                            Button { text: "Cancel"; clicked => { root.close-delete-confirm(); } }
+                            Button { text: "Delete permanently"; primary: true; clicked => { root.delete-confirmed(); } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

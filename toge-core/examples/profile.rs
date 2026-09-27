@@ -47,6 +47,7 @@ fn main() {
             profile_save_load(size.min(100_000), iterations.min(10));
             profile_walk(iterations.min(10));
         }
+        "memory" => profile_memory(size),
         "insert" => profile_insert(size, iterations),
         "substring" => profile_substring(size, iterations),
         "substring-miss" => profile_substring_miss(size, iterations),
@@ -75,6 +76,7 @@ fn print_help() {
     println!("Scenarios:");
     println!("  all         run every profiling workload");
     println!("  insert      repeatedly build an index");
+    println!("  memory      report allocated index storage before/after compaction");
     println!("  substring   run both miss and hit substring searches");
     println!("  substring-miss repeatedly run a zero-hit substring search");
     println!("  substring-hit repeatedly run a single-hit substring search");
@@ -92,6 +94,24 @@ fn default_iterations_for(scenario: &str) -> usize {
         "substring" | "substring-miss" | "substring-hit" => DEFAULT_PROFILE_ITERATIONS,
         _ => DEFAULT_ITERATIONS,
     }
+}
+
+fn profile_memory(size: usize) {
+    let mut idx = build_index(size);
+    let before = idx.metadata_size();
+    let started = Instant::now();
+    idx.compact();
+    let elapsed = started.elapsed();
+    let after = idx.metadata_size();
+    println!("index storage before: {before} bytes");
+    println!("index storage after : {after} bytes");
+    println!(
+        "compaction saved    : {} bytes ({:.1}%) in {:.1} ms",
+        before - after,
+        100.0 * (before - after) as f64 / before.max(1) as f64,
+        elapsed.as_secs_f64() * 1000.0
+    );
+    black_box(idx);
 }
 
 fn profile_insert(size: usize, iterations: usize) {
@@ -154,7 +174,9 @@ fn profile_prefix(size: usize, iterations: usize) {
 }
 
 fn profile_save_load(size: usize, iterations: usize) {
-    let idx = build_index(size);
+    let mut idx = build_index(size);
+    // Match daemon startup, which compacts a completed build before saving it.
+    idx.compact();
     let dir = temp_dir();
     let path = dir.join("profile.bin");
     let started = Instant::now();

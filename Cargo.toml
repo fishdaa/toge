@@ -1,13 +1,19 @@
 [workspace]
-members = ["toge-core", "toged", "toge", "toge-gui/src-tauri"]
+members = ["toge-core", "toged", "toge", "toge-gui/src-tauri", "toge-slint"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.16"
+version = "0.2.0"
 edition = "2024"
 authors = ["fishdaa <git@fishda.net>"]
 license = "Apache-2.0"
 repository = "https://github.com/fishdaa/needle"
 
 [workspace.dependencies]
-toge-core = { package = "toge-core", version = "0.1.16", path = "toge-core" }
+toge-core = { package = "toge-core", version = "0.2.0", path = "toge-core" }
+
+# Slint's renderer leans on pure-Rust text shaping and rasterization that is
+# unusably slow without optimizations; unoptimized dependency code is what
+# turns a normal result-list repaint into a 300ms+ UI freeze in dev builds.
+[profile.dev.package."*"]
+opt-level = 2

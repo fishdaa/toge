@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use crate::index::Index;
+use crate::index::{Index, fnv1a_64};
 
 /// Simple exclusion rules used while walking.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -93,6 +93,7 @@ pub fn walk(root: &Path, index: &mut Index, excludes: &Excludes, fetch_metadata:
     visit(root, excludes, fetch_metadata, |path, is_dir, metadata| {
         let (size, modified, created, accessed) = metadata;
         index.insert_with_metadata(path, is_dir, size, modified, created, accessed);
+        true
     })
 }
 
@@ -106,35 +107,135 @@ pub fn reconcile(
     excludes: &Excludes,
     fetch_metadata: bool,
 ) -> usize {
-    let mut seen = HashSet::with_capacity(index.count());
-    let mut count = 0;
+    reconcile_live(roots, excludes, fetch_metadata, |step| {
+        step(index);
+        true
+    })
+}
 
+/// Walked entries applied per [`reconcile_live`] step.
+const RECONCILE_BATCH: usize = 4096;
+/// Stale entries removed per [`reconcile_live`] step.
+const RECONCILE_REMOVE_BATCH: usize = 64;
+
+/// A walked entry: path, whether it is a directory, and (size, modified, created, accessed).
+type Walked = (String, bool, (u64, i64, i64, i64));
+
+/// [`reconcile`] an index that stays in use while the roots are walked.
+///
+/// The walk runs outside `with_index`, which applies each batch of entries (e.g.
+/// under the index's lock) and returns false once the index has been replaced,
+/// ending the reconcile. Other writers such as a watcher may change the index
+/// between batches, so an entry the walk did not see is removed only if it is
+/// gone from disk or would no longer be indexed.
+pub fn reconcile_live(
+    roots: &[PathBuf],
+    excludes: &Excludes,
+    fetch_metadata: bool,
+    mut with_index: impl FnMut(&mut dyn FnMut(&mut Index)) -> bool,
+) -> usize {
+    // Path hashes rather than IDs: other writers may renumber entries between batches.
+    let mut seen: HashSet<u64> = HashSet::new();
+    let mut batch: Vec<Walked> = Vec::new();
+    let mut live = true;
+    let mut apply = |batch: &mut Vec<Walked>| {
+        let ok = with_index(&mut |index| {
+            for (path, is_dir, (size, modified, created, accessed)) in batch.drain(..) {
+                index.insert_with_metadata(&path, is_dir, size, modified, created, accessed);
+            }
+        });
+        batch.clear();
+        ok
+    };
+
+    let mut count = 0;
     for root in roots {
         count += visit(root, excludes, fetch_metadata, |path, is_dir, metadata| {
-            seen.insert(path.to_string());
-            let (size, modified, created, accessed) = metadata;
-            index.insert_with_metadata(path, is_dir, size, modified, created, accessed);
+            seen.insert(fnv1a_64(path.as_bytes()));
+            batch.push((path.to_string(), is_dir, metadata));
+            if batch.len() >= RECONCILE_BATCH {
+                live = apply(&mut batch);
+            }
+            live
         });
+        if !live {
+            return count;
+        }
+    }
+    if !apply(&mut batch) {
+        return count;
     }
 
-    let stale: Vec<String> = index
-        .entries
-        .iter()
-        .filter(|entry| !seen.contains(&entry.path))
-        .map(|entry| entry.path.clone())
-        .collect();
-    for path in stale {
-        index.remove(&path);
+    let mut unseen: Vec<String> = Vec::new();
+    if !with_index(&mut |index| {
+        unseen = index
+            .entries
+            .iter()
+            .filter(|entry| !seen.contains(&fnv1a_64(entry.path.as_bytes())))
+            .map(|entry| entry.path.clone())
+            .collect();
+    }) {
+        return count;
     }
-
+    // Removals are costly and can number in the thousands after lost watcher
+    // events, so apply them in small steps. Each step re-checks the disk while
+    // it holds the index, so a path another writer re-created is kept.
+    for batch in unseen.chunks(RECONCILE_REMOVE_BATCH) {
+        let live = with_index(&mut |index| {
+            for path in batch {
+                if !still_indexed(Path::new(path), roots, excludes) {
+                    index.remove(path);
+                }
+            }
+        });
+        if !live {
+            break;
+        }
+    }
     count
+}
+
+/// Whether `path` lies under one of `roots` but is itself excluded or inside an
+/// excluded directory, so a walk of that root never indexes it. Only the path
+/// text is inspected; paths under no root are left to the caller.
+pub fn excluded_under_roots(path: &Path, roots: &[PathBuf], excludes: &Excludes) -> bool {
+    roots.iter().any(|root| {
+        path != root
+            && path.starts_with(root)
+            && path
+                .ancestors()
+                .take_while(|ancestor| ancestor != root)
+                .any(|ancestor| excludes.is_excluded(ancestor))
+    })
+}
+
+/// Whether a walk of `roots` would index `path` as it is on disk now.
+fn still_indexed(path: &Path, roots: &[PathBuf], excludes: &Excludes) -> bool {
+    if has_hidden_ancestor_dir(path) {
+        return false;
+    }
+    let under_root = roots.iter().any(|root| {
+        path != root
+            && path.starts_with(root)
+            && path
+                .ancestors()
+                .take_while(|ancestor| ancestor != root)
+                .all(|ancestor| !excludes.is_excluded(ancestor))
+    });
+    if !under_root {
+        return false;
+    }
+    match fs::symlink_metadata(path) {
+        Ok(md) => !md.file_type().is_symlink() && !is_hidden_dir_path(path, md.is_dir()),
+        Err(_) => false,
+    }
 }
 
 fn visit(
     root: &Path,
     excludes: &Excludes,
     fetch_metadata: bool,
-    mut on_entry: impl FnMut(&str, bool, (u64, i64, i64, i64)),
+    mut on_entry: impl FnMut(&str, bool, (u64, i64, i64, i64)) -> bool,
 ) -> usize {
     let mut count = 0;
     let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
@@ -203,8 +304,11 @@ fn visit(
             } else {
                 (0, 0, 0, 0)
             };
-            on_entry(path.to_str().unwrap_or(""), is_dir, metadata);
+            let keep_going = on_entry(path.to_str().unwrap_or(""), is_dir, metadata);
             count += 1;
+            if !keep_going {
+                return count;
+            }
 
             if is_dir {
                 stack.push(path);

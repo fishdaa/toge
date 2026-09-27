@@ -1,13 +1,16 @@
 use crate::{
-    DaemonState, WatcherStatus, apply_highlight_ranges, canonical_starts_with, discover_roots,
-    ensure_private_dir, handle_request, highlight_path, index_created_path, is_ignored_path,
-    is_own_path, is_within_roots, mark_watcher_unavailable, remove_deleted_path, status_response,
-    term_needles,
+    DaemonState, IndexChange, WatchScope, WatcherStatus, apply_highlight_ranges,
+    canonical_starts_with, discover_roots, ensure_private_dir, hand_off_to_watcher, handle_query,
+    handle_request, highlight_path, index_created_path, is_ignored_path, is_own_path,
+    is_within_roots, mark_watcher_unavailable, read_request, remove_deleted_path, resolve_events,
+    status_response, stream_results, term_needles, write_stream_event,
 };
-use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
+use std::{fs, io, thread};
 
 use toge_core::config::Config;
 use toge_core::index::Index;
@@ -38,6 +41,8 @@ fn moved_in_directory_is_indexed_recursively() {
         last_updated_unix: 0,
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
+        orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
     };
     index_created_path(
         &mut state,
@@ -58,7 +63,7 @@ fn deleting_directory_removes_indexed_descendants() {
     index.insert("/downloads/torrent/season/episode.mkv", false);
     index.insert("/downloads/torrent-2/keep.mkv", false);
 
-    remove_deleted_path(&mut index, "/downloads/torrent");
+    remove_deleted_path(&mut index, "/downloads/torrent", &[]);
 
     assert!(index.id_by_path("/downloads/torrent").is_none());
     assert!(
@@ -79,6 +84,8 @@ fn watcher_runtime_failure_marks_daemon_ready_but_degraded() {
         last_updated_unix: 0,
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
+        orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
     }));
 
     mark_watcher_unavailable(&state, "permission denied");
@@ -95,6 +102,29 @@ fn watcher_runtime_failure_marks_daemon_ready_but_degraded() {
             .unwrap()
             .contains("permission denied")
     );
+}
+
+#[test]
+fn watcher_spawn_failure_still_lets_indexing_reach_ready() {
+    let mut state = DaemonState {
+        index: Index::new(),
+        status: DaemonStatus::LoadingIndex,
+        status_message: String::new(),
+        build_duration_ms: 0,
+        last_updated_unix: 0,
+        watcher: WatcherStatus::default(),
+        watcher_log: Vec::new(),
+        orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
+    };
+
+    hand_off_to_watcher(&mut state, Some("thread spawn error: busy"));
+    assert_eq!(state.status, DaemonStatus::Ready);
+    assert!(!state.watcher.is_healthy);
+
+    state.status = DaemonStatus::LoadingIndex;
+    hand_off_to_watcher(&mut state, None);
+    assert_eq!(state.status, DaemonStatus::StartingWatcher);
 }
 
 /// Helper to build and run the daemon binary with given args.
@@ -118,7 +148,10 @@ fn needled_help_exits_zero() {
 fn needled_version_prints_version() {
     let output = run_needled(&["-v"]);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("toged 0.1.1"));
+    assert_eq!(
+        stdout.trim(),
+        format!("toged {}", env!("CARGO_PKG_VERSION"))
+    );
     assert!(output.status.success());
 }
 
@@ -133,6 +166,8 @@ fn query_before_ready_returns_not_ready_error() {
         last_updated_unix: 0,
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
+        orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
     }));
 
     let resp = handle_request(
@@ -153,6 +188,40 @@ fn query_before_ready_returns_not_ready_error() {
 }
 
 #[test]
+fn modified_sort_refreshes_timestamps_when_metadata_indexing_is_disabled() {
+    let root = visible_tempdir();
+    let older = root.path().join("older.txt");
+    let newer = root.path().join("newer.txt");
+    fs::write(&older, b"older").unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(1));
+    fs::write(&newer, b"newer").unwrap();
+
+    let mut index = Index::new();
+    index.insert_with_metadata(older.to_str().unwrap(), false, 0, 0, 0, 0);
+    index.insert_with_metadata(newer.to_str().unwrap(), false, 0, 0, 0, 0);
+
+    let response = handle_query(
+        &mut index,
+        &mut Default::default(),
+        &QueryRequest {
+            id: 1,
+            raw: "sort:modified-desc".into(),
+            max_results: 10,
+            offset: 0,
+            format: OutputFormat::Default,
+            highlight: false,
+        },
+        false,
+    );
+
+    let Response::Results(results) = response else {
+        panic!("expected sorted results");
+    };
+    assert_eq!(results.rows[0].path, newer.to_str().unwrap());
+    assert!(results.rows[0].modified_unix > results.rows[1].modified_unix);
+}
+
+#[test]
 fn status_response_uses_the_last_real_index_update_time() {
     let state = DaemonState {
         index: Index::new(),
@@ -162,6 +231,8 @@ fn status_response_uses_the_last_real_index_update_time() {
         last_updated_unix: 1_700_000_000,
         watcher: WatcherStatus::default(),
         watcher_log: Vec::new(),
+        orders: toge_core::sort::OrderCache::default(),
+        index_generation: 0,
     };
 
     assert_eq!(status_response(&state).last_updated_unix, 1_700_000_000);
@@ -389,4 +460,222 @@ fn is_within_roots_rejects_paths_outside_home_root() {
         std::slice::from_ref(&home)
     ));
     assert!(!is_within_roots("/var/tmp/outside.txt", &[home]));
+}
+
+#[test]
+fn unlimited_query_returns_every_match_and_handles_nonzero_offsets() {
+    let mut index = Index::new();
+    for i in 0..10_003 {
+        index.insert(&format!("/unlimited/file-{i:05}.txt"), false);
+    }
+    for offset in [0, 3, usize::MAX] {
+        let Response::Results(results) = handle_query(
+            &mut index,
+            &mut Default::default(),
+            &QueryRequest {
+                id: 7,
+                raw: String::new(),
+                max_results: usize::MAX,
+                offset,
+                format: OutputFormat::Default,
+                highlight: false,
+            },
+            false,
+        ) else {
+            panic!("expected results")
+        };
+        assert_eq!(results.total_count, 10_003);
+        assert_eq!(results.rows.len(), 10_003 - offset.min(10_003));
+        if offset < 10_003 {
+            assert_eq!(
+                results.rows[0].path,
+                format!("/unlimited/file-{offset:05}.txt")
+            );
+            assert_eq!(
+                results.rows.last().unwrap().path,
+                "/unlimited/file-10002.txt"
+            );
+        }
+    }
+}
+
+#[test]
+fn stream_sends_bounded_batches_and_final_totals_in_both_orders() {
+    use toge_core::ipc::{STREAM_BATCH_SIZE, StreamOrder, StreamQueryRequest};
+    for order in [StreamOrder::Index, StreamOrder::Sorted] {
+        let mut index = Index::new();
+        for i in (0..300).rev() {
+            index.insert_with_metadata(&format!("/tmp/file-{i:04}.txt"), false, i, 0, 0, 0);
+        }
+        let expected_total_size = index.entries.iter().map(|entry| entry.size).sum::<u64>();
+        let request = StreamQueryRequest {
+            query: QueryRequest {
+                id: 7,
+                raw: "file".into(),
+                max_results: 270,
+                offset: 5,
+                format: OutputFormat::Default,
+                highlight: false,
+            },
+            order,
+        };
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        let producer_request = request.clone();
+        let producer = thread::spawn(move || {
+            assert_eq!(
+                read_request(&mut server).unwrap(),
+                Some(Request::StreamQuery(producer_request.clone()))
+            );
+            stream_results(
+                &mut server,
+                &producer_request,
+                &mut index,
+                &mut Default::default(),
+                false,
+            )
+        });
+        let mut paths = Vec::new();
+        let mut batch_sizes = Vec::new();
+        let summary = toge_core::ipc::stream_query(&mut client, &request, |rows| {
+            batch_sizes.push(rows.len());
+            paths.extend(rows.iter().map(|row| row.path.clone()));
+            Ok(())
+        })
+        .unwrap();
+        producer.join().unwrap().unwrap();
+        assert_eq!(batch_sizes, [STREAM_BATCH_SIZE, STREAM_BATCH_SIZE, 14]);
+        assert_eq!(summary.total_count, 300);
+        assert_eq!(summary.returned_count, 270);
+        assert_eq!(summary.total_size, expected_total_size);
+        match order {
+            StreamOrder::Index => assert_eq!(paths[0], "/tmp/file-0294.txt"),
+            StreamOrder::Sorted => assert_eq!(paths[0], "/tmp/file-0005.txt"),
+        }
+    }
+}
+
+#[test]
+fn disconnected_stream_and_expired_write_stop_promptly() {
+    let mut index = Index::new();
+    index.insert("/tmp/foo.txt", false);
+    let request = toge_core::ipc::StreamQueryRequest {
+        query: QueryRequest {
+            id: 1,
+            raw: "".into(),
+            max_results: usize::MAX,
+            offset: 0,
+            format: OutputFormat::Default,
+            highlight: false,
+        },
+        order: toge_core::ipc::StreamOrder::Index,
+    };
+    let (mut server, client) = UnixStream::pair().unwrap();
+    drop(client);
+    assert!(
+        stream_results(
+            &mut server,
+            &request,
+            &mut index,
+            &mut Default::default(),
+            false
+        )
+        .is_err()
+    );
+    let (mut server, _client) = UnixStream::pair().unwrap();
+    let event = toge_core::ipc::StreamEvent::Done(toge_core::ipc::StreamSummary {
+        id: 1,
+        total_count: 0,
+        total_size: 0,
+        returned_count: 0,
+    });
+    assert_eq!(
+        write_stream_event(&mut server, &event, Instant::now())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::TimedOut
+    );
+}
+
+struct NullWatcher;
+impl toge_core::sys::FsWatcher for NullWatcher {
+    fn watch(&mut self, _: &std::path::Path) -> io::Result<()> {
+        Ok(())
+    }
+    fn unwatch(&mut self, _: &std::path::Path) -> io::Result<()> {
+        Ok(())
+    }
+    fn poll_events(&mut self) -> io::Result<Vec<toge_core::sys::WatchEvent>> {
+        Ok(Vec::new())
+    }
+}
+
+#[test]
+fn watcher_drops_events_in_excluded_folders_before_locking() {
+    use toge_core::sys::WatchEvent;
+    let root = visible_tempdir();
+    let roots = [root.path().to_path_buf()];
+    let excludes = toge_core::walker::Excludes {
+        folders: vec!["target".into()],
+        ..Default::default()
+    };
+    let other = visible_tempdir();
+    let scope = WatchScope::new(&roots, excludes, other.path(), other.path());
+    let at = |name: &str| root.path().join(name).to_str().unwrap().to_string();
+    let changes = resolve_events(
+        vec![
+            WatchEvent::Create {
+                path: at("target/debug/a.o"),
+                is_dir: false,
+            },
+            WatchEvent::Delete {
+                path: at("target/debug/a.o"),
+            },
+            WatchEvent::Create {
+                path: at("src/main.rs"),
+                is_dir: false,
+            },
+            WatchEvent::Move {
+                from: at("src/lib.rs"),
+                to: at("target/lib.rs"),
+            },
+        ],
+        &scope,
+        &mut NullWatcher,
+    );
+    assert!(matches!(
+        changes.as_slice(),
+        [IndexChange::Create { path, .. }, IndexChange::Delete { path: moved }]
+            if *path == at("src/main.rs") && *moved == at("src/lib.rs")
+    ));
+}
+
+#[test]
+fn deleting_a_file_leaves_entries_sharing_its_prefix() {
+    let mut index = Index::new();
+    index.insert("/data/report", false);
+    index.insert("/data/report.bak", false);
+    index.insert("/data/reports/q1.txt", false);
+
+    remove_deleted_path(&mut index, "/data/report", &[]);
+
+    assert!(index.id_by_path("/data/report").is_none());
+    assert!(index.id_by_path("/data/report.bak").is_some());
+    assert!(index.id_by_path("/data/reports/q1.txt").is_some());
+}
+
+#[test]
+fn deleting_an_unindexed_root_removes_only_its_descendants() {
+    let root = std::path::PathBuf::from("/downloads/torrent");
+    let mut index = Index::new();
+    index.insert("/downloads/torrent/season", true);
+    index.insert("/downloads/torrent/season/episode.mkv", false);
+    index.insert("/downloads/torrent-2/keep.mkv", false);
+    assert!(index.id_by_path(root.to_str().unwrap()).is_none());
+    remove_deleted_path(
+        &mut index,
+        root.to_str().unwrap(),
+        std::slice::from_ref(&root),
+    );
+    assert_eq!(index.count(), 1);
+    assert!(index.id_by_path("/downloads/torrent-2/keep.mkv").is_some());
 }

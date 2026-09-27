@@ -35,8 +35,11 @@ impl Entry {
 
 pub(crate) fn fnv1a_64(data: &[u8]) -> u64 {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    fnv1a_extend(FNV_OFFSET, data)
+}
+
+pub(crate) fn fnv1a_extend(mut hash: u64, data: &[u8]) -> u64 {
     const FNV_PRIME: u64 = 0x000_0100_0000_01b3;
-    let mut hash = FNV_OFFSET;
     for &b in data {
         hash ^= b as u64;
         hash = hash.wrapping_mul(FNV_PRIME);
@@ -47,7 +50,7 @@ pub(crate) fn fnv1a_64(data: &[u8]) -> u64 {
 /// Lowercase a string and return the byte vector (used at insert/rebuild time only).
 #[inline]
 pub(crate) fn lowered_bytes(s: &str) -> Vec<u8> {
-    s.to_lowercase().bytes().collect()
+    s.to_lowercase().into_bytes()
 }
 
 /// Pack 3 ASCII bytes into a u32 trigram key.
@@ -167,6 +170,15 @@ pub(crate) fn starts_with_ignore_case(haystack: &str, prefix_lower: &[u8]) -> bo
             .all(|(&a, &b)| a.to_ascii_lowercase() == b)
 }
 
+/// Grow index vectors by at most 25% (or a few elements for small lists),
+/// rather than doubling a large compacted index on the next watcher insert.
+pub(crate) fn push_index_value<T>(values: &mut Vec<T>, value: T) {
+    if values.len() == values.capacity() {
+        values.reserve_exact((values.len() / 4).max(4));
+    }
+    values.push(value);
+}
+
 /// Tiered search index.
 #[derive(Debug, Clone, Default)]
 pub struct Index {
@@ -175,11 +187,52 @@ pub struct Index {
     pub(crate) path_to_id: HashMap<u64, u32>,
     pub(crate) trigrams: HashMap<u32, Vec<u32>>,
     pub(crate) prefix_first_byte: HashMap<u8, Vec<u32>>,
+    /// Bumped whenever existing IDs may refer to different entries (removal
+    /// swaps the last entry into the freed slot, or the index is replaced).
+    pub(crate) epoch: u64,
+    /// Bumped whenever the set of entries changes.
+    pub(crate) revision: u64,
+    /// Recent removals as `(removed_id, moved_from_id)`: record `i` moved the
+    /// index from epoch `removal_base + i` to the next. Lets ID-keyed caches
+    /// renumber in place instead of rebuilding.
+    pub(crate) removals: Vec<(u32, u32)>,
+    pub(crate) removal_base: u64,
 }
+
+/// Removal records kept for [`Index::removals_since`]; older caches rebuild.
+const REMOVAL_LOG_LIMIT: usize = 1 << 16;
 
 impl Index {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Counter that changes whenever previously returned IDs may be stale.
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Counter that changes whenever an entry is added or removed.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Mark this index as the replacement of `previous`, invalidating IDs
+    /// handed out by it.
+    pub fn succeed(&mut self, previous: &Index) {
+        self.epoch = previous.epoch.max(self.epoch) + 1;
+        self.revision = previous.revision.max(self.revision) + 1;
+        self.removals.clear();
+        self.removal_base = self.epoch;
+    }
+
+    /// The removals that took this index from `epoch` to the current one, as
+    /// `(removed_id, moved_from_id)` in order, or `None` if they are no longer
+    /// known (the index was replaced, or too much has changed since).
+    pub fn removals_since(&self, epoch: u64) -> Option<&[(u32, u32)]> {
+        let start = epoch.checked_sub(self.removal_base)?;
+        let start = usize::try_from(start).ok()?;
+        self.removals.get(start..)
     }
 
     pub fn insert(&mut self, path: &str, is_dir: bool) -> u32 {
@@ -199,6 +252,11 @@ impl Index {
         if let Some(&id) = self.path_to_id.get(&path_hash) {
             let entry = &mut self.entries[id as usize];
             if entry.path == path && entry.is_dir == is_dir {
+                if (entry.size, entry.modified, entry.created, entry.accessed)
+                    != (size, modified, created, accessed)
+                {
+                    self.revision += 1;
+                }
                 entry.size = size;
                 entry.modified = modified;
                 entry.created = created;
@@ -211,6 +269,7 @@ impl Index {
         }
 
         let id = self.entries.len() as u32;
+        self.revision += 1;
         let name_off = path.rfind('/').map(|i| i + 1).unwrap_or(0) as u16;
         let name = &path[name_off as usize..];
         let ext_off = if is_dir {
@@ -231,7 +290,7 @@ impl Index {
             created,
             accessed,
         };
-        self.entries.push(entry);
+        push_index_value(&mut self.entries, entry);
 
         self.path_to_id.insert(path_hash, id);
 
@@ -241,19 +300,16 @@ impl Index {
             } else {
                 ""
             };
-            self.by_ext.entry(ext.to_string()).or_default().push(id);
+            push_index_value(self.by_ext.entry(ext.to_string()).or_default(), id);
         }
 
         // Insert into trigram and prefix indexes using a temporary lowered copy.
         let name_lower = lowered_bytes(name);
         for trigram in unique_trigrams(&name_lower) {
-            self.trigrams.entry(trigram).or_default().push(id);
+            push_index_value(self.trigrams.entry(trigram).or_default(), id);
         }
         if let Some(&first_byte) = name_lower.first() {
-            self.prefix_first_byte
-                .entry(first_byte)
-                .or_default()
-                .push(id);
+            push_index_value(self.prefix_first_byte.entry(first_byte).or_default(), id);
         }
 
         id
@@ -270,6 +326,17 @@ impl Index {
         }
 
         self.path_to_id.remove(&path_hash);
+        if self.removal_base + self.removals.len() as u64 != self.epoch {
+            self.removals.clear();
+            self.removal_base = self.epoch;
+        }
+        if self.removals.len() >= REMOVAL_LOG_LIMIT {
+            self.removals.drain(..REMOVAL_LOG_LIMIT / 2);
+            self.removal_base += (REMOVAL_LOG_LIMIT / 2) as u64;
+        }
+        self.removals.push((id, self.entries.len() as u32 - 1));
+        self.epoch += 1;
+        self.revision += 1;
 
         let is_dir = entry.is_dir;
         let name_lower = lowered_bytes(entry.name());
@@ -339,11 +406,18 @@ impl Index {
         let Some(&id) = self.path_to_id.get(&path_hash) else {
             return false;
         };
-        let entry = &mut self.entries[id as usize];
-        if entry.path != path {
+        if self.entries[id as usize].path != path {
             return false;
         }
-        if let Ok(metadata) = std::fs::metadata(path) {
+        self.update_metadata_by_id(id)
+    }
+
+    /// Refresh an entry without allocating a copy of its path.
+    pub fn update_metadata_by_id(&mut self, id: u32) -> bool {
+        let Some(entry) = self.entries.get_mut(id as usize) else {
+            return false;
+        };
+        if let Ok(metadata) = std::fs::metadata(&entry.path) {
             entry.size = metadata.len();
             if let Ok(t) = metadata.modified()
                 && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
@@ -422,15 +496,51 @@ impl Index {
         self.entries.len()
     }
 
+    /// Release spare capacity after a bulk build or reconciliation.
+    /// Search IDs and ordering are unchanged; subsequent inserts remain supported.
+    pub fn compact(&mut self) {
+        self.entries.shrink_to_fit();
+        for entry in &mut self.entries {
+            entry.path.shrink_to_fit();
+        }
+        self.by_ext.retain(|_, ids| !ids.is_empty());
+        self.trigrams.retain(|_, ids| !ids.is_empty());
+        self.prefix_first_byte.retain(|_, ids| !ids.is_empty());
+        for ids in self
+            .by_ext
+            .values_mut()
+            .chain(self.trigrams.values_mut())
+            .chain(self.prefix_first_byte.values_mut())
+        {
+            ids.shrink_to_fit();
+        }
+        self.by_ext.shrink_to_fit();
+        self.path_to_id.shrink_to_fit();
+        self.trigrams.shrink_to_fit();
+        self.prefix_first_byte.shrink_to_fit();
+    }
+
+    /// Estimate allocated index storage, including spare vector capacity and postings.
+    /// Hash table control bytes and allocator overhead are not included.
     pub fn metadata_size(&self) -> usize {
-        self.entries
-            .iter()
-            .map(|e| e.path.len() + std::mem::size_of::<Entry>())
-            .sum::<usize>()
-            + self.by_ext.capacity() * 16
-            + self.path_to_id.capacity() * 16
-            + self.trigrams.capacity() * 16
-            + self.prefix_first_byte.capacity() * 16
+        self.entries.capacity() * std::mem::size_of::<Entry>()
+            + self
+                .entries
+                .iter()
+                .map(|e| e.path.capacity())
+                .sum::<usize>()
+            + self.by_ext.capacity() * std::mem::size_of::<(String, Vec<u32>)>()
+            + self.by_ext.keys().map(|ext| ext.capacity()).sum::<usize>()
+            + self.path_to_id.capacity() * std::mem::size_of::<(u64, u32)>()
+            + self.trigrams.capacity() * std::mem::size_of::<(u32, Vec<u32>)>()
+            + self.prefix_first_byte.capacity() * std::mem::size_of::<(u8, Vec<u32>)>()
+            + self
+                .by_ext
+                .values()
+                .chain(self.trigrams.values())
+                .chain(self.prefix_first_byte.values())
+                .map(|ids| ids.capacity() * std::mem::size_of::<u32>())
+                .sum::<usize>()
     }
 
     #[allow(dead_code)]
@@ -445,17 +555,14 @@ impl Index {
             self.path_to_id.insert(path_hash, id);
             if !entry.is_dir {
                 let ext = entry.extension().to_string();
-                self.by_ext.entry(ext).or_default().push(id);
+                push_index_value(self.by_ext.entry(ext).or_default(), id);
             }
             let name_lower = lowered_bytes(entry.name());
             for trigram in unique_trigrams(&name_lower) {
-                self.trigrams.entry(trigram).or_default().push(id);
+                push_index_value(self.trigrams.entry(trigram).or_default(), id);
             }
             if let Some(&first_byte) = name_lower.first() {
-                self.prefix_first_byte
-                    .entry(first_byte)
-                    .or_default()
-                    .push(id);
+                push_index_value(self.prefix_first_byte.entry(first_byte).or_default(), id);
             }
         }
     }

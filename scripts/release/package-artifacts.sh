@@ -22,6 +22,8 @@ rm -rf "$release_dir" dist
 mkdir -p "$release_dir" dist
 cp target/release/toge "$release_dir"/
 cp target/release/toged "$release_dir"/
+cp target/release/toge-slint "$release_dir"/
+cp toge-slint/README.md "$release_dir"/README-slint.md
 cp README.md CHANGELOG.md LICENSE "$release_dir"/
 tar -C release -czf "dist/${release_name}.tar.gz" "$(basename "$release_dir")"
 sha256sum "dist/${release_name}.tar.gz" >"dist/${release_name}.sha256"
