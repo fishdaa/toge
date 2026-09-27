@@ -8,6 +8,10 @@ make slint                # isolated development daemon and settings
 make slint-release       # same, optimized
 ```
 
+The launcher rebuilds both binaries and runs the executable paths reported by
+Cargo, including custom target directories. It prints both paths before launching
+and requires Python 3 to read Cargo's build messages.
+
 The launcher keeps settings in `${XDG_CONFIG_HOME:-$HOME/.config}/toge-dev/slint/toge`
 (with `TOGE_DEV_PROFILE` and `TOGE_DEV_CONFIG_ROOT` overrides). Index/socket state is
 removed on exit, and only the launcher's daemon is stopped. After building, the
@@ -68,9 +72,11 @@ the completion summary. The GUI waits for each batch to be applied before readin
 the next, keeping queued UI data bounded.
 
 All matching rows are requested; there is no 10,000-row display cap. Each wire
-frame is limited to 4 MiB; the full result set can span many frames. The GUI still
-stores every received row, so its result model uses O(M) RAM for M displayed
-matches. Missing indexed sizes display `—`.
+frame is limited to 4 MiB; the full result set can span many frames. The GUI
+stores one compact path and the displayed numeric metadata per received row, deriving ordinary Name/Path cells from that path. Formatted cells are cached
+for at most 256 rows, so scrolling does not retain every visited row. Rename and
+trash update the model in place. All matches remain available; result storage
+still uses O(M) RAM for M displayed matches. Missing indexed sizes display `—`.
 
 Editing a query or closing the GUI immediately shuts down the active query socket.
 Stale batches and errors are ignored, and cancellation does not wait for another

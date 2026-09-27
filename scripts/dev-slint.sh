@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_PROFILE=debug
 CARGO_ARGS=()
 case "${1:-}" in
   "") ;;
-  --release) BUILD_PROFILE=release; CARGO_ARGS=(--release) ;;
+  --release) CARGO_ARGS=(--release) ;;
   *) echo "Usage: $0 [--release]" >&2; exit 2 ;;
 esac
 cd "$REPO_ROOT"
@@ -13,10 +12,50 @@ DEV_PROFILE="${TOGE_DEV_PROFILE:-slint}"
 case "$DEV_PROFILE" in
   ""|*[!A-Za-z0-9._-]*) echo "Invalid TOGE_DEV_PROFILE" >&2; exit 2 ;;
 esac
-cargo build "${CARGO_ARGS[@]}" -p toge-slint -p toged
+# Cargo may use CARGO_TARGET_DIR, a configured target directory, or a target
+# triple. Run the executables produced by this build, never a guessed old path.
+BUILD_OUTPUT="$(mktemp /tmp/toge-slint-build.XXXXXX)"
+trap 'rm -f "$BUILD_OUTPUT"' EXIT
+BUILD_STATUS=0
+cargo build "${CARGO_ARGS[@]}" -p toge-slint -p toged --message-format=json-render-diagnostics >"$BUILD_OUTPUT" || BUILD_STATUS=$?
+BUILT_EXECUTABLES="$(python3 - "$BUILD_OUTPUT" "$BUILD_STATUS" <<'PYTHON'
+import json
+import os
+import sys
+
+executables = {}
+with open(sys.argv[1]) as messages:
+    for line in messages:
+        message = json.loads(line)
+        if message.get("reason") == "compiler-message":
+            rendered = message.get("message", {}).get("rendered")
+            if rendered:
+                print(rendered, file=sys.stderr, end="")
+        if message.get("reason") == "compiler-artifact":
+            target = message.get("target", {})
+            executable = message.get("executable")
+            if "bin" in target.get("kind", []) and executable:
+                executables[target["name"]] = executable
+if int(sys.argv[2]):
+    sys.exit(int(sys.argv[2]))
+for name in ("toge-slint", "toged"):
+    executable = executables.get(name)
+    if not executable or not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+        sys.exit(f"Cargo did not report a runnable {name} executable; refusing to launch an old build.")
+for name in ("toge-slint", "toged"):
+    print(executables[name])
+PYTHON
+)"
+mapfile -t BUILT_PATHS <<<"$BUILT_EXECUTABLES"
+SLINT_BIN="${BUILT_PATHS[0]}"
+DAEMON_BIN="${BUILT_PATHS[1]}"
+rm -f "$BUILD_OUTPUT"
+trap - EXIT
+echo "Slint executable: $SLINT_BIN"
+echo "Daemon executable: $DAEMON_BIN"
 # Ask through the native Slint UI if this build lost its file capabilities.
-"$REPO_ROOT/target/$BUILD_PROFILE/toge-slint" --request-watcher-access "$REPO_ROOT/target/$BUILD_PROFILE/toged"
-bash "$REPO_ROOT/scripts/check-toged-capabilities.sh" "$REPO_ROOT/target/$BUILD_PROFILE/toged"
+"$SLINT_BIN" --request-watcher-access "$DAEMON_BIN"
+bash "$REPO_ROOT/scripts/check-toged-capabilities.sh" "$DAEMON_BIN"
 DEV_RUNTIME_DIR="$(mktemp -d /tmp/toge-slint-dev.XXXXXX)"
 PID_DAEMON=""
 cleanup() {
@@ -35,7 +74,7 @@ export XDG_STATE_HOME="$DEV_RUNTIME_DIR/state"
 export TOGE_SOCKET="$DEV_RUNTIME_DIR/toged.sock"
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_STATE_HOME"
 echo "Slint development configuration: $XDG_CONFIG_HOME/toge/config.toml"
-"$REPO_ROOT/target/$BUILD_PROFILE/toged" --socket "$TOGE_SOCKET" &
+"$DAEMON_BIN" --socket "$TOGE_SOCKET" &
 PID_DAEMON=$!
 # Wait for socket creation so the GUI does not launch a second daemon.
 for ((attempt=0; attempt<100; attempt++)); do
@@ -44,4 +83,4 @@ for ((attempt=0; attempt<100; attempt++)); do
   sleep 0.05
 done
 [ -S "$TOGE_SOCKET" ] || { echo "Daemon socket did not appear" >&2; exit 1; }
-"$REPO_ROOT/target/$BUILD_PROFILE/toge-slint"
+"$SLINT_BIN"

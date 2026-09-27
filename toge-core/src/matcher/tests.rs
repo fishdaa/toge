@@ -282,3 +282,43 @@ fn lazy_matching_agrees_with_materialized_queries() {
     let query = Query::default();
     assert_eq!(iter_query(&idx, &query).take(2).collect::<Vec<_>>(), [0, 1]);
 }
+
+#[test]
+fn candidate_seeds_match_a_full_index_order_scan() {
+    let mut idx = sample_index();
+    idx.insert("/home/bob/video/Movie.MKV", false);
+    idx.insert("/home/bob/video/notes.mkv.txt", false);
+    idx.insert("/home/bob/video/.mkv", true);
+    // Watcher removals swap-move the last entry; seeds must stay sorted.
+    idx.remove("/home/alice/docs/bar.rs");
+    for raw in [
+        ".mkv",
+        "MKV",
+        "ext:mkv",
+        "ext:mkv .mk",
+        "case:.MKV",
+        "file:.mkv",
+        "so",
+        "zzz",
+    ] {
+        let query = Query::parse(raw).unwrap();
+        let matcher = QueryMatcher::new(query.clone());
+        let seeded: Vec<u32> = match candidate_ids(&idx, &query) {
+            Some(ids) => {
+                assert!(ids.windows(2).all(|w| w[0] < w[1]), "{raw}: unsorted seed");
+                ids.into_iter()
+                    .filter(|&id| matcher.matches(&idx.entries[id as usize]))
+                    .collect()
+            }
+            None => iter_query(&idx, &query).collect(),
+        };
+        assert_eq!(
+            seeded,
+            iter_query(&idx, &query).collect::<Vec<_>>(),
+            "{raw}"
+        );
+    }
+    let mkv = Query::parse(".mkv").unwrap();
+    assert!(candidate_ids(&idx, &mkv).unwrap().len() < idx.count());
+    assert!(candidate_ids(&idx, &Query::parse("so").unwrap()).is_none());
+}

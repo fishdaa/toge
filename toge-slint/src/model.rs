@@ -1,12 +1,72 @@
 use slint::{Model, ModelNotify, ModelRc, ModelTracker, StandardListViewItem, VecModel};
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use toge_core::ipc::ResultRow;
+
+// Keep one path allocation per ordinary row. Wire-only metadata is discarded.
+// Retain exceptional display labels (e.g. highlighted paths) without changing them.
+struct Row {
+    path: Box<str>,
+    labels: Option<Box<(Box<str>, Box<str>)>>,
+    size: u64,
+    modified_unix: i64,
+}
+impl Row {
+    fn split(path: &str) -> (&str, &str) {
+        path.rsplit_once('/')
+            .map_or((path, ""), |(parent, name)| (name, parent))
+    }
+    fn name(&self) -> &str {
+        self.labels
+            .as_ref()
+            .map_or_else(|| Self::split(&self.path).0, |labels| &labels.0)
+    }
+    fn parent(&self) -> &str {
+        self.labels
+            .as_ref()
+            .map_or_else(|| Self::split(&self.path).1, |labels| &labels.1)
+    }
+}
+impl From<ResultRow> for Row {
+    fn from(row: ResultRow) -> Self {
+        let (name, parent) = Self::split(&row.path);
+        let labels = (name != row.name || parent != row.parent)
+            .then(|| Box::new((row.name.into_boxed_str(), row.parent.into_boxed_str())));
+        Self {
+            path: row.path.into_boxed_str(),
+            labels,
+            size: row.size,
+            modified_unix: row.modified_unix,
+        }
+    }
+}
+
+// Bound retained formatting even after scrolling through millions of results.
+const RENDER_CACHE_LIMIT: usize = 256;
+#[derive(Default)]
+struct RenderCache {
+    rows: HashMap<usize, ModelRc<StandardListViewItem>>,
+    order: VecDeque<usize>,
+}
+impl RenderCache {
+    fn clear(&mut self) {
+        self.rows.clear();
+        self.order.clear();
+    }
+    fn insert(&mut self, index: usize, row: ModelRc<StandardListViewItem>) {
+        if self.rows.len() == RENDER_CACHE_LIMIT {
+            self.rows.remove(&self.order.pop_front().unwrap());
+        }
+        self.order.push_back(index);
+        self.rows.insert(index, row);
+    }
+}
 
 #[derive(Default)]
 pub struct Results {
-    rows: RefCell<Vec<ResultRow>>,
+    rows: RefCell<Vec<Row>>,
     order: RefCell<Vec<usize>>,
-    rendered: RefCell<Vec<Option<ModelRc<StandardListViewItem>>>>,
+    rendered: RefCell<RenderCache>,
     sort: Cell<Option<(i32, bool)>>,
     pub size_indexed: Cell<bool>,
     notify: ModelNotify,
@@ -17,23 +77,20 @@ impl Results {
         self.order
             .borrow()
             .get(index)
-            .map(|&i| self.rows.borrow()[i].path.clone())
+            .map(|&i| self.rows.borrow()[i].path.to_string())
     }
     pub fn find(&self, path: &str) -> i32 {
         let rows = self.rows.borrow();
         self.order
             .borrow()
             .iter()
-            .position(|&i| rows[i].path == path)
+            .position(|&i| rows[i].path.as_ref() == path)
             .map_or(-1, |i| i as i32)
     }
     pub fn replace(&self, rows: Vec<ResultRow>) {
         *self.order.borrow_mut() = (0..rows.len()).collect();
-        let rendered_len = rows.len();
-        *self.rows.borrow_mut() = rows;
-        let mut rendered = self.rendered.borrow_mut();
-        rendered.clear();
-        rendered.resize_with(rendered_len, || None);
+        *self.rows.borrow_mut() = rows.into_iter().map(Row::from).collect();
+        self.rendered.borrow_mut().clear();
         self.resort();
     }
     pub fn append(&self, rows: Vec<ResultRow>) {
@@ -42,11 +99,10 @@ impl Results {
         if count == 0 {
             return;
         }
-        self.rows.borrow_mut().extend(rows);
-        self.order.borrow_mut().extend(start..start + count);
-        self.rendered
+        self.rows
             .borrow_mut()
-            .resize_with(start + count, || None);
+            .extend(rows.into_iter().map(Row::from));
+        self.order.borrow_mut().extend(start..start + count);
         if self.sort.get().is_some() {
             self.resort();
         } else {
@@ -55,49 +111,37 @@ impl Results {
     }
     pub fn remove_path(&self, path: &str) {
         let prefix = format!("{path}/");
-        let rows = self
-            .rows
-            .borrow()
-            .iter()
-            .filter(|row| row.path != path && !row.path.starts_with(&prefix))
-            .cloned()
-            .collect();
-        self.replace(rows);
+        self.rows
+            .borrow_mut()
+            .retain(|row| row.path.as_ref() != path && !row.path.starts_with(&prefix));
+        self.rebuild_order();
     }
     pub fn rename_path(&self, old: &str, new: &str) {
         let prefix = format!("{old}/");
-        let rows = self
-            .rows
-            .borrow()
-            .iter()
-            .cloned()
-            .map(|mut row| {
-                if row.path == old || row.path.starts_with(&prefix) {
-                    row.path = format!("{new}{}", &row.path[old.len()..]);
-                    let path = std::path::Path::new(&row.path);
-                    row.name = path
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    row.parent = path
-                        .parent()
-                        .unwrap_or(std::path::Path::new("/"))
-                        .to_string_lossy()
-                        .into_owned();
-                    row.extension = if row.is_dir {
-                        String::new()
-                    } else {
-                        path.extension()
-                            .unwrap_or_default()
-                            .to_string_lossy()
-                            .into_owned()
-                    };
-                }
-                row
-            })
-            .collect();
-        self.replace(rows);
+        for row in self.rows.borrow_mut().iter_mut() {
+            if row.path.as_ref() == old || row.path.starts_with(&prefix) {
+                row.path = format!("{new}{}", &row.path[old.len()..]).into_boxed_str();
+                let path = std::path::Path::new(row.path.as_ref());
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                let parent = path
+                    .parent()
+                    .unwrap_or(std::path::Path::new("/"))
+                    .to_string_lossy();
+                let (derived_name, derived_parent) = Row::split(&row.path);
+                row.labels = (name != derived_name || parent != derived_parent).then(|| {
+                    Box::new((
+                        name.into_owned().into_boxed_str(),
+                        parent.into_owned().into_boxed_str(),
+                    ))
+                });
+            }
+        }
+        self.rebuild_order();
+    }
+    fn rebuild_order(&self) {
+        *self.order.borrow_mut() = (0..self.rows.borrow().len()).collect();
+        self.rendered.borrow_mut().clear();
+        self.resort();
     }
     pub fn sort(&self, column: i32, ascending: bool) {
         self.sort.set(Some((column, ascending)));
@@ -105,7 +149,7 @@ impl Results {
     }
     pub fn set_size_indexed(&self, value: bool) {
         if self.size_indexed.replace(value) != value {
-            self.rendered.borrow_mut().fill(None);
+            self.rendered.borrow_mut().clear();
             self.notify.reset();
         }
     }
@@ -115,10 +159,10 @@ impl Results {
             self.order.borrow_mut().sort_by(|&a, &b| {
                 let (a, b) = (&rows[a], &rows[b]);
                 let cmp = match column {
-                    1 => a.parent.cmp(&b.parent),
+                    1 => a.parent().cmp(b.parent()),
                     2 => a.size.cmp(&b.size),
                     3 => a.modified_unix.cmp(&b.modified_unix),
-                    _ => a.name.cmp(&b.name),
+                    _ => a.name().cmp(b.name()),
                 }
                 .then_with(|| a.path.cmp(&b.path));
                 if ascending { cmp } else { cmp.reverse() }
@@ -135,7 +179,7 @@ impl Model for Results {
     fn row_data(&self, row: usize) -> Option<Self::Data> {
         let index = *self.order.borrow().get(row)?;
 
-        if let Some(rendered) = self.rendered.borrow()[index].clone() {
+        if let Some(rendered) = self.rendered.borrow().rows.get(&index).cloned() {
             return Some(rendered);
         }
 
@@ -148,8 +192,8 @@ impl Model for Results {
         };
         let rendered = ModelRc::new(VecModel::from(
             vec![
-                r.name.clone(),
-                r.parent.clone(),
+                r.name().to_string(),
+                r.parent().to_string(),
                 size,
                 crate::format::format_time(r.modified_unix),
             ]
@@ -157,7 +201,7 @@ impl Model for Results {
             .map(|text| StandardListViewItem::from(slint::SharedString::from(text)))
             .collect::<Vec<_>>(),
         ));
-        self.rendered.borrow_mut()[index] = Some(rendered.clone());
+        self.rendered.borrow_mut().insert(index, rendered.clone());
         Some(rendered)
     }
     fn model_tracker(&self) -> &dyn ModelTracker {
@@ -183,6 +227,49 @@ mod tests {
             created_unix: 0,
             accessed_unix: 0,
         }
+    }
+    #[test]
+    fn scrolling_cache_is_bounded_and_evicted_rows_can_be_rendered_again() {
+        let m = Results::default();
+        m.replace(
+            (0..4096)
+                .map(|i| row(&format!("/tmp/{i}.txt"), i))
+                .collect(),
+        );
+        m.set_size_indexed(true);
+        for i in 0..m.row_count() {
+            assert_eq!(
+                m.row_data(i).unwrap().row_data(2).unwrap().text,
+                crate::format::format_size(i as u64)
+            );
+        }
+        assert_eq!(m.rendered.borrow().rows.len(), RENDER_CACHE_LIMIT);
+        assert_eq!(m.rendered.borrow().order.len(), RENDER_CACHE_LIMIT);
+        assert!(!m.rendered.borrow().rows.contains_key(&0));
+        assert_eq!(m.row_data(0).unwrap().row_data(2).unwrap().text, "0 B");
+        m.set_size_indexed(false);
+        assert!(m.rendered.borrow().rows.is_empty());
+        assert_eq!(m.row_data(0).unwrap().row_data(2).unwrap().text, "—");
+        m.replace(vec![]);
+        assert!(m.rendered.borrow().rows.is_empty());
+        assert!(m.row_data(0).is_none());
+    }
+    #[test]
+    fn compact_rows_preserve_wire_labels_and_unicode_paths() {
+        let mut wire = row("/tmp/日本/é.txt", 42);
+        wire.name = "é.txt".into();
+        wire.parent = "/tmp/日本".into();
+        let compact = Row::from(wire.clone());
+        assert!(compact.labels.is_none());
+        assert_eq!(compact.name(), wire.name);
+        assert_eq!(compact.parent(), wire.parent);
+        // The IPC contract can supply labels that differ from the raw path.
+        wire.name = "custom label".into();
+        let compact = Row::from(wire);
+        assert_eq!(compact.name(), "custom label");
+        assert_eq!(compact.parent(), "/tmp/日本");
+        assert_eq!(Row::split("/root.txt"), ("root.txt", ""));
+        assert_eq!(Row::split("relative.txt"), ("relative.txt", ""));
     }
     #[test]
     fn appending_keeps_cached_rows_and_active_sort() {
@@ -220,9 +307,9 @@ mod tests {
         assert_eq!(cells.row_data(0).unwrap().text, "child.txt");
         assert_eq!(cells.row_data(1).unwrap().text, "/tmp/new");
         assert!(m.find("/tmp/older/keep") >= 0);
-        assert_eq!(m.rows.borrow()[1].extension, "txt");
+        assert_eq!(m.rows.borrow()[1].name(), "child.txt");
         m.rename_path("/tmp/new/child.txt", "/tmp/new/child.pdf");
-        assert_eq!(m.rows.borrow()[1].extension, "pdf");
+        assert_eq!(m.rows.borrow()[1].name(), "child.pdf");
     }
     #[test]
     fn removing_directory_removes_only_its_descendants() {

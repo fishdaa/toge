@@ -29,11 +29,20 @@ class SlintLauncherTests(unittest.TestCase):
                         TRACE=str(self.trace), CAPS=str(self.capabilities),
                         TOGE_DEV_CONFIG_ROOT=str(self.root / "config"))
         self.env.pop("TOGE_DEV_PROFILE", None)
+        self.env.pop("CARGO_TARGET_DIR", None)
         self.write_executable(mock_bin / "cargo", '''
-import os, pathlib, sys
+import json, os, pathlib, sys
 with open(os.environ['TRACE'], 'a') as f: f.write('build ' + ' '.join(sys.argv[1:]) + '\\n')
 if os.environ.get('RELINK') == '1': pathlib.Path(os.environ['CAPS']).unlink(missing_ok=True)
-sys.exit(int(os.environ.get('BUILD_EXIT', '0')))
+status = int(os.environ.get('BUILD_EXIT', '0'))
+if status: sys.exit(status)
+profile = 'release' if '--release' in sys.argv else 'debug'
+target = pathlib.Path(os.environ.get('CARGO_TARGET_DIR', str(pathlib.Path.cwd() / 'target')))
+for name in ['toge-slint', 'toged']:
+ if os.environ.get('MISSING_ARTIFACT') == name: continue
+ print(json.dumps({'reason': 'compiler-artifact', 'target': {'name': name, 'kind': ['bin']},
+                   'executable': str(target / profile / name), 'fresh': True}))
+print(json.dumps({'reason': 'build-finished', 'success': True}))
 ''')
         self.write_executable(mock_bin / "getcap", '''
 import os, pathlib, sys
@@ -123,6 +132,30 @@ with open(os.environ['TRACE'], 'a') as f: f.write('gui ' + os.environ['TOGE_SOCK
         self.assertTrue(events[1].startswith("access "))
         self.assertTrue(events[2].startswith("check "))
         self.assertEqual(events[3], "daemon")
+
+    def test_custom_target_directory_never_launches_stale_default_binaries(self):
+        custom = self.root / "custom target" / "host-triple"
+        shutil.copytree(self.root / "target", custom)
+        self.env["CARGO_TARGET_DIR"] = str(custom)
+        self.capabilities.touch()
+        for profile, args in [("debug", ()), ("release", ("--release",))]:
+            for name in ["toge-slint", "toged"]:
+                self.write_executable(self.root / "target" / profile / name, "raise SystemExit('stale binary launched')")
+            self.trace.unlink(missing_ok=True)
+            result = self.launch(*args)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn(str(custom / profile / "toged"), self.events()[1])
+            self.assertIn(str(custom / profile / "toge-slint"), result.stdout)
+            self.assertEqual(self.events()[3], "daemon")
+            self.assertTrue(self.events()[4].startswith("gui "))
+
+    def test_missing_build_artifact_never_falls_back_to_existing_binary(self):
+        self.env["MISSING_ARTIFACT"] = "toge-slint"
+        self.capabilities.touch()
+        result = self.launch()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("refusing to launch an old build", result.stderr)
+        self.assertEqual(len(self.events()), 1)
 
 
 if __name__ == "__main__":

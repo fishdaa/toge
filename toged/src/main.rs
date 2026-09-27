@@ -18,7 +18,7 @@ use toge_core::ipc::{
     ResultRow, ResultsResponse, STREAM_BATCH_SIZE, StatusResponse, StreamEvent, StreamOrder,
     StreamQueryRequest, StreamSummary,
 };
-use toge_core::matcher::{QueryMatcher, match_query};
+use toge_core::matcher::{QueryMatcher, candidate_ids, match_query};
 use toge_core::query::Query;
 use toge_core::sort::{SortKey, sort_ids};
 use toge_core::sys::FsWatcher;
@@ -561,7 +561,12 @@ fn stream_results(
     } else {
         None
     };
-    let count = sorted.as_ref().map_or(index.count(), Vec::len);
+    // Index-order streams visit only trigram/extension candidates when the
+    // query has a selective seed; posting lists are sorted, so order holds.
+    // Otherwise every entry is scanned without an ID buffer.
+    let ids = sorted.or_else(|| candidate_ids(index, &query));
+    let matched = request.order == StreamOrder::Sorted;
+    let count = ids.as_ref().map_or(index.count(), Vec::len);
     let mut summary = StreamSummary {
         id: request.query.id,
         total_count: 0,
@@ -570,20 +575,20 @@ fn stream_results(
     };
     let mut rows = Vec::with_capacity(STREAM_BATCH_SIZE);
     for position in 0..count {
-        if Instant::now() >= deadline {
+        if position % 4096 == 0 && Instant::now() >= deadline {
             return Err(io::Error::new(
                 io::ErrorKind::TimedOut,
                 "stream deadline exceeded",
             ));
         }
-        let id = sorted.as_ref().map_or(position as u32, |ids| ids[position]);
-        if sorted.is_none() && needs_dates {
+        let id = ids.as_ref().map_or(position as u32, |ids| ids[position]);
+        if !matched && needs_dates {
             index.update_metadata_by_id(id);
         }
-        if sorted.is_none() && !matcher.matches(&index.entries[id as usize]) {
+        if !matched && !matcher.matches(&index.entries[id as usize]) {
             continue;
         }
-        if sorted.is_none() && index_size {
+        if !matched && index_size {
             let entry = &index.entries[id as usize];
             if !entry.is_dir && entry.size == 0 {
                 index.update_metadata_by_id(id);

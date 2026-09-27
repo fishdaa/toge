@@ -16,23 +16,31 @@ enum CompiledTerm {
     Or(Vec<CompiledTerm>),
 }
 
-fn compile_terms(terms: &[TextTerm]) -> CompiledTerms {
+// Case-insensitive needles are lowercased once here rather than per entry.
+fn compile_terms(terms: &[TextTerm], match_case: bool) -> CompiledTerms {
+    let cased = |text: &String| {
+        if match_case {
+            text.clone()
+        } else {
+            text.to_lowercase()
+        }
+    };
     let items = terms
         .iter()
         .map(|term| match term {
-            TextTerm::Substring(s) => CompiledTerm::Substring(s.clone()),
-            TextTerm::Wildcard(p) => CompiledTerm::Wildcard(p.clone()),
+            TextTerm::Substring(s) => CompiledTerm::Substring(cased(s)),
+            TextTerm::Wildcard(p) => CompiledTerm::Wildcard(cased(p)),
             TextTerm::Regex(p) => CompiledTerm::Regex(
                 Regex::new(p).expect("regex patterns should be validated during query parsing"),
             ),
             TextTerm::Not(inner) => CompiledTerm::Not(Box::new(
-                compile_terms(&[inner.as_ref().clone()])
+                compile_terms(&[inner.as_ref().clone()], match_case)
                     .items
                     .into_iter()
                     .next()
                     .unwrap(),
             )),
-            TextTerm::Or(items) => CompiledTerm::Or(compile_terms(items).items),
+            TextTerm::Or(items) => CompiledTerm::Or(compile_terms(items, match_case).items),
         })
         .collect();
     CompiledTerms { items }
@@ -47,7 +55,7 @@ pub struct QueryMatcher {
 
 impl QueryMatcher {
     pub fn new(query: Query) -> Self {
-        let compiled = compile_terms(&query.terms);
+        let compiled = compile_terms(&query.terms, query.match_case);
         Self { query, compiled }
     }
 
@@ -74,10 +82,10 @@ pub fn iter_query<'a>(index: &'a Index, query: &Query) -> impl Iterator<Item = u
         .map(|(id, _)| id as u32)
 }
 
-pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
-    // Seed directly from the trigram index so a selective filename query does
-    // not first allocate an ID vector for every entry in the filesystem.
-    // The full matcher below still enforces every query option.
+/// Sorted (index-order) IDs that may match, taken from the extension and
+/// trigram indexes, or `None` when the query has no selective seed and every
+/// entry must be scanned. Candidates still need the full matcher.
+pub fn candidate_ids(index: &Index, query: &Query) -> Option<Vec<u32>> {
     let seed = if query.match_path {
         None
     } else {
@@ -90,7 +98,7 @@ pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
             })
             .max_by_key(|value| value.len())
     };
-    let mut ids = if let Some(exts) = &query.ext {
+    if let Some(exts) = &query.ext {
         let mut ext_ids: Vec<u32> = Vec::new();
         for ext in exts {
             if let Some(ids_for_ext) = index.by_extension(ext) {
@@ -99,18 +107,23 @@ pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
         }
         ext_ids.sort_unstable();
         ext_ids.dedup();
-        if let Some(seed) = seed {
+        Some(if let Some(seed) = seed {
             intersect_sorted_ids(&ext_ids, &index.search_substring(seed))
         } else {
             ext_ids
-        }
-    } else if let Some(seed) = seed {
-        index.search_substring(seed)
+        })
     } else {
-        (0..index.count() as u32).collect()
-    };
+        seed.map(|seed| index.search_substring(seed))
+    }
+}
 
-    let compiled = compile_terms(&query.terms);
+pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
+    // Seed directly from the trigram index so a selective filename query does
+    // not first allocate an ID vector for every entry in the filesystem.
+    // The full matcher below still enforces every query option.
+    let mut ids =
+        candidate_ids(index, query).unwrap_or_else(|| (0..index.count() as u32).collect());
+    let compiled = compile_terms(&query.terms, query.match_case);
 
     ids.retain(|&id| {
         let entry = &index.entries[id as usize];
@@ -219,11 +232,7 @@ fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool
 fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> bool {
     match term {
         CompiledTerm::Substring(s) => {
-            let needle = if query.match_case {
-                s.as_bytes().to_vec()
-            } else {
-                s.to_lowercase().bytes().collect()
-            };
+            let needle = s.as_bytes();
             if needle.is_empty() {
                 return true;
             }
@@ -234,7 +243,7 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
                     entry.path.to_lowercase().bytes().collect()
                 };
                 if query.match_whole_word {
-                    contains_whole_word_bytes(&haystack, &needle)
+                    contains_whole_word_bytes(&haystack, needle)
                 } else {
                     haystack.windows(needle.len()).any(|w| w == needle)
                 }
@@ -246,11 +255,11 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
                     } else {
                         name.to_lowercase().bytes().collect()
                     };
-                    contains_whole_word_bytes(&haystack, &needle)
+                    contains_whole_word_bytes(&haystack, needle)
                 } else if query.match_case {
                     name.as_bytes().windows(needle.len()).any(|w| w == needle)
                 } else {
-                    contains_ignore_case(name, &needle)
+                    contains_ignore_case(name, needle)
                 }
             }
         }
@@ -260,22 +269,17 @@ fn compiled_term_matches(entry: &Entry, term: &CompiledTerm, query: &Query) -> b
             } else {
                 entry.name()
             };
-            let pattern = if query.match_case {
-                pattern.clone()
-            } else {
-                pattern.to_lowercase()
-            };
             let target = if query.match_case {
                 text.to_string()
             } else {
                 text.to_lowercase()
             };
             if query.whole_filename {
-                glob_match(&target, &pattern)
+                glob_match(&target, pattern)
             } else if query.match_whole_word {
-                glob_match_word(&target, &pattern)
+                glob_match_word(&target, pattern)
             } else {
-                glob_match_substring(&target, &pattern)
+                glob_match_substring(&target, pattern)
             }
         }
         CompiledTerm::Regex(re) => {
