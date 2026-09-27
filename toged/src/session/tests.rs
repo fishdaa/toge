@@ -164,6 +164,39 @@ fn sync_picks_up_additions_only_after_the_refresh_interval() {
 }
 
 #[test]
+fn sync_rebuilds_on_metadata_changes_only_when_they_matter() {
+    let config = Config::default_config();
+    let dir = Path::new("/nonexistent");
+    let env = SessionEnv::new(&config, dir, dir);
+    let mut st = daemon(&[("/r/a.mkv", 1), ("/r/b.mkv", 2)]);
+    let mut by_name = open(&mut st, ".mkv", None);
+    let mut by_size = open(&mut st, ".mkv", Some((SortKey::Size, false)));
+    let mut sized = open(&mut st, ".mkv size:>2", None);
+    // A growing file, as a download or a log would be.
+    st.index
+        .insert_with_metadata("/r/a.mkv", false, 10, 1_700_000_001, 1, 1);
+    for session in [&mut by_name, &mut by_size, &mut sized] {
+        session.built_at -= SYNC_MIN_INTERVAL;
+    }
+    let state = by_name
+        .handle(&mut st, SessionRequest::Sync, &env)
+        .state()
+        .unwrap();
+    assert_eq!((state.generation, state.total_size), (1, 12));
+    let state = by_size
+        .handle(&mut st, SessionRequest::Sync, &env)
+        .state()
+        .unwrap();
+    assert_eq!(state.generation, 2);
+    assert_eq!(by_size.ids[0], st.index.id_by_path("/r/a.mkv").unwrap());
+    let state = sized
+        .handle(&mut st, SessionRequest::Sync, &env)
+        .state()
+        .unwrap();
+    assert_eq!((state.generation, state.total_count), (2, 1));
+}
+
+#[test]
 fn reindex_replacement_invalidates_sessions() {
     let config = Config::default_config();
     let dir = Path::new("/nonexistent");

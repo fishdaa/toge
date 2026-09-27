@@ -19,6 +19,21 @@ fn test_insert_assigns_sequential_ids() {
 }
 
 #[test]
+fn test_metadata_changes_bump_only_the_metadata_revision() {
+    let mut idx = Index::new();
+    idx.insert_with_metadata("/a/log.txt", false, 1, 10, 10, 10);
+    let (revision, metadata) = (idx.revision(), idx.metadata_revision());
+    idx.insert_with_metadata("/a/log.txt", false, 2, 11, 10, 10);
+    assert_eq!(idx.revision(), revision);
+    assert_eq!(idx.metadata_revision(), metadata + 1);
+    // Unchanged metadata bumps neither.
+    idx.insert_with_metadata("/a/log.txt", false, 2, 11, 10, 10);
+    assert_eq!(idx.metadata_revision(), metadata + 1);
+    idx.insert("/a/new.txt", false);
+    assert_eq!(idx.revision(), revision + 1);
+}
+
+#[test]
 fn test_count() {
     let idx = sample_index();
     assert_eq!(idx.count(), 5);

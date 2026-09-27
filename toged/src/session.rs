@@ -56,6 +56,7 @@ pub(crate) struct Session {
     total_size: u64,
     epoch: u64,
     revision: u64,
+    metadata_revision: u64,
     generation: u64,
     built_at: Instant,
     build_cost: Duration,
@@ -97,6 +98,7 @@ impl Session {
             total_size: 0,
             epoch: 0,
             revision: 0,
+            metadata_revision: 0,
             generation: 0,
             built_at: Instant::now(),
             build_cost: Duration::ZERO,
@@ -174,6 +176,7 @@ impl Session {
             total_size: 0,
             epoch: st.index.epoch(),
             revision: st.index.revision(),
+            metadata_revision: st.index.metadata_revision(),
             generation: 1,
             built_at: Instant::now(),
             build_cost: started.elapsed(),
@@ -203,9 +206,25 @@ impl Session {
         self.recount(index);
         self.epoch = index.epoch();
         self.revision = index.revision();
+        self.metadata_revision = index.metadata_revision();
         self.generation += 1;
         self.built_at = Instant::now();
         self.build_cost = started.elapsed();
+    }
+
+    /// Whether a size or timestamp change can alter which rows match or
+    /// their order.
+    fn depends_on_metadata(&self) -> bool {
+        let query = &self.query;
+        let (key, _) = self.sort.unwrap_or_else(|| sort_params(query.sort));
+        query.size.is_some()
+            || query.date_modified.is_some()
+            || query.date_created.is_some()
+            || query.date_accessed.is_some()
+            || matches!(
+                key,
+                SortKey::Size | SortKey::Modified | SortKey::Created | SortKey::Accessed
+            )
     }
 
     fn recount(&mut self, index: &Index) {
@@ -310,8 +329,15 @@ impl Session {
             }
             SessionRequest::Sync => {
                 let due = self.built_at.elapsed() >= SYNC_MIN_INTERVAL.max(self.build_cost * 4);
-                if self.epoch != st.index.epoch() || (self.revision != st.index.revision() && due) {
+                let metadata_changed = self.metadata_revision != st.index.metadata_revision();
+                let stale = self.revision != st.index.revision()
+                    || (metadata_changed && self.depends_on_metadata());
+                if self.epoch != st.index.epoch() || (stale && due) {
                     self.build(&mut st.index, &mut st.orders, index_size);
+                } else if metadata_changed && !self.depends_on_metadata() {
+                    // Rows and order are unchanged; only the size total moves.
+                    self.recount(&st.index);
+                    self.metadata_revision = st.index.metadata_revision();
                 }
                 SessionResponse::State(self.state())
             }

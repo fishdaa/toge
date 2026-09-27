@@ -192,6 +192,10 @@ pub struct Index {
     pub(crate) epoch: u64,
     /// Bumped whenever the set of entries changes.
     pub(crate) revision: u64,
+    /// Bumped whenever an existing entry's size or timestamps change, so
+    /// results that filter or sort by metadata can refresh. Name and path
+    /// orders ignore it.
+    pub(crate) metadata_revision: u64,
     /// Recent removals as `(removed_id, moved_from_id)`: record `i` moved the
     /// index from epoch `removal_base + i` to the next. Lets ID-keyed caches
     /// renumber in place instead of rebuilding.
@@ -229,11 +233,18 @@ impl Index {
         self.revision
     }
 
+    /// Counter that changes whenever an existing entry's size or timestamps
+    /// change through [`Index::insert_with_metadata`].
+    pub fn metadata_revision(&self) -> u64 {
+        self.metadata_revision
+    }
+
     /// Mark this index as the replacement of `previous`, invalidating IDs
     /// handed out by it.
     pub fn succeed(&mut self, previous: &Index) {
         self.epoch = previous.epoch.max(self.epoch) + 1;
         self.revision = previous.revision.max(self.revision) + 1;
+        self.metadata_revision = previous.metadata_revision.max(self.metadata_revision) + 1;
         self.removals.clear();
         self.removal_base = self.epoch;
     }
@@ -306,7 +317,7 @@ impl Index {
                 if (entry.size, entry.modified, entry.created, entry.accessed)
                     != (size, modified, created, accessed)
                 {
-                    self.revision += 1;
+                    self.metadata_revision += 1;
                 }
                 entry.size = size;
                 entry.modified = modified;
