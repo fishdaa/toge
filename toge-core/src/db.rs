@@ -6,9 +6,8 @@ use crate::index::{
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAGIC: &[u8] = b"NDL1";
 const VERSION: u32 = 3;
@@ -55,9 +54,46 @@ impl<W: Write> Write for IndexWriter<W> {
     }
 }
 
+// Each concurrent save owns a different sibling file. A failed save removes
+// only its own temporary file; rename still publishes one complete index.
+struct SaveTemp(PathBuf);
+
+impl Drop for SaveTemp {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+fn create_save_temp(path: &Path) -> io::Result<(SaveTemp, fs::File)> {
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let filename = path
+        .file_name()
+        .ok_or_else(|| io::Error::other("missing index filename"))?;
+    loop {
+        let mut name = filename.to_os_string();
+        name.push(format!(
+            ".{}.{}.tmp",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        let temporary = path.with_file_name(name);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&temporary) {
+            Ok(file) => return Ok((SaveTemp(temporary), file)),
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 impl Index {
     pub fn save(&self, path: &Path) -> io::Result<SaveStats> {
-        let tmp_path = path.with_extension("bin.tmp");
         let mut header = Vec::new();
 
         // Header placeholder.
@@ -74,9 +110,7 @@ impl Index {
         header.extend_from_slice(&timestamp.to_le_bytes());
         header.resize(64, 0); // pad header to 64 bytes
 
-        let file = fs::File::create(&tmp_path)?;
-        #[cfg(unix)]
-        file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        let (temporary, file) = create_save_temp(path)?;
         let mut data = IndexWriter {
             inner: BufWriter::new(file),
             checksum: fnv1a_64(&[]),
@@ -132,7 +166,7 @@ impl Index {
         file.sync_all()?;
         drop(file);
 
-        fs::rename(&tmp_path, path)?;
+        fs::rename(&temporary.0, path)?;
 
         Ok(SaveStats {
             entry_count,

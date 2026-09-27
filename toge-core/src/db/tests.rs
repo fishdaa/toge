@@ -242,3 +242,38 @@ fn streaming_checksum_handles_partial_writes_across_header_boundaries() {
         fnv1a_64(&[&bytes[..12], &bytes[20..]].concat())
     );
 }
+
+#[test]
+fn concurrent_saves_publish_one_complete_index_without_temp_collisions() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    let writers = 8;
+    let barrier = std::sync::Barrier::new(writers);
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for writer in 0..writers {
+            let (barrier, path) = (&barrier, &path);
+            handles.push(scope.spawn(move || {
+                let mut index = Index::new();
+                for row in 0..2_000 {
+                    index.insert(&format!("/writer-{writer}/row-{row:05}.txt"), false);
+                }
+                barrier.wait();
+                index.save(path).unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    });
+    let loaded = Index::load(&path).unwrap();
+    assert_eq!(loaded.count(), 2_000);
+    let prefix = loaded.entries[0].path.split('/').nth(1).unwrap();
+    assert!(
+        loaded
+            .entries
+            .iter()
+            .all(|entry| entry.path.split('/').nth(1) == Some(prefix))
+    );
+    assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}

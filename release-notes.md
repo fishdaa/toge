@@ -8,6 +8,9 @@
 
 - Instance isolation for multiple daemon sockets and large selection actions beyond the display cache.
 - Search and sorting performance, metadata refresh, and daemon readiness handling.
+- Removed stale indexed descendants when a configured root is deleted or moved.
+- Prevented stalled preview readers from holding the shared index lock.
+- Made concurrent index saves use separate temporary files so published indexes remain complete.
 
 ### Changed
 

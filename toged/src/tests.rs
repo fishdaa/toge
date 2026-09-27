@@ -63,7 +63,7 @@ fn deleting_directory_removes_indexed_descendants() {
     index.insert("/downloads/torrent/season/episode.mkv", false);
     index.insert("/downloads/torrent-2/keep.mkv", false);
 
-    remove_deleted_path(&mut index, "/downloads/torrent");
+    remove_deleted_path(&mut index, "/downloads/torrent", &[]);
 
     assert!(index.id_by_path("/downloads/torrent").is_none());
     assert!(
@@ -656,9 +656,26 @@ fn deleting_a_file_leaves_entries_sharing_its_prefix() {
     index.insert("/data/report.bak", false);
     index.insert("/data/reports/q1.txt", false);
 
-    remove_deleted_path(&mut index, "/data/report");
+    remove_deleted_path(&mut index, "/data/report", &[]);
 
     assert!(index.id_by_path("/data/report").is_none());
     assert!(index.id_by_path("/data/report.bak").is_some());
     assert!(index.id_by_path("/data/reports/q1.txt").is_some());
+}
+
+#[test]
+fn deleting_an_unindexed_root_removes_only_its_descendants() {
+    let root = std::path::PathBuf::from("/downloads/torrent");
+    let mut index = Index::new();
+    index.insert("/downloads/torrent/season", true);
+    index.insert("/downloads/torrent/season/episode.mkv", false);
+    index.insert("/downloads/torrent-2/keep.mkv", false);
+    assert!(index.id_by_path(root.to_str().unwrap()).is_none());
+    remove_deleted_path(
+        &mut index,
+        root.to_str().unwrap(),
+        std::slice::from_ref(&root),
+    );
+    assert_eq!(index.count(), 1);
+    assert!(index.id_by_path("/downloads/torrent-2/keep.mkv").is_some());
 }

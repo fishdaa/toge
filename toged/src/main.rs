@@ -416,11 +416,9 @@ fn index_created_path_with(
     }
 }
 
-fn remove_deleted_path(index: &mut Index, path: &str) {
-    // Only an indexed directory needs the scan over every entry: a file has no
-    // descendants, and a directory is always indexed before its contents, so
-    // an unindexed path has none either. (Entries left behind by lost watcher
-    // events are removed by the reconcile that an overflow triggers.)
+fn remove_deleted_path(index: &mut Index, path: &str, roots: &[PathBuf]) {
+    // Files have no descendants. Configured roots are omitted by the initial
+    // walk, but deleting a root must still remove its indexed subtree.
     match index.id_by_path(path) {
         Some(id) if index.entries[id as usize].path == path => {
             if !index.entries[id as usize].is_dir {
@@ -428,6 +426,7 @@ fn remove_deleted_path(index: &mut Index, path: &str) {
                 return;
             }
         }
+        None if roots.iter().any(|root| root == Path::new(path)) => {}
         _ => return,
     }
     let deleted = Path::new(path);
@@ -1348,7 +1347,12 @@ fn resolve_events(
 
 /// Apply one resolved change. Returns true when events were lost and the
 /// index must be reconciled with the disk.
-fn apply_change(st: &mut DaemonState, change: &IndexChange, config: &Config) -> bool {
+fn apply_change(
+    st: &mut DaemonState,
+    change: &IndexChange,
+    config: &Config,
+    roots: &[PathBuf],
+) -> bool {
     match change {
         IndexChange::Create {
             path,
@@ -1363,7 +1367,7 @@ fn apply_change(st: &mut DaemonState, change: &IndexChange, config: &Config) -> 
         }
         IndexChange::Delete { path } => {
             append_watcher_log(st, format!("delete {}", path));
-            remove_deleted_path(&mut st.index, path);
+            remove_deleted_path(&mut st.index, path, roots);
         }
         IndexChange::Modify { path, metadata } => {
             append_watcher_log(st, format!("modify {}", path));
@@ -1380,7 +1384,7 @@ fn apply_change(st: &mut DaemonState, change: &IndexChange, config: &Config) -> 
         }
         IndexChange::Move { from, to } => {
             append_watcher_log(st, format!("move {} -> {}", from, to));
-            remove_deleted_path(&mut st.index, from);
+            remove_deleted_path(&mut st.index, from, roots);
             index_created_path(st, to, Path::new(to).is_dir(), config);
         }
         IndexChange::Overflow => {
@@ -1473,7 +1477,7 @@ fn start_watcher(
                 for chunk in changes.chunks(WATCH_APPLY_BATCH) {
                     let mut st = state.lock().unwrap();
                     for change in chunk {
-                        overflowed |= apply_change(&mut st, change, &config);
+                        overflowed |= apply_change(&mut st, change, &config, &scope.roots);
                     }
                 }
                 if overflowed {

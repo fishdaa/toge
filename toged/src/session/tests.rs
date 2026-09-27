@@ -483,3 +483,62 @@ fn date_sessions_use_indexed_metadata_and_sync_watcher_changes() {
         before
     );
 }
+
+#[test]
+fn stalled_preview_reader_does_not_hold_the_index_lock() {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    let path = format!("/r/{}.txt", "a".repeat(20_000));
+    let config = Config::default_config();
+    let state = Mutex::new(daemon(&[(&path, 1)]));
+    let (mut client, mut server) = UnixStream::pair().unwrap();
+    let buffer: libc::c_int = 4096;
+    // SAFETY: the socket is live and the option points to a valid integer.
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                server.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&buffer as *const libc::c_int).cast(),
+                std::mem::size_of_val(&buffer) as libc::socklen_t,
+            )
+        },
+        0
+    );
+    client
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    std::thread::scope(|scope| {
+        let producer = scope.spawn(|| {
+            let dir = Path::new("/nonexistent");
+            let env = SessionEnv::new(&config, dir, dir);
+            serve_session_with_preview(
+                &mut server,
+                &SessionOpen {
+                    raw: "txt".into(),
+                    sort: None,
+                },
+                &env,
+                &state,
+                true,
+            )
+        });
+        // The first frame cannot fit in the tiny send buffer. Leave its body
+        // unread so the preview writer stays blocked while checking the lock.
+        let mut header = [0; 8];
+        client.read_exact(&mut header).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut unlocked = false;
+        while Instant::now() < deadline {
+            if state.try_lock().is_ok() {
+                unlocked = true;
+                break;
+            }
+            std::thread::yield_now();
+        }
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(producer.join().unwrap().is_err());
+        assert!(unlocked, "socket backpressure kept the shared index locked");
+    });
+}

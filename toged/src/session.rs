@@ -337,7 +337,7 @@ fn reconcile_path(st: &mut DaemonState, path: &str, env: &SessionEnv) {
     if is_ignored_path(path, env.state_dir, env.config_dir, is_dir) {
         return;
     }
-    remove_deleted_path(&mut st.index, path);
+    remove_deleted_path(&mut st.index, path, &env.roots);
     if metadata.is_some() && !excluded_under_roots(Path::new(path), &env.roots, &env.excludes) {
         index_created_path(st, path, is_dir, env.config);
     }
@@ -385,51 +385,78 @@ pub(crate) fn serve_session_with_preview(
     if client_gone(stream) {
         return Ok(());
     }
-    let opened = {
+    let opened = if progressive {
+        let mut preview_stream = stream.try_clone()?;
+        std::thread::scope(|scope| -> io::Result<Result<Session, String>> {
+            // One queued preview bounds memory. A slow reader may miss an
+            // intermediate preview, but never delays the index computation.
+            let (sender, receiver) = std::sync::mpsc::sync_channel::<Vec<u8>>(1);
+            let writer = scope.spawn(move || -> io::Result<()> {
+                for frame in receiver {
+                    write_frame(&mut preview_stream, &frame)?;
+                }
+                Ok(())
+            });
+            let opened = {
+                let mut st = state.lock().unwrap();
+                if client_gone(stream) {
+                    Err("superseded".to_string())
+                } else {
+                    let mut sent = 0;
+                    Session::open_preview(&mut st, open, env.config.index_size, |index, ids| {
+                        if client_gone(stream) {
+                            return Err(io::Error::other("superseded"));
+                        }
+                        if ids.len() <= sent {
+                            return Ok(());
+                        }
+                        sent = ids.len();
+                        let rows = ids
+                            .iter()
+                            .map(|&id| {
+                                let entry = &index.entries[id as usize];
+                                SessionRow {
+                                    path: entry.path.clone(),
+                                    is_dir: entry.is_dir,
+                                    size: entry.size,
+                                    modified_unix: entry.modified,
+                                }
+                            })
+                            .collect();
+                        let frame = SessionResponse::Rows {
+                            state: SessionState {
+                                generation: 0,
+                                total_count: sent,
+                                total_size: 0,
+                            },
+                            offset: 0,
+                            rows,
+                        }
+                        .encode();
+                        match sender.try_send(frame) {
+                            Ok(()) | Err(std::sync::mpsc::TrySendError::Full(_)) => Ok(()),
+                            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                                Err(io::Error::other("preview connection closed"))
+                            }
+                        }
+                    })
+                    .map_err(|error| error.to_string())
+                }
+            };
+            // Release the index lock before waiting for the preview writer.
+            // Joining also keeps the final State frame after all previews.
+            drop(sender);
+            writer
+                .join()
+                .map_err(|_| io::Error::other("preview writer panicked"))??;
+            Ok(opened)
+        })?
+    } else {
         let mut st = state.lock().unwrap();
         if client_gone(stream) {
             return Ok(());
         }
-        if progressive {
-            let mut sent = 0;
-            Session::open_preview(&mut st, open, env.config.index_size, |index, ids| {
-                if client_gone(stream) {
-                    return Err(io::Error::other("superseded"));
-                }
-                if ids.len() <= sent {
-                    return Ok(());
-                }
-                sent = ids.len();
-                let rows = ids
-                    .iter()
-                    .map(|&id| {
-                        let entry = &index.entries[id as usize];
-                        SessionRow {
-                            path: entry.path.clone(),
-                            is_dir: entry.is_dir,
-                            size: entry.size,
-                            modified_unix: entry.modified,
-                        }
-                    })
-                    .collect();
-                write_frame(
-                    stream,
-                    &SessionResponse::Rows {
-                        state: SessionState {
-                            generation: 0,
-                            total_count: sent,
-                            total_size: 0,
-                        },
-                        offset: 0,
-                        rows,
-                    }
-                    .encode(),
-                )
-            })
-            .map_err(|error| error.to_string())
-        } else {
-            Session::open(&mut st, open, env.config.index_size)
-        }
+        Session::open(&mut st, open, env.config.index_size)
     };
     let mut session = match opened {
         Ok(session) => session,
