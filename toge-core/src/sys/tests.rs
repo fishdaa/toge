@@ -437,14 +437,9 @@ fn fanotify_watcher_rename_produces_delete_and_create() {
     }
     assert!(
         saw_delete,
-        "expected delete event for renamed-from {}",
-        old_str
+        "expected delete event for renamed-from {old_str}"
     );
-    assert!(
-        saw_create,
-        "expected create event for renamed-to {}",
-        new_str
-    );
+    assert!(saw_create, "expected create event for renamed-to {new_str}");
 }
 
 #[test]

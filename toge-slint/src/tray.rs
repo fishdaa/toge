@@ -1,4 +1,4 @@
-//! Status-area icon (freedesktop StatusNotifierItem). While it is registered,
+//! Status-area icon (freedesktop `StatusNotifierItem`). While it is registered,
 //! closing the last window leaves the GUI running in the tray.
 use crate::instance::Request;
 use crate::windows;
@@ -95,7 +95,7 @@ fn dispatch(action: Action) {
 static HANDLE: Mutex<Option<Handle<Tray>>> = Mutex::new(None);
 
 /// Register the tray icon in the background so D-Bus never delays the first
-/// window. Without a StatusNotifierItem host the GUI keeps its window-only
+/// window. Without a `StatusNotifierItem` host the GUI keeps its window-only
 /// behavior.
 pub fn start() {
     std::thread::spawn(|| match Tray.spawn() {

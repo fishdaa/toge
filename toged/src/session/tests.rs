@@ -6,7 +6,7 @@ use toge_core::ipc::session::SessionClient;
 fn daemon(paths: &[(&str, u64)]) -> DaemonState {
     let mut index = Index::new();
     for (path, size) in paths {
-        index.insert_with_metadata(path, false, *size, 1_700_000_000 + *size as i64, 1, 1);
+        index.insert_with_metadata(path, false, *size, 1_700_000_000 + size.cast_signed(), 1, 1);
     }
     DaemonState {
         index,
@@ -161,6 +161,39 @@ fn sync_picks_up_additions_only_after_the_refresh_interval() {
         .state()
         .unwrap();
     assert_eq!(state.generation, 2);
+}
+
+#[test]
+fn sync_rebuilds_on_metadata_changes_only_when_they_matter() {
+    let config = Config::default_config();
+    let dir = Path::new("/nonexistent");
+    let env = SessionEnv::new(&config, dir, dir);
+    let mut st = daemon(&[("/r/a.mkv", 1), ("/r/b.mkv", 2)]);
+    let mut by_name = open(&mut st, ".mkv", None);
+    let mut by_size = open(&mut st, ".mkv", Some((SortKey::Size, false)));
+    let mut sized = open(&mut st, ".mkv size:>2", None);
+    // A growing file, as a download or a log would be.
+    st.index
+        .insert_with_metadata("/r/a.mkv", false, 10, 1_700_000_001, 1, 1);
+    for session in [&mut by_name, &mut by_size, &mut sized] {
+        session.built_at -= SYNC_MIN_INTERVAL;
+    }
+    let state = by_name
+        .handle(&mut st, SessionRequest::Sync, &env)
+        .state()
+        .unwrap();
+    assert_eq!((state.generation, state.total_size), (1, 12));
+    let state = by_size
+        .handle(&mut st, SessionRequest::Sync, &env)
+        .state()
+        .unwrap();
+    assert_eq!(state.generation, 2);
+    assert_eq!(by_size.ids[0], st.index.id_by_path("/r/a.mkv").unwrap());
+    let state = sized
+        .handle(&mut st, SessionRequest::Sync, &env)
+        .state()
+        .unwrap();
+    assert_eq!((state.generation, state.total_count), (2, 1));
 }
 
 #[test]
@@ -352,9 +385,9 @@ fn superseded_open_is_skipped_without_running_the_query() {
 
 #[test]
 fn progressive_open_previews_before_sort_and_keeps_exact_final_results() {
-    let paths: Vec<_> = (0..600)
+    let paths: Vec<_> = (0..600u64)
         .rev()
-        .map(|i| (format!("/r/{i:04}.txt"), i as u64))
+        .map(|i| (format!("/r/{i:04}.txt"), i))
         .collect();
     let refs: Vec<_> = paths
         .iter()
@@ -464,14 +497,14 @@ fn date_sessions_use_indexed_metadata_and_sync_watcher_changes() {
     assert_eq!(session.ids[0], st.index.id_by_path(a).unwrap());
     // The watcher updates an existing entry rather than adding/removing it.
     st.index.insert_with_metadata(b, false, 2, 50, 20, 30);
-    session.built_at = Instant::now() - Duration::from_secs(2);
+    session.built_at = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
     session.handle(&mut st, SessionRequest::Sync, &env);
     assert_eq!(session.ids[0], st.index.id_by_path(b).unwrap());
     let before = st.index.entries[st.index.id_by_path(a).unwrap() as usize].modified;
     Session::open_preview(
         &mut st,
         &SessionOpen {
-            raw: "".into(),
+            raw: String::new(),
             sort: Some((SortKey::Modified, true)),
         },
         true,
@@ -500,8 +533,8 @@ fn stalled_preview_reader_does_not_hold_the_index_lock() {
                 server.as_raw_fd(),
                 libc::SOL_SOCKET,
                 libc::SO_SNDBUF,
-                (&buffer as *const libc::c_int).cast(),
-                std::mem::size_of_val(&buffer) as libc::socklen_t,
+                (&raw const buffer).cast(),
+                libc::socklen_t::try_from(std::mem::size_of_val(&buffer)).unwrap(),
             )
         },
         0

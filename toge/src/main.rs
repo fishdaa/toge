@@ -47,18 +47,18 @@ fn version() {
 
 fn default_state_dir() -> PathBuf {
     env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = env::var_os("HOME").expect("HOME not set");
-            PathBuf::from(home).join(".local/state")
-        })
+        .map_or_else(
+            || {
+                let home = env::var_os("HOME").expect("HOME not set");
+                PathBuf::from(home).join(".local/state")
+            },
+            PathBuf::from,
+        )
         .join("toge")
 }
 
 fn socket_path() -> PathBuf {
-    env::var_os("TOGE_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| default_state_dir().join("toged.sock"))
+    env::var_os("TOGE_SOCKET").map_or_else(|| default_state_dir().join("toged.sock"), PathBuf::from)
 }
 
 fn ensure_daemon_running(sock: &Path) -> io::Result<()> {
@@ -95,7 +95,7 @@ fn ensure_ready(sock: &Path, opts: &NdlOptions) -> io::Result<()> {
     if !opts.no_wait {
         return wait_for_ready(sock, Duration::from_secs(30));
     }
-    match send_simple(sock, Request::Status)? {
+    match send_simple(sock, &Request::Status)? {
         Response::Status(status) if status.status == DaemonStatus::Ready => Ok(()),
         Response::Status(status) => {
             if opts.format == OutputFormat::Jsonl {
@@ -115,9 +115,8 @@ fn ensure_ready(sock: &Path, opts: &NdlOptions) -> io::Result<()> {
 fn wait_for_ready(sock: &Path, timeout: Duration) -> io::Result<()> {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
-        match send_simple(sock, Request::Status) {
+        match send_simple(sock, &Request::Status) {
             Ok(Response::Status(status)) if status.status == DaemonStatus::Ready => return Ok(()),
-            Ok(Response::Status(_)) => {}
             Ok(Response::Error(e)) => return Err(io::Error::other(e)),
             Ok(_) => {}
             Err(e)
@@ -156,7 +155,7 @@ fn read_response(stream: &mut UnixStream) -> io::Result<Response> {
 fn read_response_from<R: Read>(reader: &mut R) -> io::Result<Response> {
     let mut len_buf = [0u8; 8];
     reader.read_exact(&mut len_buf)?;
-    let len = u64::from_le_bytes(len_buf) as usize;
+    let len = usize::try_from(u64::from_le_bytes(len_buf)).unwrap_or(usize::MAX);
     if len > MAX_IPC_MESSAGE_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -169,7 +168,7 @@ fn read_response_from<R: Read>(reader: &mut R) -> io::Result<Response> {
 }
 
 fn daemon_responding(sock: &Path) -> bool {
-    matches!(send_simple(sock, Request::Status), Ok(Response::Status(_)))
+    matches!(send_simple(sock, &Request::Status), Ok(Response::Status(_)))
 }
 
 fn daemon_command(sock: &Path) -> Command {
@@ -278,7 +277,7 @@ fn run_streamed_query<W: Write>(
         } else {
             writeln!(output, "{}", summary.total_size)?;
         }
-    } else if !header_written && !(opts.hide_empty || opts.no_result_error) {
+    } else if !header_written && !opts.hide_empty && !opts.no_result_error {
         output.write_all(render_results(&[], opts.format, false).as_bytes())?;
     }
     output.flush()?;
@@ -385,9 +384,9 @@ fn json_string(value: &str) -> String {
     out
 }
 
-fn send_simple(sock: &Path, req: Request) -> io::Result<Response> {
+fn send_simple(sock: &Path, req: &Request) -> io::Result<Response> {
     let mut stream = connect(sock)?;
-    send_request(&mut stream, &req)?;
+    send_request(&mut stream, req)?;
     read_response(&mut stream)
 }
 
@@ -396,7 +395,7 @@ fn main() {
     let opts = match NdlOptions::parse(args) {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("toge: {}", e);
+            eprintln!("toge: {e}");
             process::exit(2);
         }
     };
@@ -412,7 +411,7 @@ fn main() {
 
     let sock = socket_path();
     if let Err(e) = ensure_daemon_running(&sock) {
-        eprintln!("failed to start daemon: {}", e);
+        eprintln!("failed to start daemon: {e}");
         process::exit(1);
     }
 
@@ -422,7 +421,7 @@ fn main() {
     }
 
     if opts.status {
-        match send_simple(&sock, Request::Status) {
+        match send_simple(&sock, &Request::Status) {
             Ok(Response::Status(s)) if opts.format == OutputFormat::Jsonl => {
                 println!("{}", render_status_json(&s));
             }
@@ -446,7 +445,7 @@ fn main() {
             }
             Ok(_) => eprintln!("unexpected response"),
             Err(e) => {
-                eprintln!("failed to get status: {}", e);
+                eprintln!("failed to get status: {e}");
                 process::exit(1);
             }
         }
@@ -454,10 +453,10 @@ fn main() {
     }
 
     if opts.save_db {
-        match send_simple(&sock, Request::Flush) {
+        match send_simple(&sock, &Request::Flush) {
             Ok(Response::Ok) => {}
             Ok(Response::Error(e)) => {
-                eprintln!("error: {}", e);
+                eprintln!("error: {e}");
                 process::exit(1);
             }
             _ => {
@@ -469,10 +468,10 @@ fn main() {
     }
 
     if opts.reindex {
-        match send_simple(&sock, Request::Reindex) {
+        match send_simple(&sock, &Request::Reindex) {
             Ok(Response::Ok) => {}
             Ok(Response::Error(e)) => {
-                eprintln!("error: {}", e);
+                eprintln!("error: {e}");
                 process::exit(1);
             }
             _ => {
@@ -528,7 +527,7 @@ fn main() {
             Ok(_) => return,
             Err(error) if error.kind() == io::ErrorKind::BrokenPipe => return,
             Err(error) => {
-                eprintln!("stream query failed: {}", error);
+                eprintln!("stream query failed: {error}");
                 process::exit(1);
             }
         }
@@ -549,7 +548,7 @@ fn main() {
         ) {
             Ok(results) => println!("{}", results.total_count),
             Err(e) => {
-                eprintln!("query failed: {}", e);
+                eprintln!("query failed: {e}");
                 process::exit(1);
             }
         }
@@ -571,7 +570,7 @@ fn main() {
         ) {
             Ok(results) => println!("{}", results.total_size),
             Err(e) => {
-                eprintln!("query failed: {}", e);
+                eprintln!("query failed: {e}");
                 process::exit(1);
             }
         }
@@ -593,7 +592,7 @@ fn main() {
     ) {
         Ok(results) => results,
         Err(e) => {
-            eprintln!("query failed: {}", e);
+            eprintln!("query failed: {e}");
             process::exit(1);
         }
     };
@@ -619,15 +618,15 @@ fn main() {
 
     if let Some(path) = &opts.export_file {
         if let Err(e) = fs::write(path, &output) {
-            eprintln!("failed to write export: {}", e);
+            eprintln!("failed to write export: {e}");
             process::exit(1);
         }
         return;
     }
 
-    print!("{}", output);
+    print!("{output}");
     if let Err(e) = io::stdout().flush() {
-        eprintln!("query failed: {}", e);
+        eprintln!("query failed: {e}");
         process::exit(1);
     }
 }

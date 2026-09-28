@@ -37,9 +37,9 @@ fn test_response_results_roundtrip() {
                 extension: "txt".into(),
                 is_dir: false,
                 size: 12,
-                modified_unix: 1700000000,
-                created_unix: 1700000000,
-                accessed_unix: 1700000000,
+                modified_unix: 1_700_000_000,
+                created_unix: 1_700_000_000,
+                accessed_unix: 1_700_000_000,
             },
             ResultRow {
                 path: "/b.txt".into(),
@@ -48,9 +48,9 @@ fn test_response_results_roundtrip() {
                 extension: "txt".into(),
                 is_dir: false,
                 size: 34,
-                modified_unix: 1700000001,
-                created_unix: 1700000001,
-                accessed_unix: 1700000001,
+                modified_unix: 1_700_000_001,
+                created_unix: 1_700_000_001,
+                accessed_unix: 1_700_000_001,
             },
         ],
     });
@@ -73,7 +73,7 @@ fn test_response_status_roundtrip() {
             "12:00:00 create /downloads/movie.mkv".to_string(),
             "12:00:01 modify /downloads/movie.mkv".to_string(),
         ],
-        last_updated_unix: 1700000000,
+        last_updated_unix: 1_700_000_000,
         build_duration_ms: 567,
     });
     let bytes = resp.encode();
@@ -139,7 +139,7 @@ fn test_response_status_decode_supports_legacy_payload_without_watcher_log() {
     bytes.extend_from_slice(&12u64.to_le_bytes()); // watched_dir_count
     bytes.extend_from_slice(&1u64.to_le_bytes()); // watch_failure_count
     bytes.extend_from_slice(&2u64.to_le_bytes()); // watch_overflow_count
-    bytes.extend_from_slice(&1700000000u64.to_le_bytes()); // last_updated_unix
+    bytes.extend_from_slice(&1_700_000_000u64.to_le_bytes()); // last_updated_unix
     bytes.extend_from_slice(&567u64.to_le_bytes()); // build_duration_ms
 
     let decoded = Response::decode(&bytes).unwrap();
@@ -154,7 +154,7 @@ fn test_response_status_decode_supports_legacy_payload_without_watcher_log() {
             watch_failure_count: 1,
             watch_overflow_count: 2,
             watcher_log: vec![],
-            last_updated_unix: 1700000000,
+            last_updated_unix: 1_700_000_000,
             build_duration_ms: 567,
         })
     );

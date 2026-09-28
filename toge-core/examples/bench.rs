@@ -1,5 +1,9 @@
 //! Performance benchmarks for toge-core.
 //! Run with: cargo run --release --example bench
+#![allow(
+    clippy::cast_precision_loss,
+    reason = "counts/sizes are only formatted as approximate human-readable rates here"
+)]
 
 use std::fs;
 use std::time::{Duration, Instant};
@@ -11,7 +15,7 @@ fn temp_dir() -> std::path::PathBuf {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    dir.push(format!("toge-bench-{}", id));
+    dir.push(format!("toge-bench-{id}"));
     fs::create_dir_all(&dir).unwrap();
     dir
 }
@@ -34,7 +38,7 @@ fn main() {
 fn fmt_dur(d: Duration) -> String {
     let us = d.as_micros();
     if us < 1000 {
-        format!("{:>4} µs", us)
+        format!("{us:>4} µs")
     } else if us < 1_000_000 {
         format!("{:>7.2} ms", d.as_secs_f64() * 1000.0)
     } else {
@@ -46,7 +50,7 @@ fn bench_insert(n: usize) {
     let start = Instant::now();
     let mut idx = Index::new();
     for i in 0..n {
-        let path = format!("/home/user/docs/sub/deep/folder/file_{:08}.txt", i);
+        let path = format!("/home/user/docs/sub/deep/folder/file_{i:08}.txt");
         idx.insert(&path, false);
     }
     let elapsed = start.elapsed();
@@ -62,7 +66,7 @@ fn bench_insert(n: usize) {
 fn bench_search(n: usize) {
     let mut idx = Index::new();
     for i in 0..n {
-        let path = format!("/home/user/docs/sub/deep/folder/file_{:08}.txt", i);
+        let path = format!("/home/user/docs/sub/deep/folder/file_{i:08}.txt");
         idx.insert(&path, false);
     }
 
@@ -104,7 +108,7 @@ fn bench_search(n: usize) {
 fn bench_save_load(n: usize) {
     let mut idx = Index::new();
     for i in 0..n {
-        let path = format!("/home/user/docs/sub/deep/folder/file_{:08}.txt", i);
+        let path = format!("/home/user/docs/sub/deep/folder/file_{i:08}.txt");
         idx.insert(&path, false);
     }
 
@@ -121,7 +125,7 @@ fn bench_save_load(n: usize) {
 
     let size = fs::metadata(&path).unwrap().len();
     println!();
-    println!("persistence {:>6} entries:", n);
+    println!("persistence {n:>6} entries:");
     println!(
         "  save: {}  ({:.1} MB)",
         fmt_dur(save_dur),
@@ -146,19 +150,19 @@ fn bench_walk_synthetic() {
         let depth = d.strip_prefix(&root).unwrap().components().count();
         if depth >= levels {
             for i in 0..per_level {
-                fs::write(d.join(format!("file_{:03}.txt", i)), "data").unwrap();
+                fs::write(d.join(format!("file_{i:03}.txt")), "data").unwrap();
                 expected += 1;
             }
         } else {
             for i in 0..per_level {
-                let sub = d.join(format!("dir_{:03}", i));
+                let sub = d.join(format!("dir_{i:03}"));
                 fs::create_dir(&sub).unwrap();
                 stack.push(sub);
                 expected += 1;
             }
         }
         for i in 0..per_level / 2 {
-            fs::write(d.join(format!("file_{:03}.dat", i)), "data").unwrap();
+            fs::write(d.join(format!("file_{i:03}.dat")), "data").unwrap();
             expected += 1;
         }
     }

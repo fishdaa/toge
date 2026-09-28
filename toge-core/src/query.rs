@@ -12,6 +12,11 @@ const MAX_REGEX_GROUP_DEPTH: usize = 8;
 const MAX_REGEX_ALTERNATIONS: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each field mirrors a distinct, independently-set query modifier; grouping them \
+              into flags would be a public API break for little benefit"
+)]
 pub struct Query {
     pub raw: String,
     pub mode: SearchMode,
@@ -108,12 +113,12 @@ impl Query {
             ..Self::default()
         };
 
-        let tokens = tokenize(input)?;
+        let tokens = tokenize(input);
         for token in tokens {
             match token {
                 Token::Modifier(name, value) => apply_modifier(&mut query, &name, &value)?,
                 Token::Function(name, value) => apply_function(&mut query, &name, &value)?,
-                Token::Macro(name) => apply_macro(&mut query, &name)?,
+                Token::Macro(name) => apply_macro(&mut query, &name),
                 Token::Text(text) => add_text_term(&mut query, &text)?,
             }
         }
@@ -130,7 +135,7 @@ enum Token {
     Macro(String),
 }
 
-fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
+fn tokenize(input: &str) -> Vec<Token> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
     let mut current = String::new();
@@ -139,13 +144,13 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
         match c {
             ' ' | '\t' | '\n' | '\r' => {
                 if !current.is_empty() {
-                    tokens.push(classify_token(&current)?);
+                    tokens.push(classify_token(&current));
                     current.clear();
                 }
             }
             '"' => {
                 if !current.is_empty() {
-                    tokens.push(classify_token(&current)?);
+                    tokens.push(classify_token(&current));
                     current.clear();
                 }
                 let mut quoted = String::new();
@@ -162,29 +167,29 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
     }
 
     if !current.is_empty() {
-        tokens.push(classify_token(&current)?);
+        tokens.push(classify_token(&current));
     }
 
-    Ok(tokens)
+    tokens
 }
 
-fn classify_token(s: &str) -> Result<Token, ParseError> {
+fn classify_token(s: &str) -> Token {
     if let Some((name, value)) = s.split_once(':') {
         if name.is_empty() {
-            return Ok(Token::Text(s.to_string()));
+            return Token::Text(s.to_string());
         }
         let name_lower = name.to_lowercase();
         if is_modifier(&name_lower) {
-            return Ok(Token::Modifier(name_lower, value.to_string()));
+            return Token::Modifier(name_lower, value.to_string());
         }
         if is_function(&name_lower) {
-            return Ok(Token::Function(name_lower, value.to_string()));
+            return Token::Function(name_lower, value.to_string());
         }
         if is_file_type_macro(&name_lower) {
-            return Ok(Token::Macro(name_lower));
+            return Token::Macro(name_lower);
         }
     }
-    Ok(Token::Text(s.to_string()))
+    Token::Text(s.to_string())
 }
 
 fn is_modifier(name: &str) -> bool {
@@ -245,7 +250,6 @@ fn apply_modifier(query: &mut Query, name: &str, value: &str) -> Result<(), Pars
         "ww" => query.match_whole_word = true,
         "noww" => query.match_whole_word = false,
         "wildcards" => query.mode = SearchMode::Wildcard,
-        "nowildcards" => query.mode = SearchMode::Substring,
         "regex" => {
             query.mode = SearchMode::Regex;
             if !value.is_empty() {
@@ -253,7 +257,7 @@ fn apply_modifier(query: &mut Query, name: &str, value: &str) -> Result<(), Pars
                 query.terms.push(TextTerm::Regex(value.to_string()));
             }
         }
-        "noregex" => query.mode = SearchMode::Substring,
+        "nowildcards" | "noregex" => query.mode = SearchMode::Substring,
         "wholefilename" => query.whole_filename = true,
         "nowholefilename" => query.whole_filename = false,
         _ => {}
@@ -304,11 +308,11 @@ fn parse_sort(value: &str) -> Result<Sort, ParseError> {
         "accessed-desc" | "date-accessed-desc" => Ok(Sort::AccessedDesc),
         "extension" | "ext" | "extension-asc" | "ext-asc" => Ok(Sort::ExtensionAsc),
         "extension-desc" | "ext-desc" => Ok(Sort::ExtensionDesc),
-        other => Err(ParseError(format!("unknown sort: {}", other))),
+        other => Err(ParseError(format!("unknown sort: {other}"))),
     }
 }
 
-fn apply_macro(query: &mut Query, name: &str) -> Result<(), ParseError> {
+fn apply_macro(query: &mut Query, name: &str) {
     let exts = match name {
         "audio" => "aac;ac3;aiff;flac;m4a;mid;midi;mp3;ogg;ra;wav;wma",
         "doc" => "doc;docx;xls;xlsx;ppt;pptx;pdf;txt;rtf;csv",
@@ -316,11 +320,13 @@ fn apply_macro(query: &mut Query, name: &str) -> Result<(), ParseError> {
         "pic" => "bmp;gif;ico;jpg;jpeg;png;psd;svg;tif;tiff;webp",
         "video" => "avi;flv;m4v;mkv;mov;mp4;mpeg;mpg;wmv",
         "zip" => "7z;cab;bz2;gz;rar;tar;tgz;zip",
-        _ => return Ok(()),
+        _ => return,
     };
-    let list: Vec<String> = exts.split(';').map(|s| s.to_string()).collect();
+    let list: Vec<String> = exts
+        .split(';')
+        .map(std::string::ToString::to_string)
+        .collect();
     query.ext = Some(list);
-    Ok(())
 }
 
 fn add_text_term(query: &mut Query, text: &str) -> Result<(), ParseError> {
@@ -436,7 +442,7 @@ fn parse_size_value(s: &str) -> Result<u64, ParseError> {
         .0
         .parse::<u64>()
         .map(|n| n * multiplier.1)
-        .map_err(|_| ParseError(format!("invalid size: {}", s)))
+        .map_err(|_| ParseError(format!("invalid size: {s}")))
 }
 
 fn parse_date(value: &str) -> Result<RangeFilter<i64>, ParseError> {
@@ -444,7 +450,8 @@ fn parse_date(value: &str) -> Result<RangeFilter<i64>, ParseError> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64;
+        .as_secs()
+        .cast_signed();
     let (start, end) = match trimmed.to_lowercase().as_str() {
         "today" => (start_of_day(now), end_of_day(now)),
         "yesterday" => (start_of_day(now - 86400), end_of_day(now - 86400)),
@@ -460,25 +467,25 @@ fn parse_explicit_date(value: &str) -> Result<(i64, i64), ParseError> {
     let mut parts = value.split('-');
     let year = parts
         .next()
-        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?
+        .ok_or_else(|| ParseError(format!("invalid date: {value}")))?
         .parse::<i32>()
-        .map_err(|_| ParseError(format!("invalid date: {}", value)))?;
+        .map_err(|_| ParseError(format!("invalid date: {value}")))?;
     let month = parts
         .next()
-        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?
+        .ok_or_else(|| ParseError(format!("invalid date: {value}")))?
         .parse::<u32>()
-        .map_err(|_| ParseError(format!("invalid date: {}", value)))?;
+        .map_err(|_| ParseError(format!("invalid date: {value}")))?;
     let day = parts
         .next()
-        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?
+        .ok_or_else(|| ParseError(format!("invalid date: {value}")))?
         .parse::<u32>()
-        .map_err(|_| ParseError(format!("invalid date: {}", value)))?;
+        .map_err(|_| ParseError(format!("invalid date: {value}")))?;
     if parts.next().is_some() {
-        return Err(ParseError(format!("invalid date: {}", value)));
+        return Err(ParseError(format!("invalid date: {value}")));
     }
 
     let days = days_since_unix_epoch(year, month, day)
-        .ok_or_else(|| ParseError(format!("invalid date: {}", value)))?;
+        .ok_or_else(|| ParseError(format!("invalid date: {value}")))?;
     let start = days * 86400;
     Ok((start, start + 86400 - 1))
 }
@@ -492,7 +499,7 @@ fn days_since_unix_epoch(year: i32, month: u32, day: u32) -> Option<i64> {
         return None;
     }
 
-    let adjust = if month <= 2 { 1 } else { 0 };
+    let adjust = i32::from(month <= 2);
     let y = i64::from(year - adjust);
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
@@ -500,7 +507,7 @@ fn days_since_unix_epoch(year: i32, month: u32, day: u32) -> Option<i64> {
     let d = i64::from(day);
     let doy = (153 * (m + if m > 2 { -3 } else { 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    Some(era * 146097 + doe - 719468)
+    Some(era * 146_097 + doe - 719_468)
 }
 
 fn days_in_month(year: i32, month: u32) -> u32 {
@@ -583,7 +590,6 @@ fn validate_regex(pattern: &str) -> Result<(), ParseError> {
                 }
             }
             '}' if stack.pop() != Some('{') => return Err(ParseError("unmatched }".into())),
-            '}' => {}
             '|' => alternations += 1,
             _ => {}
         }
@@ -593,19 +599,17 @@ fn validate_regex(pattern: &str) -> Result<(), ParseError> {
     }
     if max_group_depth > MAX_REGEX_GROUP_DEPTH {
         return Err(ParseError(format!(
-            "regex too complex: group nesting exceeds {}",
-            MAX_REGEX_GROUP_DEPTH
+            "regex too complex: group nesting exceeds {MAX_REGEX_GROUP_DEPTH}"
         )));
     }
     if alternations > MAX_REGEX_ALTERNATIONS {
         return Err(ParseError(format!(
-            "regex too complex: alternations exceed {}",
-            MAX_REGEX_ALTERNATIONS
+            "regex too complex: alternations exceed {MAX_REGEX_ALTERNATIONS}"
         )));
     }
     regex::Regex::new(pattern)
         .map(|_| ())
-        .map_err(|e| ParseError(format!("invalid regex: {}", e)))
+        .map_err(|e| ParseError(format!("invalid regex: {e}")))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

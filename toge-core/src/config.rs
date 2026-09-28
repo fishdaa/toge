@@ -4,6 +4,11 @@ use std::env;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "each field mirrors a distinct, independently-set config file option; grouping them \
+              into flags would be a public API break for little benefit"
+)]
 pub struct Config {
     pub roots: Vec<PathBuf>,
     pub exclude_hidden: bool,
@@ -115,7 +120,7 @@ impl Config {
                         cfg.operator_precedence = match value {
                             "or_and" => OperatorOrder::OrAnd,
                             "and_or" => OperatorOrder::AndOr,
-                            _ => return Err(format!("unknown precedence: {}", value)),
+                            _ => return Err(format!("unknown precedence: {value}")),
                         }
                     }
                     _ => {}
@@ -130,7 +135,7 @@ impl Config {
                         cfg.roots = parse_string_array(value)?
                             .into_iter()
                             .map(PathBuf::from)
-                            .collect()
+                            .collect();
                     }
                     _ => {}
                 },
@@ -247,14 +252,14 @@ fn parse_bool(s: &str) -> Result<bool, String> {
     match s {
         "true" => Ok(true),
         "false" => Ok(false),
-        _ => Err(format!("expected true/false, got: {}", s)),
+        _ => Err(format!("expected true/false, got: {s}")),
     }
 }
 
 fn parse_string_array(s: &str) -> Result<Vec<String>, String> {
     let s = s.trim();
     if !s.starts_with('[') || !s.ends_with(']') {
-        return Err(format!("expected array, got: {}", s));
+        return Err(format!("expected array, got: {s}"));
     }
     let inner = &s[1..s.len() - 1];
     let mut out = Vec::new();
@@ -272,7 +277,7 @@ fn parse_string_array(s: &str) -> Result<Vec<String>, String> {
 fn parse_string(s: &str) -> Result<String, String> {
     let s = s.trim();
     if s.len() < 2 || !s.starts_with('"') || !s.ends_with('"') {
-        return Err(format!("expected string, got: {}", s));
+        return Err(format!("expected string, got: {s}"));
     }
     Ok(s[1..s.len() - 1].replace("\\\"", "\""))
 }
@@ -292,7 +297,7 @@ fn parse_keyboard_shortcuts(
         for entry in entries {
             let (command_id, accelerator) = entry
                 .split_once('|')
-                .ok_or_else(|| format!("invalid keyboard shortcut entry: {}", entry))?;
+                .ok_or_else(|| format!("invalid keyboard shortcut entry: {entry}"))?;
             out.push(KeyboardShortcutConfig {
                 command_id: command_id.trim().to_string(),
                 scope,
@@ -314,7 +319,7 @@ fn format_string_array(values: &[String]) -> String {
         .map(|value| format_string(value))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("[{}]", items)
+    format!("[{items}]")
 }
 
 fn format_shortcuts(shortcuts: &[KeyboardShortcutConfig], scope: KeyboardScope) -> Vec<String> {

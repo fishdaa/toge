@@ -198,7 +198,7 @@ fn test_parse_sort_function() {
 #[test]
 fn test_parse_overlong_regex_reports_error() {
     let pattern = "a".repeat(513);
-    let err = Query::parse(&format!("regex:{}", pattern)).unwrap_err();
+    let err = Query::parse(&format!("regex:{pattern}")).unwrap_err();
     assert!(err.to_string().contains("regex too long"));
 }
 
@@ -211,9 +211,9 @@ fn test_parse_deeply_nested_regex_reports_error() {
 #[test]
 fn test_parse_many_alternations_regex_reports_error() {
     let pattern = (0..34)
-        .map(|i| format!("p{}", i))
+        .map(|i| format!("p{i}"))
         .collect::<Vec<_>>()
         .join("|");
-    let err = Query::parse(&format!("regex:{}", pattern)).unwrap_err();
+    let err = Query::parse(&format!("regex:{pattern}")).unwrap_err();
     assert!(err.to_string().contains("regex too complex"));
 }

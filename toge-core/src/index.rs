@@ -41,7 +41,7 @@ pub(crate) fn fnv1a_64(data: &[u8]) -> u64 {
 pub(crate) fn fnv1a_extend(mut hash: u64, data: &[u8]) -> u64 {
     const FNV_PRIME: u64 = 0x000_0100_0000_01b3;
     for &b in data {
-        hash ^= b as u64;
+        hash ^= u64::from(b);
         hash = hash.wrapping_mul(FNV_PRIME);
     }
     hash
@@ -56,7 +56,7 @@ pub(crate) fn lowered_bytes(s: &str) -> Vec<u8> {
 /// Pack 3 ASCII bytes into a u32 trigram key.
 #[inline]
 pub(crate) fn pack_trigram(a: u8, b: u8, c: u8) -> u32 {
-    (a as u32) << 16 | (b as u32) << 8 | (c as u32)
+    u32::from(a) << 16 | u32::from(b) << 8 | u32::from(c)
 }
 
 /// Extract trigram keys from a lowercased byte slice.
@@ -192,11 +192,23 @@ pub struct Index {
     pub(crate) epoch: u64,
     /// Bumped whenever the set of entries changes.
     pub(crate) revision: u64,
+    /// Bumped whenever an existing entry's size or timestamps change, so
+    /// results that filter or sort by metadata can refresh. Name and path
+    /// orders ignore it.
+    pub(crate) metadata_revision: u64,
     /// Recent removals as `(removed_id, moved_from_id)`: record `i` moved the
     /// index from epoch `removal_base + i` to the next. Lets ID-keyed caches
     /// renumber in place instead of rebuilding.
     pub(crate) removals: Vec<(u32, u32)>,
     pub(crate) removal_base: u64,
+}
+
+/// Converts a position in [`Index::entries`] to its entry ID.
+///
+/// [`Index::insert_with_metadata`] refuses to grow an index to `u32::MAX`
+/// entries, so every position and the entry count itself fit in a `u32`.
+pub fn entry_id(position: usize) -> u32 {
+    u32::try_from(position).expect("an index holds fewer than u32::MAX entries")
 }
 
 /// Removal records kept for [`Index::removals_since`]; older caches rebuild.
@@ -205,6 +217,10 @@ const REMOVAL_LOG_LIMIT: usize = 1 << 16;
 impl Index {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    fn entry_count_u32(&self) -> u32 {
+        entry_id(self.entries.len())
     }
 
     /// Counter that changes whenever previously returned IDs may be stale.
@@ -217,11 +233,18 @@ impl Index {
         self.revision
     }
 
+    /// Counter that changes whenever an existing entry's size or timestamps
+    /// change through [`Index::insert_with_metadata`].
+    pub fn metadata_revision(&self) -> u64 {
+        self.metadata_revision
+    }
+
     /// Mark this index as the replacement of `previous`, invalidating IDs
     /// handed out by it.
     pub fn succeed(&mut self, previous: &Index) {
         self.epoch = previous.epoch.max(self.epoch) + 1;
         self.revision = previous.revision.max(self.revision) + 1;
+        self.metadata_revision = previous.metadata_revision.max(self.metadata_revision) + 1;
         self.removals.clear();
         self.removal_base = self.epoch;
     }
@@ -235,10 +258,47 @@ impl Index {
         self.removals.get(start..)
     }
 
-    pub fn insert(&mut self, path: &str, is_dir: bool) -> u32 {
+    /// Where `removals` (see [`Index::removals_since`]) moved the IDs of the
+    /// first `count` entries: `Some(new_id)` for a moved entry, `None` for a
+    /// removed one. IDs missing from the map still refer to the same entry.
+    pub fn renumbering(removals: &[(u32, u32)], count: u32) -> HashMap<u32, Option<u32>> {
+        // Which original ID currently occupies a slot, for slots touched so far.
+        let mut owner: HashMap<u32, Option<u32>> = HashMap::new();
+        let mut remap: HashMap<u32, Option<u32>> = HashMap::new();
+        let owner_of = |owner: &HashMap<u32, Option<u32>>, slot: u32| {
+            owner
+                .get(&slot)
+                .copied()
+                .unwrap_or((slot < count).then_some(slot))
+        };
+        for &(removed, moved_from) in removals {
+            if let Some(original) = owner_of(&owner, removed) {
+                remap.insert(original, None);
+            }
+            if removed != moved_from {
+                let moved = owner_of(&owner, moved_from);
+                owner.insert(removed, moved);
+                if let Some(original) = moved {
+                    remap.insert(original, Some(removed));
+                }
+            }
+            owner.insert(moved_from, None);
+        }
+        remap
+    }
+
+    /// Insert or update `path`, returning its entry ID. See
+    /// [`Index::insert_with_metadata`] for when this returns `None`.
+    pub fn insert(&mut self, path: &str, is_dir: bool) -> Option<u32> {
         self.insert_with_metadata(path, is_dir, 0, 0, 0, 0)
     }
 
+    /// Insert or update `path` with its metadata, returning its entry ID.
+    ///
+    /// Returns `None`, leaving the index unchanged, when the path cannot be
+    /// stored: its filename or extension starts past byte `u16::MAX` (entries
+    /// keep those offsets as `u16`), or the index already holds
+    /// `u32::MAX - 1` entries and has no ID left to hand out.
     pub fn insert_with_metadata(
         &mut self,
         path: &str,
@@ -247,38 +307,45 @@ impl Index {
         modified: i64,
         created: i64,
         accessed: i64,
-    ) -> u32 {
+    ) -> Option<u32> {
         let path_hash = fnv1a_64(path.as_bytes());
+        let mut replaces_existing = false;
         if let Some(&id) = self.path_to_id.get(&path_hash) {
             let entry = &mut self.entries[id as usize];
-            if entry.path == path && entry.is_dir == is_dir {
+            replaces_existing = entry.path == path;
+            if replaces_existing && entry.is_dir == is_dir {
                 if (entry.size, entry.modified, entry.created, entry.accessed)
                     != (size, modified, created, accessed)
                 {
-                    self.revision += 1;
+                    self.metadata_revision += 1;
                 }
                 entry.size = size;
                 entry.modified = modified;
                 entry.created = created;
                 entry.accessed = accessed;
-                return id;
-            }
-            if entry.path == path {
-                self.remove(path);
+                return Some(id);
             }
         }
 
-        let id = self.entries.len() as u32;
-        self.revision += 1;
-        let name_off = path.rfind('/').map(|i| i + 1).unwrap_or(0) as u16;
-        let name = &path[name_off as usize..];
-        let ext_off = if is_dir {
+        let name_start = path.rfind('/').map_or(0, |i| i + 1);
+        let name = &path[name_start..];
+        let ext_start = if is_dir {
             0
         } else {
-            name.rfind('.')
-                .map(|i| name_off as usize + i + 1)
-                .unwrap_or(0) as u16
+            name.rfind('.').map_or(0, |i| name_start + i + 1)
         };
+        let (Ok(name_off), Ok(ext_off)) = (u16::try_from(name_start), u16::try_from(ext_start))
+        else {
+            return None;
+        };
+        if self.entry_count_u32() == u32::MAX {
+            return None;
+        }
+        if replaces_existing {
+            self.remove(path);
+        }
+        let id = self.entry_count_u32();
+        self.revision += 1;
 
         let entry = Entry {
             path: path.to_string(),
@@ -312,7 +379,7 @@ impl Index {
             push_index_value(self.prefix_first_byte.entry(first_byte).or_default(), id);
         }
 
-        id
+        Some(id)
     }
 
     pub fn remove(&mut self, path: &str) -> bool {
@@ -334,16 +401,16 @@ impl Index {
             self.removals.drain(..REMOVAL_LOG_LIMIT / 2);
             self.removal_base += (REMOVAL_LOG_LIMIT / 2) as u64;
         }
-        self.removals.push((id, self.entries.len() as u32 - 1));
+        self.removals.push((id, self.entry_count_u32() - 1));
         self.epoch += 1;
         self.revision += 1;
 
         let is_dir = entry.is_dir;
         let name_lower = lowered_bytes(entry.name());
-        let ext = if !is_dir {
-            entry.extension().to_string()
-        } else {
+        let ext = if is_dir {
             String::new()
+        } else {
+            entry.extension().to_string()
         };
 
         // Remove from trigram index.
@@ -371,7 +438,7 @@ impl Index {
             list.remove(pos);
         }
 
-        let old_last_id = self.entries.len() as u32 - 1;
+        let old_last_id = self.entry_count_u32() - 1;
         self.entries.swap_remove(id as usize);
 
         if id != old_last_id {
@@ -422,17 +489,17 @@ impl Index {
             if let Ok(t) = metadata.modified()
                 && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
             {
-                entry.modified = d.as_secs() as i64;
+                entry.modified = d.as_secs().cast_signed();
             }
             if let Ok(t) = metadata.created()
                 && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
             {
-                entry.created = d.as_secs() as i64;
+                entry.created = d.as_secs().cast_signed();
             }
             if let Ok(t) = metadata.accessed()
                 && let Ok(d) = t.duration_since(std::time::UNIX_EPOCH)
             {
-                entry.accessed = d.as_secs() as i64;
+                entry.accessed = d.as_secs().cast_signed();
             }
         }
         true
@@ -453,13 +520,13 @@ impl Index {
                 })
                 .collect()
         } else if needle_bytes.is_empty() {
-            (0..self.entries.len() as u32).collect()
+            (0..self.entry_count_u32()).collect()
         } else {
             self.entries
                 .iter()
                 .enumerate()
                 .filter(|(_, e)| contains_ignore_case(e.name(), needle_bytes))
-                .map(|(i, _)| i as u32)
+                .map(|(i, _)| entry_id(i))
                 .collect()
         }
     }
@@ -469,7 +536,7 @@ impl Index {
         let prefix_bytes = prefix_lower.as_bytes();
 
         if prefix_bytes.is_empty() {
-            return (0..self.entries.len() as u32).collect();
+            return (0..self.entry_count_u32()).collect();
         }
 
         if let Some(first_byte) = prefix_bytes.first()
@@ -530,7 +597,11 @@ impl Index {
                 .map(|e| e.path.capacity())
                 .sum::<usize>()
             + self.by_ext.capacity() * std::mem::size_of::<(String, Vec<u32>)>()
-            + self.by_ext.keys().map(|ext| ext.capacity()).sum::<usize>()
+            + self
+                .by_ext
+                .keys()
+                .map(std::string::String::capacity)
+                .sum::<usize>()
             + self.path_to_id.capacity() * std::mem::size_of::<(u64, u32)>()
             + self.trigrams.capacity() * std::mem::size_of::<(u32, Vec<u32>)>()
             + self.prefix_first_byte.capacity() * std::mem::size_of::<(u8, Vec<u32>)>()
@@ -550,7 +621,7 @@ impl Index {
         self.trigrams.clear();
         self.prefix_first_byte.clear();
         for (id, entry) in self.entries.iter().enumerate() {
-            let id = id as u32;
+            let id = entry_id(id);
             let path_hash = fnv1a_64(entry.path.as_bytes());
             self.path_to_id.insert(path_hash, id);
             if !entry.is_dir {
@@ -569,7 +640,7 @@ impl Index {
 
     /// Look up entries by extension (used by the matcher).
     pub fn by_extension(&self, ext: &str) -> Option<&[u32]> {
-        self.by_ext.get(ext).map(|v| v.as_slice())
+        self.by_ext.get(ext).map(std::vec::Vec::as_slice)
     }
 
     /// Look up an entry id by full path.

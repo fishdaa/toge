@@ -145,11 +145,11 @@ mod tests {
         assert_ne!(first, second);
         let (tx, rx) = channel();
         serve(bind(&first).unwrap(), move |request| {
-            tx.send(request).unwrap()
+            tx.send(request).unwrap();
         });
         let (tx, other) = channel();
         serve(bind(&second).unwrap(), move |request| {
-            tx.send(request).unwrap()
+            tx.send(request).unwrap();
         });
         assert!(send(&first, Request::Toggle).unwrap());
         assert!(send(&second, Request::NewWindow).unwrap());
@@ -172,7 +172,7 @@ mod tests {
         let path = parent.join("gui.sock");
         let (tx, rx) = channel();
         serve(bind(&path).unwrap(), move |request| {
-            tx.send(request).unwrap()
+            tx.send(request).unwrap();
         });
         assert_eq!(
             std::fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
@@ -207,7 +207,7 @@ mod tests {
         assert!(!send(&path, Request::Toggle).unwrap());
         let (tx, rx) = channel();
         serve(bind(&path).unwrap(), move |request| {
-            tx.send(request).unwrap()
+            tx.send(request).unwrap();
         });
         for request in [Request::Toggle, Request::NewWindow, Request::Show] {
             assert!(send(&path, request).unwrap());
@@ -230,7 +230,7 @@ mod tests {
         assert!(!send(&path, Request::Show).unwrap());
         let (tx, rx) = channel();
         serve(bind(&path).unwrap(), move |request| {
-            tx.send(request).unwrap()
+            tx.send(request).unwrap();
         });
         assert!(send(&path, Request::NewWindow).unwrap());
         assert_eq!(

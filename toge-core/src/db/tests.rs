@@ -22,12 +22,11 @@ fn test_save_and_load_roundtrip() {
     let loaded = Index::load(&path).unwrap();
     assert_eq!(loaded.count(), original.count());
 
-    for id in 0..original.count() as u32 {
+    for id in 0..entry_id(original.count()) {
         assert_eq!(
             loaded.get_path(id),
             original.get_path(id),
-            "path mismatch at id {}",
-            id
+            "path mismatch at id {id}"
         );
     }
 }
@@ -65,6 +64,32 @@ fn test_save_is_atomic() {
         }
     }
     assert!(!found_tmp, "atomic save left a temp file behind");
+}
+
+#[test]
+fn test_save_removes_temp_files_of_dead_processes() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    let mut child = std::process::Command::new("true").spawn().unwrap();
+    let dead_pid = child.id();
+    child.wait().unwrap();
+    let dead = dir.path().join(format!("index.bin.{dead_pid}.0.tmp"));
+    let legacy = dir.path().join("index.bin.tmp");
+    // Another live save in this process, and an unrelated file.
+    let live = dir
+        .path()
+        .join(format!("index.bin.{}.99.tmp", std::process::id()));
+    let other = dir.path().join("notes.1.2.tmp");
+    for file in [&dead, &legacy, &live, &other] {
+        fs::write(file, b"partial").unwrap();
+    }
+
+    sample_index().save(&path).unwrap();
+
+    assert!(!dead.exists(), "a dead save's temp file was kept");
+    assert!(!legacy.exists(), "the legacy temp file was kept");
+    assert!(live.exists(), "a live save's temp file was removed");
+    assert!(other.exists(), "an unrelated file was removed");
 }
 
 #[test]
@@ -119,7 +144,7 @@ fn test_load_rejects_excessive_entry_count() {
     let mut data = Vec::new();
     data.extend_from_slice(b"NDL1");
     data.extend_from_slice(&VERSION.to_le_bytes());
-    data.extend_from_slice(&((MAX_ENTRY_COUNT as u32) + 1).to_le_bytes());
+    data.extend_from_slice(&(entry_id(MAX_ENTRY_COUNT) + 1).to_le_bytes());
     data.extend_from_slice(&0u64.to_le_bytes());
     data.extend_from_slice(&0u32.to_le_bytes());
     data.extend_from_slice(&0i64.to_le_bytes());
@@ -148,7 +173,7 @@ fn test_load_rejects_excessive_ext_key_length() {
     data.resize(64, 0);
     data.extend_from_slice(&0u64.to_le_bytes());
     data.extend_from_slice(&1u32.to_le_bytes());
-    data.extend_from_slice(&((MAX_EXT_KEY_LEN as u32) + 1).to_le_bytes());
+    data.extend_from_slice(&(u32::try_from(MAX_EXT_KEY_LEN).unwrap() + 1).to_le_bytes());
     let checksum = crate::index::fnv1a_64(&[&data[..12], &data[20..]].concat());
     data[12..20].copy_from_slice(&checksum.to_le_bytes());
 
@@ -276,4 +301,22 @@ fn concurrent_saves_publish_one_complete_index_without_temp_collisions() {
             .all(|entry| entry.path.split('/').nth(1) == Some(prefix))
     );
     assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn test_load_rejects_entry_offsets_outside_their_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad-offsets.bin");
+
+    for (name_off, ext_off) in [(2, 0), (500, 0), (1, 2)] {
+        let mut idx = Index::new();
+        idx.insert("/é.txt", false).unwrap();
+        idx.entries[0].name_off = name_off;
+        idx.entries[0].ext_off = ext_off;
+        idx.save(&path).unwrap();
+
+        let err = Index::load(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("entry offset outside its path"));
+    }
 }
