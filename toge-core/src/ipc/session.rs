@@ -115,11 +115,19 @@ pub(super) fn push_sort(buf: &mut Vec<u8>, sort: Option<(SortKey, bool)>) {
         None => buf.push(0xff),
         Some((key, ascending)) => {
             buf.push(sort_key_to_u8(key));
-            buf.push(ascending as u8);
+            buf.push(u8::from(ascending));
         }
     }
 }
 
+// The outer `Option` is "malformed wire data" (propagated with `.ok_or(...)?`
+// at the call sites); the inner `Option` is the actual "no sort requested"
+// value carried over the wire. A dedicated wrapper type would only rename
+// this distinction, so it's kept as-is for this internal wire-format helper.
+#[allow(
+    clippy::option_option,
+    reason = "outer Option is parse failure, inner Option is the wire value; see comment above"
+)]
 pub(super) fn take_sort(buf: &[u8], off: &mut usize) -> Option<Option<(SortKey, bool)>> {
     let tag = *buf.get(*off)?;
     *off += 1;
@@ -237,9 +245,9 @@ impl SessionResponse {
                 push_usize(&mut buf, rows.len());
                 for row in rows {
                     push_string(&mut buf, &row.path);
-                    buf.push(row.is_dir as u8);
+                    buf.push(u8::from(row.is_dir));
                     push_u64(&mut buf, row.size);
-                    push_u64(&mut buf, row.modified_unix as u64);
+                    push_u64(&mut buf, row.modified_unix.cast_unsigned());
                 }
             }
             Self::Located { state, position } => {
@@ -280,8 +288,9 @@ impl SessionResponse {
                         path,
                         is_dir,
                         size: take_u64(bytes, &mut off).ok_or("missing row size")?,
-                        modified_unix: take_u64(bytes, &mut off).ok_or("missing row modified")?
-                            as i64,
+                        modified_unix: take_u64(bytes, &mut off)
+                            .ok_or("missing row modified")?
+                            .cast_signed(),
                     });
                 }
                 Self::Rows {
@@ -320,13 +329,13 @@ pub fn read_frame<R: Read>(reader: &mut R, max: usize) -> io::Result<Option<Vec<
         Err(error) => return Err(error),
     }
     let len = u64::from_le_bytes(len);
-    if len > max as u64 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "session frame too large",
-        ));
-    }
-    let mut bytes = vec![0; len as usize];
+    // Reject frames that don't fit in a usize as well as ones over `max`,
+    // rather than truncating the length on 32-bit targets.
+    let len = usize::try_from(len)
+        .ok()
+        .filter(|&len| len <= max)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "session frame too large"))?;
+    let mut bytes = vec![0; len];
     reader.read_exact(&mut bytes)?;
     Ok(Some(bytes))
 }
@@ -340,7 +349,7 @@ pub struct SessionClient<S> {
 impl<S: Read + Write> SessionClient<S> {
     /// Send the open request and wait for the initial state.
     pub fn open(mut stream: S, open: SessionOpen) -> io::Result<Self> {
-        Self::open_request(&mut stream, Request::OpenSession(open))?;
+        Self::open_request(&mut stream, &Request::OpenSession(open))?;
         Self::finish_open(stream, |_| Ok(()))
     }
 
@@ -351,11 +360,11 @@ impl<S: Read + Write> SessionClient<S> {
         open: SessionOpen,
         preview: impl FnMut(Vec<SessionRow>) -> io::Result<()>,
     ) -> io::Result<Self> {
-        Self::open_request(&mut stream, Request::OpenSessionPreview(open))?;
+        Self::open_request(&mut stream, &Request::OpenSessionPreview(open))?;
         Self::finish_open(stream, preview)
     }
 
-    fn open_request(stream: &mut S, request: Request) -> io::Result<()> {
+    fn open_request(stream: &mut S, request: &Request) -> io::Result<()> {
         write_frame(stream, &request.encode())
     }
 
@@ -385,7 +394,7 @@ impl<S: Read + Write> SessionClient<S> {
                     && state.total_count == rows.len()
                     && rows.len() <= SESSION_PREVIEW_ROWS =>
                 {
-                    preview(rows)?
+                    preview(rows)?;
                 }
                 _ => {
                     return Err(io::Error::new(
@@ -411,8 +420,8 @@ impl<S: Read + Write> SessionClient<S> {
                     offset: o, rows, ..
                 },
             ) => o == offset && rows.len() <= *len,
-            (SessionRequest::Locate { .. }, SessionResponse::Located { .. }) => true,
-            (
+            (SessionRequest::Locate { .. }, SessionResponse::Located { .. })
+            | (
                 SessionRequest::Resort { .. }
                 | SessionRequest::Sync
                 | SessionRequest::Reconcile { .. },

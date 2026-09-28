@@ -89,11 +89,13 @@ fn started_automatically(args: impl IntoIterator<Item = impl AsRef<std::ffi::OsS
 
 fn default_config_path() -> PathBuf {
     env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = env::var_os("HOME").expect("HOME not set");
-            PathBuf::from(home).join(".config")
-        })
+        .map_or_else(
+            || {
+                let home = env::var_os("HOME").expect("HOME not set");
+                PathBuf::from(home).join(".config")
+            },
+            PathBuf::from,
+        )
         .join("toge")
         .join("config.toml")
 }

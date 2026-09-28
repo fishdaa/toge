@@ -13,9 +13,24 @@ fn sample_index() -> Index {
 #[test]
 fn test_insert_assigns_sequential_ids() {
     let mut idx = Index::new();
-    assert_eq!(idx.insert("/a.txt", false), 0);
-    assert_eq!(idx.insert("/b.rs", false), 1);
-    assert_eq!(idx.insert("/dir", true), 2);
+    assert_eq!(idx.insert("/a.txt", false), Some(0));
+    assert_eq!(idx.insert("/b.rs", false), Some(1));
+    assert_eq!(idx.insert("/dir", true), Some(2));
+}
+
+#[test]
+fn test_metadata_changes_bump_only_the_metadata_revision() {
+    let mut idx = Index::new();
+    idx.insert_with_metadata("/a/log.txt", false, 1, 10, 10, 10);
+    let (revision, metadata) = (idx.revision(), idx.metadata_revision());
+    idx.insert_with_metadata("/a/log.txt", false, 2, 11, 10, 10);
+    assert_eq!(idx.revision(), revision);
+    assert_eq!(idx.metadata_revision(), metadata + 1);
+    // Unchanged metadata bumps neither.
+    idx.insert_with_metadata("/a/log.txt", false, 2, 11, 10, 10);
+    assert_eq!(idx.metadata_revision(), metadata + 1);
+    idx.insert("/a/new.txt", false);
+    assert_eq!(idx.revision(), revision + 1);
 }
 
 #[test]
@@ -36,11 +51,11 @@ fn test_get_path() {
 fn test_search_substring_case_insensitive() {
     let idx = sample_index();
     let mut ids = idx.search_substring("foo");
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![0]);
 
     let mut ids = idx.search_substring("TXT");
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![0]);
 }
 
@@ -56,7 +71,7 @@ fn test_search_substring_matches_filename_only_by_default() {
 fn test_search_substring_multiple_matches() {
     let idx = sample_index();
     let mut ids = idx.search_substring("o");
-    ids.sort();
+    ids.sort_unstable();
     // foo.txt and song.mp3 contain 'o' in their filenames; README does not.
     assert_eq!(ids, vec![0, 3]);
 }
@@ -65,11 +80,11 @@ fn test_search_substring_multiple_matches() {
 fn test_search_prefix() {
     let idx = sample_index();
     let mut ids = idx.search_prefix("foo");
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![0]);
 
     let mut ids = idx.search_prefix("bar");
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![1]);
 }
 
@@ -77,7 +92,7 @@ fn test_search_prefix() {
 fn test_search_prefix_empty_matches_all_entries() {
     let idx = sample_index();
     let mut ids = idx.search_prefix("");
-    ids.sort();
+    ids.sort_unstable();
     assert_eq!(ids, vec![0, 1, 2, 3, 4]);
 }
 
@@ -144,8 +159,7 @@ fn test_remove_swapped_entry_can_be_removed_after_prior_delete() {
         .expect("cobra trigram bucket exists");
     assert!(
         list.windows(2).all(|w| w[0] < w[1]),
-        "trigram posting list must remain sorted after swap_remove, got {:?}",
-        list
+        "trigram posting list must remain sorted after swap_remove, got {list:?}"
     );
     assert!(
         idx.remove("/tmp/cobra-d.log"),
@@ -190,8 +204,12 @@ fn test_insert_directory_sets_is_dir() {
 fn test_duplicate_insert_updates_existing_entry_in_place() {
     let mut idx = Index::new();
 
-    let first = idx.insert_with_metadata("/tmp/video.mkv", false, 10, 100, 100, 100);
-    let second = idx.insert_with_metadata("/tmp/video.mkv", false, 20, 200, 300, 400);
+    let first = idx
+        .insert_with_metadata("/tmp/video.mkv", false, 10, 100, 100, 100)
+        .unwrap();
+    let second = idx
+        .insert_with_metadata("/tmp/video.mkv", false, 20, 200, 300, 400)
+        .unwrap();
 
     assert_eq!(first, second);
     assert_eq!(idx.count(), 1);
@@ -213,7 +231,7 @@ fn test_remove_after_duplicate_insert_clears_search_results() {
     assert!(idx.remove("/tmp/video.mkv"));
     assert_eq!(idx.count(), 0);
     assert!(idx.search_substring("video").is_empty());
-    assert!(idx.by_extension("mkv").is_none_or(|ids| ids.is_empty()));
+    assert!(idx.by_extension("mkv").is_none_or(<[u32]>::is_empty));
 }
 
 #[test]
@@ -237,7 +255,7 @@ fn compaction_releases_capacity_and_preserves_mutable_search_indexes() {
     assert_eq!(idx.search_prefix("document"), prefix);
     assert_eq!(idx.by_extension("txt").unwrap(), extensions);
     for (id, entry) in idx.entries.iter().enumerate() {
-        assert_eq!(idx.id_by_path(&entry.path), Some(id as u32));
+        assert_eq!(idx.id_by_path(&entry.path), Some(entry_id(id)));
     }
     let entry_capacity = idx.entries.capacity();
     let posting_capacity = idx.by_ext["txt"].capacity();
@@ -257,9 +275,24 @@ fn metadata_refresh_by_id_preserves_paths_and_handles_missing_ids() {
     let path = dir.path().join("file.txt");
     std::fs::write(&path, "updated content").unwrap();
     let mut idx = Index::new();
-    let id = idx.insert(path.to_str().unwrap(), false);
+    let id = idx.insert(path.to_str().unwrap(), false).unwrap();
     assert!(idx.update_metadata_by_id(id));
     assert_eq!(idx.entries[id as usize].size, 15);
     assert_eq!(idx.get_path(id), path.to_str());
     assert!(!idx.update_metadata_by_id(u32::MAX));
+}
+
+#[test]
+fn test_insert_rejects_names_starting_past_u16_offsets() {
+    let mut idx = Index::new();
+    let deep = format!("/{}/file.txt", "d".repeat(usize::from(u16::MAX)));
+    assert_eq!(idx.insert(&deep, false), None);
+    assert_eq!(idx.count(), 0);
+    assert_eq!(idx.id_by_path(&deep), None);
+
+    // Only the offsets need to fit, not the whole path.
+    let long_name = format!("/{}", "n".repeat(usize::from(u16::MAX) + 1));
+    let id = idx.insert(&long_name, false).unwrap();
+    assert_eq!(idx.entries[id as usize].name(), &long_name[1..]);
+    assert_eq!(idx.entries[id as usize].extension(), "");
 }

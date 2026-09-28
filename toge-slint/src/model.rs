@@ -354,7 +354,7 @@ mod tests {
         assert_eq!(text(&model, PAGE + 3, 0), format!("{}.txt", PAGE + 3));
         assert_eq!(text(&model, PAGE + 3, 1), "/tmp/dir");
         assert_eq!(
-            model.path((PAGE + 3) as i32).unwrap(),
+            model.path(i32::try_from(PAGE + 3).unwrap()).unwrap(),
             format!("/tmp/dir/{}.txt", PAGE + 3)
         );
         // Rendering the first half of a page prefetches the previous page.
@@ -391,7 +391,7 @@ mod tests {
         }
         assert_eq!(model.pages.borrow().loaded.len(), PAGE_LIMIT);
         assert!(model.path(0).is_none());
-        assert!(model.path((total - 1) as i32).is_some());
+        assert!(model.path(i32::try_from(total - 1).unwrap()).is_some());
         let _ = rx.try_iter().count();
         assert_eq!(text(&model, 0, 0), "");
         assert_eq!(rx.try_iter().collect::<Vec<_>>(), [Command::Fetch(0)]);

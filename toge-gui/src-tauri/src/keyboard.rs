@@ -154,14 +154,12 @@ pub fn normalize_and_validate(
         }
         if accelerator_has_modifier_key(accelerator) {
             return Err(format!(
-                "{} cannot use a modifier as its primary key: {} (global hotkeys require a non-modifier key)",
-                name, accelerator
+                "{name} cannot use a modifier as its primary key: {accelerator} (global hotkeys require a non-modifier key)"
             ));
         }
         if let Some(existing) = hotkeys.insert(accelerator.clone(), name) {
             return Err(format!(
-                "window hotkey conflict: {} is already used by {}",
-                accelerator, existing
+                "window hotkey conflict: {accelerator} is already used by {existing}"
             ));
         }
     }
@@ -200,7 +198,7 @@ pub fn normalize_accelerator(value: &str) -> Result<String, String> {
     for raw_part in trimmed.split('+') {
         let part = raw_part.trim();
         if part.is_empty() {
-            return Err(format!("invalid accelerator: {}", value));
+            return Err(format!("invalid accelerator: {value}"));
         }
 
         let lower = part.to_ascii_lowercase();
@@ -223,10 +221,7 @@ pub fn normalize_accelerator(value: &str) -> Result<String, String> {
             }
             _ => {
                 if key.is_some() {
-                    return Err(format!(
-                        "accelerator must contain exactly one key: {}",
-                        value
-                    ));
+                    return Err(format!("accelerator must contain exactly one key: {value}"));
                 }
                 key = Some(normalize_key(part)?);
             }
@@ -235,21 +230,20 @@ pub fn normalize_accelerator(value: &str) -> Result<String, String> {
 
     // A modifier may itself be the primary key for an in-window command. Treat
     // the last modifier as the key, matching the order produced by keydown.
-    let key = match key {
-        Some(key) => key,
-        None => {
-            let primary = modifiers
-                .pop()
-                .ok_or_else(|| format!("accelerator is missing a key: {}", value))?;
-            match primary {
-                "Ctrl" => ctrl = modifiers.contains(&"Ctrl"),
-                "Alt" => alt = modifiers.contains(&"Alt"),
-                "Shift" => shift = modifiers.contains(&"Shift"),
-                "Super" => meta = modifiers.contains(&"Super"),
-                _ => unreachable!(),
-            }
-            primary.to_string()
+    let key = if let Some(key) = key {
+        key
+    } else {
+        let primary = modifiers
+            .pop()
+            .ok_or_else(|| format!("accelerator is missing a key: {value}"))?;
+        match primary {
+            "Ctrl" => ctrl = modifiers.contains(&"Ctrl"),
+            "Alt" => alt = modifiers.contains(&"Alt"),
+            "Shift" => shift = modifiers.contains(&"Shift"),
+            "Super" => meta = modifiers.contains(&"Super"),
+            _ => unreachable!(),
         }
+        primary.to_string()
     };
     let mut parts = Vec::new();
     if ctrl {
@@ -301,7 +295,7 @@ fn normalize_key(value: &str) -> Result<String, String> {
         "audiovolumedown" => "AudioVolumeDown".to_string(),
         "audiovolumeup" => "AudioVolumeUp".to_string(),
         "audiovolumemute" => "AudioVolumeMute".to_string(),
-        _ => return Err(format!("unsupported key in accelerator: {}", value)),
+        _ => return Err(format!("unsupported key in accelerator: {value}")),
     };
 
     Ok(normalized)
@@ -345,7 +339,7 @@ fn parse_scope(scope: &str) -> Result<KeyboardScope, String> {
         "global" => Ok(KeyboardScope::Global),
         "search_edit" => Ok(KeyboardScope::SearchEdit),
         "result_list" => Ok(KeyboardScope::ResultList),
-        _ => Err(format!("unknown keyboard scope: {}", scope)),
+        _ => Err(format!("unknown keyboard scope: {scope}")),
     }
 }
 

@@ -50,7 +50,7 @@ pub fn initialize(app: &AppHandle) -> Result<(), String> {
             handle_menu_event(app, event.id().as_ref());
         })
         .on_tray_icon_event(move |_tray, event| {
-            handle_tray_event(&app_handle_events, event);
+            handle_tray_event(&app_handle_events, &event);
         });
 
     if let Some(icon) = app.default_window_icon() {
@@ -77,7 +77,7 @@ fn handle_menu_event(app: &AppHandle, menu_id: &str) {
     };
 }
 
-fn handle_tray_event(app: &AppHandle, event: TrayIconEvent) {
+fn handle_tray_event(app: &AppHandle, event: &TrayIconEvent) {
     match event {
         TrayIconEvent::Click {
             button: MouseButton::Left,

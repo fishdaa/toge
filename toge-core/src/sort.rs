@@ -1,8 +1,7 @@
 //! Sorting utilities and fast-sort indexes.
 
-use crate::index::Index;
+use crate::index::{Index, entry_id};
 use std::cmp::Ordering;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortKey {
@@ -127,7 +126,8 @@ impl Ranked {
     fn new(order: Vec<u32>) -> Self {
         let mut rank = vec![0u32; order.len()];
         for (position, &id) in order.iter().enumerate() {
-            rank[id as usize] = position as u32;
+            let position = entry_id(position);
+            rank[id as usize] = position;
         }
         Self { order, rank }
     }
@@ -157,8 +157,6 @@ type KeyFn = fn(&crate::index::Entry) -> &str;
 
 impl CachedOrder {
     fn build(index: &Index, key: KeyFn) -> Self {
-        // An 8-byte big-endian prefix orders like the string itself, so most
-        // comparisons avoid chasing the string pointer.
         let mut keyed: Vec<(u64, u32, &str)> = index
             .entries
             .iter()
@@ -168,7 +166,7 @@ impl CachedOrder {
                 let mut prefix = [0u8; 8];
                 let len = text.len().min(8);
                 prefix[..len].copy_from_slice(&text.as_bytes()[..len]);
-                (u64::from_be_bytes(prefix), id as u32, text)
+                (u64::from_be_bytes(prefix), entry_id(id), text)
             })
             .collect();
         keyed.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(b.2)).then(a.1.cmp(&b.1)));
@@ -182,18 +180,19 @@ impl CachedOrder {
 
     /// Merge entries appended since the cache was built.
     fn extend(&mut self, index: &Index, key: KeyFn) {
-        let added = (self.ascending.order.len() as u32..index.count() as u32).collect();
+        let mut added: Vec<u32> =
+            (entry_id(self.ascending.order.len())..entry_id(index.count())).collect();
         let old = std::mem::take(&mut self.ascending.order);
-        self.merge(index, key, old, added);
+        self.merge(index, key, &old, &mut added);
     }
 
     /// Merge `added` IDs into `old`, an order of every other current entry.
-    fn merge(&mut self, index: &Index, key: KeyFn, old: Vec<u32>, mut added: Vec<u32>) {
+    fn merge(&mut self, index: &Index, key: KeyFn, old: &[u32], added: &mut [u32]) {
         let key_of = |id: u32| key(&index.entries[id as usize]);
         added.sort_by(|&a, &b| key_of(a).cmp(key_of(b)).then(a.cmp(&b)));
         let mut order = Vec::with_capacity(index.count());
         let mut copied = 0;
-        for id in added {
+        for &id in added.iter() {
             let text = key_of(id);
             // Equal keys stay in ascending ID order.
             let at = copied
@@ -217,30 +216,8 @@ impl CachedOrder {
     /// ties involving a renumbered ID need reordering, instead of a full sort.
     fn renumber(&mut self, index: &Index, key: KeyFn, removals: &[(u32, u32)]) {
         let key_of = |id: u32| key(&index.entries[id as usize]);
-        let cached_len = self.ascending.order.len() as u32;
-        // Which cached ID currently occupies a slot, for slots touched so far.
-        let mut owner: HashMap<u32, Option<u32>> = HashMap::new();
         // Cached ID -> its current ID, or None once removed.
-        let mut remap: HashMap<u32, Option<u32>> = HashMap::new();
-        for &(removed, moved_from) in removals {
-            let owner_of = |owner: &HashMap<u32, Option<u32>>, slot: u32| {
-                owner
-                    .get(&slot)
-                    .copied()
-                    .unwrap_or((slot < cached_len).then_some(slot))
-            };
-            if let Some(cached) = owner_of(&owner, removed) {
-                remap.insert(cached, None);
-            }
-            if removed != moved_from {
-                let moved = owner_of(&owner, moved_from);
-                owner.insert(removed, moved);
-                if let Some(cached) = moved {
-                    remap.insert(cached, Some(removed));
-                }
-            }
-            owner.insert(moved_from, None);
-        }
+        let remap = Index::renumbering(removals, entry_id(self.ascending.order.len()));
         let mut order: Vec<u32> = self
             .ascending
             .order
@@ -278,10 +255,10 @@ impl CachedOrder {
         for &id in &order {
             present[id as usize] = true;
         }
-        let added = (0..count as u32)
+        let mut added: Vec<u32> = (0..entry_id(count))
             .filter(|&id| !present[id as usize])
             .collect();
-        self.merge(index, key, order, added);
+        self.merge(index, key, &order, &mut added);
     }
 
     fn descending(&mut self, index: &Index, key: KeyFn) -> &Ranked {

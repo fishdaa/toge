@@ -1,6 +1,6 @@
 //! Evaluate a parsed Query against Index entries.
 
-use crate::index::{Entry, Index, contains_ignore_case};
+use crate::index::{Entry, Index, contains_ignore_case, entry_id};
 use crate::query::{Query, RangeFilter, TextTerm};
 use regex::Regex;
 
@@ -79,7 +79,7 @@ pub fn iter_query<'a>(index: &'a Index, query: &Query) -> impl Iterator<Item = u
         .iter()
         .enumerate()
         .filter(move |(_, entry)| matcher.matches(entry))
-        .map(|(id, _)| id as u32)
+        .map(|(id, _)| entry_id(id))
 }
 
 /// Sorted (index-order) IDs that may match, taken from the extension and
@@ -118,11 +118,8 @@ pub fn candidate_ids(index: &Index, query: &Query) -> Option<Vec<u32>> {
 }
 
 pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
-    // Seed directly from the trigram index so a selective filename query does
-    // not first allocate an ID vector for every entry in the filesystem.
-    // The full matcher below still enforces every query option.
     let mut ids =
-        candidate_ids(index, query).unwrap_or_else(|| (0..index.count() as u32).collect());
+        candidate_ids(index, query).unwrap_or_else(|| (0..entry_id(index.count())).collect());
     let compiled = compile_terms(&query.terms, query.match_case);
 
     ids.retain(|&id| {

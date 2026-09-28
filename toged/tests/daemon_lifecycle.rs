@@ -70,7 +70,7 @@ fn send_request(stream: &mut UnixStream, req: &Request) {
 fn read_response(stream: &mut UnixStream) -> Response {
     let mut len_buf = [0u8; 8];
     stream.read_exact(&mut len_buf).unwrap();
-    let len = u64::from_le_bytes(len_buf) as usize;
+    let len = usize::try_from(u64::from_le_bytes(len_buf)).unwrap();
     let mut buf = vec![0u8; len];
     stream.read_exact(&mut buf).unwrap();
     Response::decode(&buf).unwrap()
@@ -91,7 +91,7 @@ fn query_count(sock: &Path, query: &str) -> usize {
     );
     match read_response(&mut stream) {
         Response::Results(results) => results.total_count,
-        other => panic!("expected results, got {:?}", other),
+        other => panic!("expected results, got {other:?}"),
     }
 }
 
@@ -137,7 +137,7 @@ fn cleanup(dir: &PathBuf, child: &mut Child) {
 }
 
 fn uds_available(name: &str) -> bool {
-    let dir = test_dir(&format!("probe-{}", name));
+    let dir = test_dir(&format!("probe-{name}"));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     let sock = dir.join("probe.sock");
@@ -209,7 +209,7 @@ fn daemon_status_returns_entry_count() {
                 );
             }
         }
-        other => panic!("expected status, got {:?}", other),
+        other => panic!("expected status, got {other:?}"),
     }
 
     cleanup(&dir, &mut child);
@@ -256,7 +256,7 @@ fn daemon_query_returns_real_file_size() {
             assert_eq!(results.rows[0].size, 5);
             assert_eq!(results.total_size, 5);
         }
-        other => panic!("expected results, got {:?}", other),
+        other => panic!("expected results, got {other:?}"),
     }
 
     cleanup(&dir, &mut child);

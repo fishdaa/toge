@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use toge_core::config::Config;
-use toge_core::index::Index;
+use toge_core::index::{Index, entry_id};
 use toge_core::ipc::DaemonStatus;
 use toge_core::ipc::session::SESSION_PREVIEW_ROWS;
 use toge_core::ipc::session::{
@@ -25,7 +25,7 @@ use toge_core::sort::{OrderCache, SortKey};
 use toge_core::walker::{Excludes, excluded_under_roots};
 
 /// Clients poll with `Sync`; a session left silent this long is abandoned.
-const IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const IDLE_TIMEOUT: Duration = Duration::from_mins(2);
 /// Live refreshes re-run the whole query, so pace them by its cost.
 const SYNC_MIN_INTERVAL: Duration = Duration::from_secs(1);
 
@@ -56,6 +56,7 @@ pub(crate) struct Session {
     total_size: u64,
     epoch: u64,
     revision: u64,
+    metadata_revision: u64,
     generation: u64,
     built_at: Instant,
     build_cost: Duration,
@@ -97,6 +98,7 @@ impl Session {
             total_size: 0,
             epoch: 0,
             revision: 0,
+            metadata_revision: 0,
             generation: 0,
             built_at: Instant::now(),
             build_cost: Duration::ZERO,
@@ -129,7 +131,7 @@ impl Session {
         for position in 0..count {
             let id = candidates
                 .as_ref()
-                .map_or(position as u32, |ids| ids[position]);
+                .map_or(entry_id(position), |ids| ids[position]);
             if dates && missing_query_dates(&st.index.entries[id as usize], &query) {
                 st.index.update_metadata_by_id(id);
             }
@@ -174,6 +176,7 @@ impl Session {
             total_size: 0,
             epoch: st.index.epoch(),
             revision: st.index.revision(),
+            metadata_revision: st.index.metadata_revision(),
             generation: 1,
             built_at: Instant::now(),
             build_cost: started.elapsed(),
@@ -203,9 +206,25 @@ impl Session {
         self.recount(index);
         self.epoch = index.epoch();
         self.revision = index.revision();
+        self.metadata_revision = index.metadata_revision();
         self.generation += 1;
         self.built_at = Instant::now();
         self.build_cost = started.elapsed();
+    }
+
+    /// Whether a size or timestamp change can alter which rows match or
+    /// their order.
+    fn depends_on_metadata(&self) -> bool {
+        let query = &self.query;
+        let (key, _) = self.sort.unwrap_or_else(|| sort_params(query.sort));
+        query.size.is_some()
+            || query.date_modified.is_some()
+            || query.date_created.is_some()
+            || query.date_accessed.is_some()
+            || matches!(
+                key,
+                SortKey::Size | SortKey::Modified | SortKey::Created | SortKey::Accessed
+            )
     }
 
     fn recount(&mut self, index: &Index) {
@@ -310,8 +329,15 @@ impl Session {
             }
             SessionRequest::Sync => {
                 let due = self.built_at.elapsed() >= SYNC_MIN_INTERVAL.max(self.build_cost * 4);
-                if self.epoch != st.index.epoch() || (self.revision != st.index.revision() && due) {
+                let metadata_changed = self.metadata_revision != st.index.metadata_revision();
+                let stale = self.revision != st.index.revision()
+                    || (metadata_changed && self.depends_on_metadata());
+                if self.epoch != st.index.epoch() || (stale && due) {
                     self.build(&mut st.index, &mut st.orders, index_size);
+                } else if metadata_changed && !self.depends_on_metadata() {
+                    // Rows and order are unchanged; only the size total moves.
+                    self.recount(&st.index);
+                    self.metadata_revision = st.index.metadata_revision();
                 }
                 SessionResponse::State(self.state())
             }
@@ -333,7 +359,7 @@ fn reconcile_path(st: &mut DaemonState, path: &str, env: &SessionEnv) {
         return;
     }
     let metadata = std::fs::symlink_metadata(path).ok();
-    let is_dir = metadata.as_ref().is_some_and(|metadata| metadata.is_dir());
+    let is_dir = metadata.as_ref().is_some_and(std::fs::Metadata::is_dir);
     if is_ignored_path(path, env.state_dir, env.config_dir, is_dir) {
         return;
     }
@@ -353,7 +379,7 @@ fn client_gone(stream: &UnixStream) -> bool {
     let received = unsafe {
         libc::recv(
             stream.as_raw_fd(),
-            (&mut byte as *mut u8).cast(),
+            (&raw mut byte).cast(),
             1,
             libc::MSG_PEEK | libc::MSG_DONTWAIT,
         )

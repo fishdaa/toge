@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::{fs, io, thread};
 
 use toge_core::config::Config;
@@ -202,7 +202,7 @@ fn modified_sort_refreshes_timestamps_when_metadata_indexing_is_disabled() {
 
     let response = handle_query(
         &mut index,
-        &mut Default::default(),
+        &mut toge_core::sort::OrderCache::default(),
         &QueryRequest {
             id: 1,
             raw: "sort:modified-desc".into(),
@@ -471,7 +471,7 @@ fn unlimited_query_returns_every_match_and_handles_nonzero_offsets() {
     for offset in [0, 3, usize::MAX] {
         let Response::Results(results) = handle_query(
             &mut index,
-            &mut Default::default(),
+            &mut toge_core::sort::OrderCache::default(),
             &QueryRequest {
                 id: 7,
                 raw: String::new(),
@@ -526,11 +526,12 @@ fn stream_sends_bounded_batches_and_final_totals_in_both_orders() {
                 read_request(&mut server).unwrap(),
                 Some(Request::StreamQuery(producer_request.clone()))
             );
+            let state = Mutex::new((index, toge_core::sort::OrderCache::default()));
             stream_results(
                 &mut server,
                 &producer_request,
-                &mut index,
-                &mut Default::default(),
+                &state,
+                |(index, orders)| (index, orders),
                 false,
             )
         });
@@ -561,7 +562,7 @@ fn disconnected_stream_and_expired_write_stop_promptly() {
     let request = toge_core::ipc::StreamQueryRequest {
         query: QueryRequest {
             id: 1,
-            raw: "".into(),
+            raw: String::new(),
             max_results: usize::MAX,
             offset: 0,
             format: OutputFormat::Default,
@@ -575,8 +576,8 @@ fn disconnected_stream_and_expired_write_stop_promptly() {
         stream_results(
             &mut server,
             &request,
-            &mut index,
-            &mut Default::default(),
+            &Mutex::new((index, toge_core::sort::OrderCache::default())),
+            |(index, orders)| (index, orders),
             false
         )
         .is_err()
@@ -589,11 +590,151 @@ fn disconnected_stream_and_expired_write_stop_promptly() {
         returned_count: 0,
     });
     assert_eq!(
-        write_stream_event(&mut server, &event, Instant::now())
+        write_stream_event(&mut server, &event, Some(Instant::now()))
             .unwrap_err()
             .kind(),
         io::ErrorKind::TimedOut
     );
+}
+
+/// Make writes to `socket` block after a few KiB, so a producer outpaces its
+/// reader within the first batches.
+fn shrink_send_buffer(socket: &UnixStream) {
+    use std::os::fd::AsRawFd;
+    let buffer: libc::c_int = 4096;
+    // SAFETY: the socket is live and the option points to a valid integer.
+    assert_eq!(
+        unsafe {
+            libc::setsockopt(
+                socket.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_SNDBUF,
+                (&raw const buffer).cast(),
+                libc::socklen_t::try_from(std::mem::size_of_val(&buffer)).unwrap(),
+            )
+        },
+        0
+    );
+}
+
+#[test]
+fn stalled_stream_reader_does_not_hold_the_index_lock() {
+    let mut index = Index::new();
+    for i in 0..2_000 {
+        index.insert(&format!("/r/{}-{i}.txt", "a".repeat(200)), false);
+    }
+    let request = toge_core::ipc::StreamQueryRequest {
+        query: QueryRequest {
+            id: 1,
+            raw: "txt".into(),
+            max_results: usize::MAX,
+            offset: 0,
+            format: OutputFormat::Default,
+            highlight: false,
+        },
+        order: toge_core::ipc::StreamOrder::Index,
+    };
+    let state = Mutex::new((index, toge_core::sort::OrderCache::default()));
+    let (mut server, client) = UnixStream::pair().unwrap();
+    shrink_send_buffer(&server);
+    thread::scope(|scope| {
+        let producer = scope.spawn(|| {
+            stream_results(
+                &mut server,
+                &request,
+                &state,
+                |(index, orders)| (index, orders),
+                false,
+            )
+        });
+        // Nothing is read, so the producer soon blocks writing a batch that
+        // does not fit the tiny send buffer.
+        thread::sleep(Duration::from_millis(100));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut unlocked = false;
+        while Instant::now() < deadline {
+            if state.try_lock().is_ok() {
+                unlocked = true;
+                break;
+            }
+            thread::yield_now();
+        }
+        client.shutdown(std::net::Shutdown::Both).unwrap();
+        assert!(producer.join().unwrap().is_err());
+        assert!(unlocked, "a stalled stream reader kept the index locked");
+    });
+}
+
+#[test]
+fn stream_follows_entries_renumbered_between_batches() {
+    use std::collections::HashSet;
+    use toge_core::ipc::{StreamOrder, StreamQueryRequest};
+    for (order, raw) in [
+        (StreamOrder::Index, ""),
+        (StreamOrder::Index, "file"),
+        (StreamOrder::Sorted, ""),
+    ] {
+        let mut index = Index::new();
+        let paths: Vec<String> = (0..1_000).map(|i| format!("/r/file-{i:04}")).collect();
+        for path in &paths {
+            index.insert(path, false);
+        }
+        let request = StreamQueryRequest {
+            query: QueryRequest {
+                id: 3,
+                raw: raw.into(),
+                max_results: usize::MAX,
+                offset: 0,
+                format: OutputFormat::Default,
+                highlight: false,
+            },
+            order,
+        };
+        let state = Mutex::new((index, toge_core::sort::OrderCache::default()));
+        let (mut server, mut client) = UnixStream::pair().unwrap();
+        shrink_send_buffer(&server);
+        // A producer that fails before Done must fail the test, not hang it.
+        client
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        // Removing low IDs moves the highest, still unstreamed, entries into
+        // slots the stream has already passed.
+        let removed: HashSet<String> = paths.iter().step_by(7).take(40).cloned().collect();
+        let mut streamed = Vec::new();
+        thread::scope(|scope| {
+            let producer = scope.spawn(|| {
+                stream_results(
+                    &mut server,
+                    &request,
+                    &state,
+                    |(index, orders)| (index, orders),
+                    false,
+                )
+            });
+            let mut first = true;
+            toge_core::ipc::stream_query(&mut client, &request, |rows| {
+                streamed.extend(rows.iter().map(|row| row.path.clone()));
+                if std::mem::take(&mut first) {
+                    let mut guard = state.lock().unwrap();
+                    for path in &removed {
+                        assert!(guard.0.remove(path));
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+            producer.join().unwrap().unwrap();
+        });
+        let unique: HashSet<&String> = streamed.iter().collect();
+        assert_eq!(
+            unique.len(),
+            streamed.len(),
+            "{order:?} {raw:?} repeated a row"
+        );
+        for path in paths.iter().filter(|path| !removed.contains(*path)) {
+            assert!(unique.contains(path), "{order:?} {raw:?} skipped {path}");
+        }
+    }
 }
 
 struct NullWatcher;

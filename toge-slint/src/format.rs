@@ -1,6 +1,10 @@
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "approximate human-readable size formatting; precision loss only matters above 2^52 bytes"
+)]
 pub fn format_size(size: u64) -> String {
     if size < 1024 {
-        return format!("{} B", size);
+        return format!("{size} B");
     }
     let units = ["B", "KB", "MB", "GB", "TB", "PB"];
     let mut value = size as f64;
@@ -99,7 +103,7 @@ fn format_time_local(unix: i64) -> Option<String> {
     }
 
     let mut tm = MaybeUninit::<Tm>::uninit();
-    let ptr = unsafe { localtime_r(&unix, tm.as_mut_ptr()) };
+    let ptr = unsafe { localtime_r(&raw const unix, tm.as_mut_ptr()) };
     if ptr.is_null() {
         return None;
     }

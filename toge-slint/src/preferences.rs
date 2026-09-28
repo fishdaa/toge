@@ -16,6 +16,9 @@ pub type ColumnWidths = [f32; 3];
 const MIN_COLUMN_WIDTHS: ColumnWidths = [140.0, 160.0, 70.0];
 const MAX_COLUMN_WIDTH: f32 = 4000.0;
 
+/// Counter used to make settings-save temp-file names unique per process.
+static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
+
 /// Clamp resized widths to the table's minimums, rejecting non-finite values.
 pub fn valid_widths(widths: ColumnWidths) -> Option<ColumnWidths> {
     if !widths.iter().all(|width| width.is_finite()) {
@@ -35,11 +38,10 @@ pub struct UiState {
 }
 
 pub fn path() -> PathBuf {
-    let root = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config")
-        });
+    let root = std::env::var_os("XDG_CONFIG_HOME").map_or_else(
+        || PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"),
+        PathBuf::from,
+    );
     root.join("toge/slint-ui.toml")
 }
 
@@ -85,6 +87,7 @@ impl UiState {
     }
 
     pub fn save(&self, path: &Path) -> io::Result<()> {
+        use std::fmt::Write as _;
         if self
             .sort
             .is_some_and(|sort| !(0..=3).contains(&sort.column))
@@ -96,19 +99,19 @@ impl UiState {
         }
         let mut text = String::new();
         if let Some(sort) = self.sort {
-            text += &format!(
-                "sort_column = {}\nsort_ascending = {}\n",
+            let _ = writeln!(
+                text,
+                "sort_column = {}\nsort_ascending = {}",
                 sort.column, sort.ascending
             );
         }
         if let Some([name, path, size]) = self.column_widths.and_then(valid_widths) {
-            text += &format!("column_widths = [{name}, {path}, {size}]\n");
+            let _ = writeln!(text, "column_widths = [{name}, {path}, {size}]");
         }
         let parent = path
             .parent()
             .ok_or_else(|| io::Error::other("Missing settings directory"))?;
         std::fs::create_dir_all(parent)?;
-        static NEXT_FILE: AtomicU64 = AtomicU64::new(0);
         let temp = parent.join(format!(
             ".slint-ui-{}-{}.tmp",
             std::process::id(),

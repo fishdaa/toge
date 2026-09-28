@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 use toge_core::config::Config;
-use toge_core::index::Index;
+use toge_core::index::{Index, entry_id};
 use toge_core::ipc::{
     DaemonStatus, MAX_IPC_MESSAGE_SIZE, MAX_STREAM_FRAME_SIZE, QueryRequest, Request, Response,
     ResultRow, ResultsResponse, STREAM_BATCH_SIZE, StatusResponse, StreamEvent, StreamOrder,
@@ -83,14 +83,20 @@ fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
         uid: 0,
         gid: 0,
     };
+    // `size_of::<ucred>()` is a small compile-time constant that always fits in
+    // `socklen_t` (a `u32` on Linux); the FFI signature requires this type.
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "size_of::<ucred>() is a small constant that always fits in socklen_t"
+    )]
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
     let rc = unsafe {
         libc::getsockopt(
             fd,
             libc::SOL_SOCKET,
             libc::SO_PEERCRED,
-            &mut cred as *mut _ as *mut libc::c_void,
-            &mut len,
+            (&raw mut cred).cast::<libc::c_void>(),
+            &raw mut len,
         )
     };
     if rc != 0 {
@@ -134,21 +140,25 @@ fn version() {
 
 fn default_state_dir() -> PathBuf {
     env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = env::var_os("HOME").expect("HOME not set");
-            PathBuf::from(home).join(".local/state")
-        })
+        .map_or_else(
+            || {
+                let home = env::var_os("HOME").expect("HOME not set");
+                PathBuf::from(home).join(".local/state")
+            },
+            PathBuf::from,
+        )
         .join("toge")
 }
 
 fn default_config_dir() -> PathBuf {
     env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            let home = env::var_os("HOME").expect("HOME not set");
-            PathBuf::from(home).join(".config")
-        })
+        .map_or_else(
+            || {
+                let home = env::var_os("HOME").expect("HOME not set");
+                PathBuf::from(home).join(".config")
+            },
+            PathBuf::from,
+        )
         .join("toge")
 }
 
@@ -200,7 +210,7 @@ fn build_index(config: &Config, state: &Arc<Mutex<DaemonState>>) -> (Index, u64)
     }
 
     index.compact();
-    let duration_ms = start.elapsed().as_millis() as u64;
+    let duration_ms = elapsed_ms(start);
     (index, duration_ms)
 }
 
@@ -237,7 +247,7 @@ fn start_index(
     let generation = {
         let mut st = state.lock().unwrap();
         replace_index(&mut st, cached);
-        st.build_duration_ms = start.elapsed().as_millis() as u64;
+        st.build_duration_ms = elapsed_ms(start);
         st.last_updated_unix = current_unix_time();
         hand_off_to_watcher(&mut st, watcher_failure);
         st.index_generation
@@ -263,7 +273,7 @@ fn start_index(
     }
     let mut st = state.lock().unwrap();
     let _ = save_index(&st.index, state_dir);
-    st.build_duration_ms = start.elapsed().as_millis() as u64;
+    st.build_duration_ms = elapsed_ms(start);
     st.last_updated_unix = current_unix_time();
     if st.status == DaemonStatus::Ready && st.watcher.is_healthy {
         st.status_message = format!(
@@ -325,7 +335,14 @@ fn current_unix_time() -> i64 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64
+        .as_secs()
+        .cast_signed()
+}
+
+/// Milliseconds elapsed since `start`, saturating instead of wrapping in the
+/// astronomically unlikely case a duration exceeds `u64::MAX` milliseconds.
+fn elapsed_ms(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn is_ignored_path(path: &str, state_dir: &Path, config_dir: &Path, is_dir: bool) -> bool {
@@ -334,13 +351,10 @@ fn is_ignored_path(path: &str, state_dir: &Path, config_dir: &Path, is_dir: bool
         || canonical_starts_with(path, config_dir)
         || has_hidden_ancestor_dir(path)
         || (is_dir
-            && path
-                .file_name()
-                .map(|name| {
-                    let bytes = name.as_encoded_bytes();
-                    bytes.len() > 1 && bytes.starts_with(b".")
-                })
-                .unwrap_or(false))
+            && path.file_name().is_some_and(|name| {
+                let bytes = name.as_encoded_bytes();
+                bytes.len() > 1 && bytes.starts_with(b".")
+            }))
 }
 
 fn is_within_roots(path: &str, roots: &[PathBuf]) -> bool {
@@ -366,8 +380,7 @@ fn metadata_snapshot(path: &str) -> (u64, i64, i64, i64) {
         value
             .ok()
             .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(now)
+            .map_or(now, |d| d.as_secs().cast_signed())
     };
 
     (
@@ -603,7 +616,7 @@ fn prepare_query_ids(
         || query.date_created.is_some()
         || query.date_accessed.is_some();
     if needs_all_metadata {
-        for id in 0..index.count() as u32 {
+        for id in 0..entry_id(index.count()) {
             if missing_query_dates(&index.entries[id as usize], query) {
                 index.update_metadata_by_id(id);
             }
@@ -678,12 +691,13 @@ fn result_row(entry: &toge_core::index::Entry, query: &Query, highlight: bool) -
     }
 }
 
-// A consistent stream holds the index lock, avoiding an O(N) snapshot copy.
-// Bound the duration so disconnected or stalled consumers cannot pin it indefinitely.
+/// Write one length-prefixed stream frame. `deadline` bounds the whole write;
+/// `None` waits as long as the client takes to read, which is only safe
+/// while no lock is held.
 fn write_stream_event(
     stream: &mut UnixStream,
     event: &StreamEvent,
-    deadline: Instant,
+    deadline: Option<Instant>,
 ) -> io::Result<()> {
     let bytes = event.encode();
     if bytes.len() > MAX_STREAM_FRAME_SIZE {
@@ -695,17 +709,21 @@ fn write_stream_event(
     let length = (bytes.len() as u64).to_le_bytes();
     for mut pending in [length.as_slice(), bytes.as_slice()] {
         while !pending.is_empty() {
-            let remaining = deadline
-                .checked_duration_since(Instant::now())
-                .filter(|duration| !duration.is_zero())
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::TimedOut, "stream deadline exceeded")
-                })?;
-            stream.set_write_timeout(Some(remaining.min(Duration::from_secs(5))))?;
+            let timeout = deadline
+                .map(|deadline| {
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .filter(|duration| !duration.is_zero())
+                        .ok_or_else(|| {
+                            io::Error::new(io::ErrorKind::TimedOut, "stream deadline exceeded")
+                        })
+                })
+                .transpose()?;
+            stream.set_write_timeout(timeout)?;
             match stream.write(pending) {
                 Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "stream closed")),
                 Ok(written) => pending = &pending[written..],
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) => return Err(error),
             }
         }
@@ -713,11 +731,81 @@ fn write_stream_event(
     Ok(())
 }
 
-fn stream_results(
+/// Total time a stream may spend holding the index lock.
+const STREAM_LOCK_BUDGET: Duration = Duration::from_mins(1);
+/// Entries visited per lock hold, so a stream that has stopped returning rows
+/// (past `max_results`, or few matches) still lets other requests in.
+const STREAM_SLICE_ENTRIES: usize = 1 << 16;
+
+/// The entries a stream has yet to visit, as IDs of the index epoch it last
+/// saw.
+enum StreamCursor {
+    /// Matches or trigram candidates, in the order they are streamed.
+    Ids { ids: Vec<u32>, next: usize },
+    /// Every slot in `next..end`, then `moved`: unvisited entries that a
+    /// removal moved into an already visited slot.
+    Scan {
+        next: u32,
+        end: u32,
+        moved: Vec<u32>,
+    },
+}
+
+impl StreamCursor {
+    fn pop(&mut self) -> Option<u32> {
+        match self {
+            Self::Ids { ids, next } => {
+                let id = ids.get(*next).copied()?;
+                *next += 1;
+                Some(id)
+            }
+            Self::Scan { next, end, moved } => {
+                if next < end {
+                    *next += 1;
+                    Some(*next - 1)
+                } else {
+                    moved.pop()
+                }
+            }
+        }
+    }
+
+    /// Follow removals that renumbered entries while the lock was released.
+    fn renumber(&mut self, remap: &std::collections::HashMap<u32, Option<u32>>, count: usize) {
+        let current = |id: u32| remap.get(&id).copied().unwrap_or(Some(id));
+        match self {
+            Self::Ids { ids, next } => {
+                *ids = ids[*next..].iter().filter_map(|&id| current(id)).collect();
+                *next = 0;
+            }
+            Self::Scan { next, end, moved } => {
+                *moved = moved.iter().filter_map(|&id| current(id)).collect();
+                // Removal moves the last entry down into the freed slot. An
+                // unvisited entry that lands behind the scan is visited later;
+                // one that lands ahead of it is reached by the scan itself.
+                for (&original, &now) in remap {
+                    if let Some(now) = now
+                        && (*next..*end).contains(&original)
+                        && now < *next
+                    {
+                        moved.push(now);
+                    }
+                }
+                *end = (*end).min(entry_id(count));
+            }
+        }
+    }
+}
+
+/// Stream the results of `request`, locking `state` only while filling each
+/// batch. The lock is released while the client reads, so a slow reader such
+/// as a pager holds up nothing but its own stream. `project` picks the index
+/// and order cache out of the locked state.
+fn stream_results<S>(
     stream: &mut UnixStream,
     request: &StreamQueryRequest,
-    index: &mut Index,
-    orders: &mut OrderCache,
+    state: &Mutex<S>,
+    project: impl Fn(&mut S) -> (&mut Index, &mut OrderCache),
     index_size: bool,
 ) -> io::Result<()> {
     let query = match Query::parse(&request.query.raw) {
@@ -726,86 +814,127 @@ fn stream_results(
             return write_stream_event(
                 stream,
                 &StreamEvent::Error(error.to_string()),
-                Instant::now() + Duration::from_secs(5),
+                Some(Instant::now() + Duration::from_secs(5)),
             );
         }
     };
-    let deadline = Instant::now() + Duration::from_secs(60);
     let matcher = QueryMatcher::new(query.clone());
     let needs_dates = query.date_modified.is_some()
         || query.date_created.is_some()
         || query.date_accessed.is_some();
-    // Sorted streams retain IDs, but still serialize only one batch at a time.
-    let sorted = if request.order == StreamOrder::Sorted {
-        Some(prepare_query_ids(index, orders, &query, index_size))
-    } else {
-        None
-    };
-    // Index-order streams visit only trigram/extension candidates when the
-    // query has a selective seed; posting lists are sorted, so order holds.
-    // Otherwise every entry is scanned without an ID buffer.
-    let ids = sorted.or_else(|| candidate_ids(index, &query));
+    // Sorted streams already hold only matches.
     let matched = request.order == StreamOrder::Sorted;
-    let count = ids.as_ref().map_or(index.count(), Vec::len);
     let mut summary = StreamSummary {
         id: request.query.id,
         total_count: 0,
         total_size: 0,
         returned_count: 0,
     };
-    let mut rows = Vec::with_capacity(STREAM_BATCH_SIZE);
-    for position in 0..count {
-        if position % 4096 == 0 && Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "stream deadline exceeded",
-            ));
-        }
-        let id = ids.as_ref().map_or(position as u32, |ids| ids[position]);
-        if !matched && needs_dates && missing_query_dates(&index.entries[id as usize], &query) {
-            index.update_metadata_by_id(id);
-        }
-        if !matched && !matcher.matches(&index.entries[id as usize]) {
-            continue;
-        }
-        if !matched && index_size {
-            let entry = &index.entries[id as usize];
-            if !entry.is_dir && entry.size == 0 {
-                index.update_metadata_by_id(id);
+    let mut budget = STREAM_LOCK_BUDGET;
+    let (mut cursor, mut epoch, mut count) = {
+        let mut guard = state.lock().unwrap();
+        let (index, orders) = project(&mut guard);
+        let started = Instant::now();
+        // Index-order streams visit only trigram/extension candidates when
+        // the query has a selective seed; posting lists are sorted, so order
+        // holds. Otherwise every slot is scanned without an ID buffer.
+        let ids = if matched {
+            Some(prepare_query_ids(index, orders, &query, index_size))
+        } else {
+            candidate_ids(index, &query)
+        };
+        let cursor = match ids {
+            Some(ids) => StreamCursor::Ids { ids, next: 0 },
+            None => StreamCursor::Scan {
+                next: 0,
+                end: entry_id(index.count()),
+                moved: Vec::new(),
+            },
+        };
+        budget = budget.saturating_sub(started.elapsed());
+        (cursor, index.epoch(), index.count())
+    };
+    loop {
+        let mut rows = Vec::with_capacity(STREAM_BATCH_SIZE);
+        let finished = {
+            let mut guard = state.lock().unwrap();
+            let (index, _) = project(&mut guard);
+            let started = Instant::now();
+            if index.epoch() != epoch {
+                let Some(removals) = index.removals_since(epoch) else {
+                    drop(guard);
+                    return write_stream_event(
+                        stream,
+                        &StreamEvent::Error("the index was rebuilt during the stream".into()),
+                        Some(Instant::now() + Duration::from_secs(5)),
+                    );
+                };
+                let remap = Index::renumbering(removals, entry_id(count));
+                cursor.renumber(&remap, index.count());
+                epoch = index.epoch();
             }
-        }
-        let entry = &index.entries[id as usize];
-        let ordinal = summary.total_count;
-        summary.total_count += 1;
-        summary.total_size = summary.total_size.saturating_add(entry.size);
-        if ordinal < request.query.offset || summary.returned_count >= request.query.max_results {
-            continue;
-        }
-        rows.push(result_row(entry, &query, request.query.highlight));
-        summary.returned_count += 1;
-        if rows.len() == STREAM_BATCH_SIZE {
+            // Stays false when the batch fills or the slice runs out first.
+            let mut finished = false;
+            for visited in 0..STREAM_SLICE_ENTRIES {
+                if visited % 4096 == 0 && started.elapsed() >= budget {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "stream deadline exceeded",
+                    ));
+                }
+                let Some(id) = cursor.pop() else {
+                    finished = true;
+                    break;
+                };
+                if !matched
+                    && needs_dates
+                    && missing_query_dates(&index.entries[id as usize], &query)
+                {
+                    index.update_metadata_by_id(id);
+                }
+                if !matched && !matcher.matches(&index.entries[id as usize]) {
+                    continue;
+                }
+                if !matched && index_size {
+                    let entry = &index.entries[id as usize];
+                    if !entry.is_dir && entry.size == 0 {
+                        index.update_metadata_by_id(id);
+                    }
+                }
+                let entry = &index.entries[id as usize];
+                let ordinal = summary.total_count;
+                summary.total_count += 1;
+                summary.total_size = summary.total_size.saturating_add(entry.size);
+                if ordinal < request.query.offset
+                    || summary.returned_count >= request.query.max_results
+                {
+                    continue;
+                }
+                rows.push(result_row(entry, &query, request.query.highlight));
+                summary.returned_count += 1;
+                if rows.len() == STREAM_BATCH_SIZE {
+                    break;
+                }
+            }
+            budget = budget.saturating_sub(started.elapsed());
+            count = index.count();
+            finished
+        };
+        if !rows.is_empty() {
             write_stream_event(
                 stream,
                 &StreamEvent::Rows {
                     id: summary.id,
-                    rows: std::mem::take(&mut rows),
+                    rows,
                 },
-                deadline,
+                None,
             )?;
-            rows = Vec::with_capacity(STREAM_BATCH_SIZE);
+        }
+        if finished {
+            break;
         }
     }
-    if !rows.is_empty() {
-        write_stream_event(
-            stream,
-            &StreamEvent::Rows {
-                id: summary.id,
-                rows,
-            },
-            deadline,
-        )?;
-    }
-    write_stream_event(stream, &StreamEvent::Done(summary), deadline)
+    write_stream_event(stream, &StreamEvent::Done(summary), None)
 }
 
 fn handle_stream_request(
@@ -814,20 +943,18 @@ fn handle_stream_request(
     config: &Config,
     state: &Arc<Mutex<DaemonState>>,
 ) -> io::Result<()> {
-    let mut st = state.lock().unwrap();
-    if st.status != DaemonStatus::Ready {
+    if state.lock().unwrap().status != DaemonStatus::Ready {
         return write_stream_event(
             stream,
             &StreamEvent::Error("daemon not ready".into()),
-            Instant::now() + Duration::from_secs(5),
+            Some(Instant::now() + Duration::from_secs(5)),
         );
     }
-    let st = &mut *st;
     stream_results(
         stream,
         request,
-        &mut st.index,
-        &mut st.orders,
+        state,
+        |st| (&mut st.index, &mut st.orders),
         config.index_size,
     )
 }
@@ -850,10 +977,10 @@ fn highlight_path(path: &str, query: &Query) -> String {
     }
 
     let highlighted = apply_highlight_ranges(name, &mut ranges);
-    if highlighted != name {
-        format!("{}{}", parent, highlighted)
-    } else {
+    if highlighted == name {
         path.to_string()
+    } else {
+        format!("{parent}{highlighted}")
     }
 }
 
@@ -940,7 +1067,7 @@ fn read_request(stream: &mut UnixStream) -> io::Result<Option<Request>> {
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(e) => return Err(e),
     }
-    let len = u64::from_le_bytes(len_buf) as usize;
+    let len = usize::try_from(u64::from_le_bytes(len_buf)).unwrap_or(usize::MAX);
     if len > MAX_IPC_MESSAGE_SIZE {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -963,19 +1090,19 @@ fn write_response(stream: &mut UnixStream, resp: &Response) -> io::Result<()> {
 }
 
 fn serve(
-    state_dir: PathBuf,
-    config_dir: PathBuf,
-    config: Config,
-    state: Arc<Mutex<DaemonState>>,
-    socket_path: PathBuf,
+    state_dir: &Path,
+    config_dir: &Path,
+    config: &Config,
+    state: &Arc<Mutex<DaemonState>>,
+    socket_path: &Path,
 ) -> io::Result<()> {
-    ensure_private_dir(state_dir.parent().unwrap_or(&state_dir))?;
+    ensure_private_dir(state_dir.parent().unwrap_or(state_dir))?;
     if let Some(parent) = socket_path.parent() {
         ensure_private_dir(parent)?;
     }
-    let _ = fs::remove_file(&socket_path);
-    let listener = UnixListener::bind(&socket_path)?;
-    set_owner_only(&socket_path)?;
+    let _ = fs::remove_file(socket_path);
+    let listener = UnixListener::bind(socket_path)?;
+    set_owner_only(socket_path)?;
 
     let mut workers = Vec::new();
     for mut s in listener.incoming().flatten() {
@@ -1002,15 +1129,16 @@ fn serve(
         // the query against the index — runs on its own thread so one slow
         // request (e.g. a broad substring scan) can't stall every other
         // connection behind it, as a single-threaded accept loop would.
-        let state_dir = state_dir.clone();
-        let config_dir = config_dir.clone();
+        let state_dir = state_dir.to_path_buf();
+        let config_dir = config_dir.to_path_buf();
         let config = config.clone();
         let state = state.clone();
-        // Sessions stay open until the client leaves, so Quit shuts their
-        // sockets down to unblock them; other requests finish on their own.
+        // Sessions stay open until the client leaves, and streams wait on
+        // their reader, so Quit shuts their sockets down to unblock them;
+        // other requests finish on their own.
         let session_socket = matches!(
             req,
-            Request::OpenSession(_) | Request::OpenSessionPreview(_)
+            Request::OpenSession(_) | Request::OpenSessionPreview(_) | Request::StreamQuery(_)
         )
         .then(|| s.try_clone().ok())
         .flatten();
@@ -1036,7 +1164,7 @@ fn serve(
     }
     // Refuse new clients before waiting on the in-flight ones.
     drop(listener);
-    let _ = fs::remove_file(&socket_path);
+    let _ = fs::remove_file(socket_path);
     for (_, socket) in &workers {
         if let Some(socket) = socket {
             let _ = socket.shutdown(std::net::Shutdown::Both);
@@ -1109,8 +1237,10 @@ fn main() {
 
     let config = config_path
         .as_deref()
-        .map(Config::load)
-        .unwrap_or_else(|| Config::load(&config_dir.join("config.toml")))
+        .map_or_else(
+            || Config::load(&config_dir.join("config.toml")),
+            Config::load,
+        )
         .unwrap_or_else(|_| Config::default_config());
 
     {
@@ -1143,16 +1273,16 @@ fn main() {
                 &index_config,
                 &index_state,
                 watcher_failure.as_deref(),
-            )
+            );
         }
     });
 
     if let Err(err) = spawn_result {
-        eprintln!("background indexing unavailable: {}", err);
+        eprintln!("background indexing unavailable: {err}");
         start_index(&state_dir, &config, &state, watcher_failure.as_deref());
     }
 
-    serve(state_dir, config_dir, config, state, socket).unwrap();
+    serve(&state_dir, &config_dir, &config, &state, &socket).unwrap();
 }
 
 /// Watcher events applied per index-lock acquisition.
@@ -1256,7 +1386,7 @@ fn resync_after_overflow(state: &Arc<Mutex<DaemonState>>, config: &Config, state
     if reconcile_served_index(config, state, generation) {
         let mut st = state.lock().unwrap();
         let _ = save_index(&st.index, state_dir);
-        st.build_duration_ms = start.elapsed().as_millis() as u64;
+        st.build_duration_ms = elapsed_ms(start);
         st.last_updated_unix = current_unix_time();
         st.status_message = format!("Reindexed {} entries", st.index.count());
         append_watcher_log(&mut st, "reindex completed after watcher overflow");
@@ -1366,11 +1496,11 @@ fn apply_change(
             index_created_path_with(st, path, *is_dir, *metadata, config);
         }
         IndexChange::Delete { path } => {
-            append_watcher_log(st, format!("delete {}", path));
+            append_watcher_log(st, format!("delete {path}"));
             remove_deleted_path(&mut st.index, path, roots);
         }
         IndexChange::Modify { path, metadata } => {
-            append_watcher_log(st, format!("modify {}", path));
+            append_watcher_log(st, format!("modify {path}"));
             // Refresh only entries already indexed, with the same type.
             if let Some(id) = st.index.id_by_path(path) {
                 let entry = &st.index.entries[id as usize];
@@ -1383,7 +1513,7 @@ fn apply_change(
             }
         }
         IndexChange::Move { from, to } => {
-            append_watcher_log(st, format!("move {} -> {}", from, to));
+            append_watcher_log(st, format!("move {from} -> {to}"));
             remove_deleted_path(&mut st.index, from, roots);
             index_created_path(st, to, Path::new(to).is_dir(), config);
         }
@@ -1423,7 +1553,7 @@ fn start_watcher(
             let mut watcher = match FanotifyWatcher::new() {
                 Ok(watcher) => watcher,
                 Err(e) => {
-                    eprintln!("Failed to create fanotify watcher: {}", e);
+                    eprintln!("Failed to create fanotify watcher: {e}");
                     mark_watcher_unavailable(&state, &format!("initialization error: {e}"));
                     return;
                 }
@@ -1459,7 +1589,7 @@ fn start_watcher(
                             thread::sleep(std::time::Duration::from_millis(100));
                             continue;
                         }
-                        eprintln!("fanotify poll error: {}", e);
+                        eprintln!("fanotify poll error: {e}");
                         thread::sleep(std::time::Duration::from_secs(1));
                         continue;
                     }

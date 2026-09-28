@@ -55,6 +55,10 @@ pub struct WatcherSelfTestResult {
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn window_ready(window: tauri::Window) -> Result<(), String> {
     let state = window.app_handle().state::<AppState>();
     if state.started_automatically() && window.label() == "main" {
@@ -65,6 +69,10 @@ pub fn window_ready(window: tauri::Window) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn is_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;
 
@@ -72,6 +80,10 @@ pub fn is_autostart_enabled(app: tauri::AppHandle) -> Result<bool, String> {
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn set_autostart_enabled(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
 
@@ -161,31 +173,55 @@ pub async fn get_status(state: State<'_, AppState>) -> Result<StatusResult, Stri
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized as owned values"
+)]
 pub fn open_path(path: String) {
     crate::actions::open_path(&path);
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized as owned values"
+)]
 pub fn reveal_in_folder(path: String) {
     crate::actions::reveal_in_folder(&path);
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized as owned values"
+)]
 pub fn copy_to_clipboard(text: String) {
     crate::actions::copy_to_clipboard(&text);
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized as owned values"
+)]
 pub fn trash_path(path: String) -> Result<(), String> {
     crate::actions::trash_path(&path)
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command arguments are deserialized as owned values"
+)]
 pub fn delete_path(path: String) -> Result<(), String> {
     crate::actions::delete_path(&path)
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn reindex_index(state: State<'_, AppState>) -> Result<(), String> {
     let socket = state.socket_path();
     ipc_client::ensure_daemon_running(&socket).map_err(|e| e.to_string())?;
@@ -193,6 +229,10 @@ pub fn reindex_index(state: State<'_, AppState>) -> Result<(), String> {
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn get_keyboard_settings(
     state: State<'_, AppState>,
 ) -> Result<KeyboardSettingsPayload, String> {
@@ -201,6 +241,10 @@ pub fn get_keyboard_settings(
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn save_keyboard_settings(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
@@ -234,24 +278,24 @@ pub fn run_watcher_self_test() -> Result<WatcherSelfTestResult, String> {
     #[cfg(target_os = "linux")]
     {
         let mut watcher =
-            FanotifyWatcher::new().map_err(|e| format!("watcher init failed: {}", e))?;
+            FanotifyWatcher::new().map_err(|e| format!("watcher init failed: {e}"))?;
 
-        let test_dir = make_watcher_test_dir().map_err(|e| format!("temp dir failed: {}", e))?;
+        let test_dir = make_watcher_test_dir().map_err(|e| format!("temp dir failed: {e}"))?;
         let test_file = test_dir.join("watcher-self-test.mkv");
         let test_file_str = test_file.to_string_lossy().to_string();
 
         let outcome = (|| -> Result<WatcherSelfTestResult, String> {
             watcher
                 .watch(&test_dir)
-                .map_err(|e| format!("watch failed: {}", e))?;
+                .map_err(|e| format!("watch failed: {e}"))?;
 
-            fs::write(&test_file, b"self-test").map_err(|e| format!("create failed: {}", e))?;
+            fs::write(&test_file, b"self-test").map_err(|e| format!("create failed: {e}"))?;
             let create_events = wait_for_events(&mut watcher, Duration::from_secs(2))
-                .map_err(|e| format!("create poll failed: {}", e))?;
+                .map_err(|e| format!("create poll failed: {e}"))?;
 
-            fs::remove_file(&test_file).map_err(|e| format!("delete failed: {}", e))?;
+            fs::remove_file(&test_file).map_err(|e| format!("delete failed: {e}"))?;
             let delete_events = wait_for_events(&mut watcher, Duration::from_secs(2))
-                .map_err(|e| format!("delete poll failed: {}", e))?;
+                .map_err(|e| format!("delete poll failed: {e}"))?;
 
             let mut event_lines = Vec::new();
             let mut saw_create = false;
@@ -278,8 +322,7 @@ pub fn run_watcher_self_test() -> Result<WatcherSelfTestResult, String> {
                 "Watcher self-test passed: create and delete events observed".to_string()
             } else {
                 format!(
-                    "Watcher self-test failed: create seen = {}, delete seen = {}",
-                    saw_create, saw_delete
+                    "Watcher self-test failed: create seen = {saw_create}, delete seen = {saw_delete}"
                 )
             };
 
@@ -339,10 +382,10 @@ fn format_watch_event(event: &WatchEvent) -> String {
         WatchEvent::Create { path, is_dir } => {
             format!("create {}{}", path, if *is_dir { " (dir)" } else { "" })
         }
-        WatchEvent::Delete { path } => format!("delete {}", path),
-        WatchEvent::Modify { path } => format!("modify {}", path),
-        WatchEvent::Move { from, to } => format!("move {} -> {}", from, to),
-        WatchEvent::Overflow { path } => format!("overflow {}", path),
+        WatchEvent::Delete { path } => format!("delete {path}"),
+        WatchEvent::Modify { path } => format!("modify {path}"),
+        WatchEvent::Move { from, to } => format!("move {from} -> {to}"),
+        WatchEvent::Overflow { path } => format!("overflow {path}"),
     }
 }
 
@@ -395,6 +438,10 @@ pub(crate) fn open_options_window_internal(app: &tauri::AppHandle) -> Result<(),
 }
 
 #[tauri::command]
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "Tauri command extractors require owned parameter types"
+)]
 pub fn close_options_window(window: tauri::Window) -> Result<(), String> {
     window.close().map_err(|e| e.to_string())
 }

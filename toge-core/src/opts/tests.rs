@@ -80,7 +80,7 @@ fn test_parse_output_formats() {
         ("-efu", OutputFormat::Efu),
     ] {
         let opts = NdlOptions::parse(["toge".into(), flag.into(), "foo".into()]).unwrap();
-        assert_eq!(opts.format, expected, "failed for {}", flag);
+        assert_eq!(opts.format, expected, "failed for {flag}");
     }
 }
 
