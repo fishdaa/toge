@@ -6,6 +6,13 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-09-28
+
+### Fixed
+
+- fix: reject unrepresentable index paths and enable pedantic clippy lints (#36)
+
+
 ## [0.2.0] - 2026-09-27
 
 ### Added
