@@ -336,3 +336,175 @@ focus without an activation token.
   `/tmp/toge-fix-visual/`.
 - Tailnet-only recording:
   https://fedora.taila85941.ts.net:8938/recording.mp4
+
+## Selected image previews — 2026-09-29
+
+The Slint window now shows a right pane for selected PNG, JPEG, WebP, and GIF
+images. One worker per window bounds file reads and decoded dimensions, scales
+large images, and discards responses from older selections.
+
+- All 46 Slint tests passed, including pointer drag and window resize coverage.
+  Clippy passed with the existing workspace
+  `uninlined_format_args` lint suppressed; the strict command stops in
+  `toge-core/src/opts.rs:198`, outside this change. Formatting and diff checks
+  passed.
+- Native Wayland verification used the actual Slint client and daemon in an
+  isolated nested niri compositor. The recording covers startup, large-image
+  loading and display, keyboard focus and selection, portrait display,
+  unsupported and damaged files, scrolling through 40 results, and Home
+  returning to the first image. Captured frames were inspected for image fit,
+  clipping, focus, scroll position, messages, and visible errors. The input was
+  injected with `wtype`; live fanotify updates were outside this fixture.
+- An offscreen Slint software-renderer recording of the same `ui/main.slint`
+  covers pointer drag from 300 to 416 px. Captured frames show the results
+  area narrowing and the image refitting without clipping. Native pointer
+  injection was unavailable in the nested compositor.
+- Tailnet-only recording:
+  [image-preview.mp4](https://fedora.taila85941.ts.net:8952/image-preview.mp4)
+  (native) and [preview-drag.mp4](https://fedora.taila85941.ts.net:8952/preview-drag.mp4)
+  (offscreen Slint). Fixtures, frames, and logs are in
+  `/tmp/toge-image-preview-visual-20260929/` and
+  `/tmp/toge-image-preview-drag-20260929/`.
+
+## Image preview memory — 2026-09-29
+
+The preview worker decodes the source image before scaling it for the pane, so
+large images create temporary full-resolution allocations. The selected Slint
+image is replaced when selection changes; programmatically supplied images have
+no Slint image-cache key.
+
+An isolated native debug run with 36 distinct 2,000×1,200 JPEGs rose from
+about 48 MiB RSS to 74 MiB after the first image, then stayed near 74 MiB
+through the remaining selections. A second fixture with image dimensions rising
+from 1,000×600 to 5,950×3,460 grew from 43 MiB to 111 MiB RSS; returning to
+the first image brought it back to 47 MiB. This indicates a larger working set
+for larger source images, not one retained image per selection.
+
+The loader now releases compressed bytes before resizing, releases the decoded
+source before copying pixels to Slint, and retains at most one completed result
+while waiting for the UI thread. After this change, the increasing-size fixture
+settled near 73 MiB RSS after the largest image. These are sampled RSS readings
+from the isolated debug client, not measurements of short-lived allocation peaks.
+All 46 Slint tests and Clippy with the existing workspace lint exception passed.
+The final native preview flow was recorded again at the link above.
+
+## More selected-file preview formats — 2026-09-29
+
+The pane now previews BMP, ICO, TIFF, TGA and PNM in addition to the existing
+PNG/JPEG/WebP/GIF formats. SVG is rasterized with resvg, and Poppler's
+`pdftoppm` renders the first PDF page into a temporary PNG. UTF-8 text,
+Markdown, logs, CSV, JSON, configuration, and common source files use a
+scrollable text view. The worker still coalesces selection changes and keeps
+only one pending result. PDF rendering is cancelled on a newer selection or
+after eight seconds. File and output limits are documented in the README.
+
+- `cargo test -p toge-slint --all-targets --offline`: 48 passed, including
+  format classification, bounded text/binary handling, raster/SVG rendering,
+  and divider resizing.
+- `cargo clippy -p toge-slint --all-targets --offline -- -D warnings
+  -A clippy::uninlined_format_args` and `git diff --check`: passed. The
+  Clippy exception is for the existing `toge-core/src/opts.rs` lint.
+- Native Wayland Slint recording covers startup and loading, BMP, SVG, PDF,
+  Markdown, CSV, unsupported and damaged files, keyboard selection, scrolling
+  the result list, and Home returning to the first image. Captured frames were
+  inspected for image fit, text start position, clipping, focus, scroll
+  position, and visible errors. The text view initially centered long content;
+  setting its natural height and top alignment fixed that before the final run.
+  Native pointer injection was unavailable, so this run uses keyboard input;
+  divider dragging was separately checked with the offscreen Slint renderer in
+  the earlier preview test.
+- Tailnet-only recording:
+  [formats-preview.mp4](https://fedora.taila85941.ts.net:8952/formats-preview.mp4).
+  Fixture, screenshots, frames, and logs are in
+  `/tmp/toge-formats-preview-visual-20260929/`.
+
+## Office document previews — 2026-09-29
+
+DOC, DOCX, ODT, and RTF results now use the existing preview pane. If
+LibreOffice is installed, it converts the selected file to a temporary PDF,
+then the existing Poppler path renders the first page. Without LibreOffice,
+DOCX and ODT packages yield bounded text from their main XML entries, and
+`catdoc` extracts bounded DOC and RTF text. Conversion cancels when selection
+changes and times out after ten seconds. Temporary files are removed when the
+worker finishes. The README lists limits and optional system tools.
+
+- `cargo test -p toge-slint --all-targets --offline`: 49 passed, including a
+  test that builds DOCX and ODT packages and checks paragraph extraction.
+- `cargo clippy -p toge-slint --all-targets --offline -- -D warnings
+  -A clippy::uninlined_format_args`: passed; the exception is for the
+  existing workspace lint in `toge-core/src/opts.rs`.
+- Native Wayland Slint recording with synthetic Word fixtures covers loading DOCX text, DOC text from
+  `catdoc`, ODT text, PDF page rendering, RTF text, a damaged DOCX error,
+  keyboard navigation, list scrolling, and Home. Frames were inspected for
+  clipping, initial scroll position, focus, messages, and visible errors.
+  A separately installed genuine DOC was also checked locally with `catdoc`;
+  its contents are excluded from the shared recording. LibreOffice was absent, so page-layout conversion for office files could
+  not be visually exercised here. Native pointer injection was unavailable;
+  the earlier offscreen Slint test covers divider dragging.
+- Tailnet-only recording:
+  [documents-preview.mp4](https://fedora.taila85941.ts.net:8952/documents-preview.mp4).
+  Fixture, screenshots, frames, and logs are in
+  `/tmp/toge-documents-preview-synthetic-20260929/`.
+
+## Installed-tool preview backends — 2026-09-29
+
+The preview worker no longer depends on format-specific runtime Cargo crates.
+It accepts bounded PAM/PPM output from installed tools and keeps the same
+selection coalescing, cancellation, and single pending UI result. For images,
+it tries FFmpeg, then ImageMagick (`magick`/`convert`) and GraphicsMagick (`gm`).
+For PDFs, it tries Poppler then MuPDF. Office files use LibreOffice if present,
+with text fallbacks through Python 3 or unzip/xmllint (DOCX/ODT), and catdoc
+(DOC/RTF). Missing tools and failed decodes leave a visible message.
+
+- `cargo test -p toge-slint --all-targets --locked --offline`: 48 passed.
+  Tests cover format classification, bounded PAM/PPM parsing, system Python DOCX extraction, text limits,
+  and the resizable divider. `cargo clippy -p toge-slint --all-targets --locked
+  --offline -- -D warnings -A clippy::uninlined_format_args`,
+  `cargo build -p toge-slint --locked --offline`, `cargo fmt --all -- --check`,
+  and `git diff --check` passed. The Clippy exception is for the existing
+  workspace lint in `toge-core/src/opts.rs`. Cargo.lock is unchanged.
+- Native Wayland Slint recordings cover BMP, SVG, PDF, Markdown, CSV, DOCX,
+  DOC, ODT and RTF, plus damaged/unsupported files, loading, keyboard focus,
+  selection changes, result-list scrolling, and Home. Final frames were
+  inspected for fit, initial text position, clipping, focus, and visible
+  errors. Synthetic Word fixtures are used in the shared recording.
+  A separate fixture with preview executables removed from the app PATH
+  verified the visible missing-tool messages for images and PDFs.
+  ImageMagick, GraphicsMagick, MuPDF, and LibreOffice were absent here, so
+  those fallback executables could not be exercised in the native run.
+  The unzip/xmllint text path was checked directly against DOCX/ODT fixtures.
+  Native pointer injection was unavailable; the earlier offscreen Slint
+  recording covers divider dragging.
+- Tailnet-only recordings:
+  [image and PDF flow](https://fedora.taila85941.ts.net:8952/system-tools-formats-final.mp4)
+  [document flow](https://fedora.taila85941.ts.net:8952/system-tools-documents-final.mp4),
+  and [missing-tool messages](https://fedora.taila85941.ts.net:8952/system-tools-missing.mp4).
+  Frames and logs are in `/tmp/toge-system-tools-formats-final-20260929/`,
+  `/tmp/toge-system-tools-documents-final-20260929/`, and
+  `/tmp/toge-system-tools-missing-20260929/`.
+
+## Embedded office thumbnails — 2026-09-29
+
+The installed ONLYOFFICE Desktop Editors AppImage exposes a separate window,
+so it cannot be placed inside Slint's Wayland preview pane. The optional
+`gsf-office-thumbnailer` backend extracts a document's stored preview image
+directly into the pane for DOC, DOCX, and ODT. If the image is missing or blank,
+the existing LibreOffice page render or text fallback runs. The thumbnail is
+a static stored image; it is not a live document editor.
+
+- `cargo test -p toge-slint --all-targets --locked --offline`: 48 passed.
+  `cargo build -p toge-slint --locked --offline`, `cargo fmt --all -- --check`,
+  and `git diff --check` passed. Clippy was run with the existing
+  `clippy::uninlined_format_args` workspace exception.
+- Native Wayland Slint verification used the actual `toge-slint` binary and
+  shared `ui/main.slint`. The recorded flow covers startup, thumbnail loading,
+  an ODT's embedded first-page image, keyboard selection of a DOCX with a blank
+  stored thumbnail and its text fallback, then a long text preview. Frames
+  were inspected for image fit, clipping, focus, initial scroll position,
+  and visible errors. The fixture uses a public ODT and synthetic DOCX/text.
+  Native pointer injection was unavailable; divider dragging was verified
+  separately in the earlier offscreen Slint recording. Capture was slower
+  than the nominal frame rate, so the video plays faster than the interaction.
+- Tailnet-only recording:
+  [office-thumbnail-preview.mp4](https://fedora.taila85941.ts.net:8952/office-thumbnail-preview.mp4).
+  Frames, fixture, and logs are in `/tmp/toge-office-thumbnail-visual-20260929/`.

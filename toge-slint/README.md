@@ -107,6 +107,34 @@ without the filesystem watcher. Click **toge** at the top left to open About.
 Clicking a row moves keyboard focus to the table. Up/Down, PageUp/PageDown and
 Home/End then move the selection, loading distant rows as needed.
 
+The resizable right pane previews common images, SVG, the first page of a
+PDF, and DOC, DOCX, ODT, and RTF documents. Text, Markdown, logs, CSV, JSON,
+configuration, and source files use a scrollable, read-only text view. GIFs
+show one frame. Additional image codecs such as AVIF and HEIC work when an
+installed renderer supports them. Unsupported or unreadable files show a
+message; selected-file metadata stays in the footer.
+
+Previews use installed tools instead of format-specific Rust dependencies:
+
+- Images and SVG: FFmpeg (`ffprobe` and `ffmpeg`), then ImageMagick (`magick`
+  or `convert`) or GraphicsMagick (`gm`).
+- PDFs: Poppler (`pdftoppm`), then MuPDF (`mutool`).
+- Embedded office thumbnails: `gsf-office-thumbnailer` for DOC, DOCX, and ODT
+  when the file contains a usable preview image. Blank or missing thumbnails
+  fall through to the next backend.
+- Office page layout: LibreOffice (`soffice`, `libreoffice`, or `lowriter`)
+  converts to a temporary PDF for a first-page preview.
+- Office text when page rendering is unavailable: Python 3's standard library,
+  then `unzip` with `xmllint` for DOCX/ODT; `catdoc` for DOC/RTF. The
+  `unzip`/`xmllint` fallback may lose paragraph spacing.
+
+Each backend is optional. The worker tries available alternatives and shows a
+missing-tool message if it cannot preview the selected type. Conversion runs
+off the UI thread and cancels when selection changes. Source limits are 32 MiB
+for raster images, 4 MiB for SVG, and 64 MiB for PDFs and office documents.
+Images fit within 1,200 × 1,200 pixels; text is limited to the first 64 KiB.
+Image/PDF rendering times out after eight seconds, office conversion after ten.
+
 Column headers sort in the daemon, using cached whole-index name and path
 orders, so sorting a million matches takes milliseconds. Size and modified time sort numerically.
 Sorting clears the selection and returns the list to the top. The sort column

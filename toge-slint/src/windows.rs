@@ -108,6 +108,7 @@ pub fn open() -> Result<AppWindow, slint::PlatformError> {
     });
     ui.on_about(show_about);
     ui.on_new_window(|| handle(Request::NewWindow));
+    crate::preview::connect(&ui);
     let id = APP.with_borrow_mut(|app| {
         app.next_id += 1;
         app.next_id

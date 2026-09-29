@@ -6,6 +6,7 @@ mod global_shortcuts;
 mod instance;
 mod model;
 mod preferences;
+mod preview;
 mod shortcuts;
 mod tray;
 mod windows;

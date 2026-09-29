@@ -156,6 +156,23 @@ export component AppWindow inherits Window {
     in property <string> index-status: "Index unavailable";
     in property <bool> busy: true;
     in property <bool> has-error: false;
+    in property <image> preview-image;
+    in property <bool> preview-ready: false;
+    in property <bool> preview-text-ready: false;
+    in property <string> preview-text: "";
+    in property <string> preview-message: "Select a file";
+    in property <bool> preview-pdf-active: false;
+    in property <int> preview-pdf-page: 1;
+    in property <int> preview-pdf-pages: 0;
+    in property <int> preview-pdf-rendered-page: 0;
+    in property <image> preview-pdf-previous-image;
+    in property <image> preview-pdf-next-image;
+    in property <bool> preview-pdf-previous-ready: false;
+    in property <bool> preview-pdf-next-ready: false;
+    in-out property <length> preview-width: 300px;
+    changed width => {
+        if (root.width >= 560px) { root.preview-width = min(root.preview-width, root.width - 220px); }
+    }
     in-out property <int> selected: -1;
     // Where a Shift+arrow range started; -1 when only the current row is highlighted.
     in-out property <int> selection-anchor: -1;
@@ -163,6 +180,12 @@ export component AppWindow inherits Window {
     private property <int> range-end: min(root.rows.length - 1, max(root.selection-anchor, root.selected));
     private property <bool> selected-details-visible: root.selected >= 0 && root.selected < root.rows.length
         && root.rows[root.selected][1].text != "";
+    private property <string> selected-preview-path: root.selected-details-visible
+        ? root.rows[root.selected][1].text + "/" + root.rows[root.selected][0].text : "";
+    changed selected-preview-path => {
+        pdf-scroll.viewport-y = 0px;
+        root.preview-requested(root.selected-preview-path, 1);
+    }
     private property <bool> has-range: root.selection-anchor >= 0 && root.selected >= 0 && root.range-end > root.range-start;
     in-out property <int> hovered-row: -1;
     in-out property <bool> context-menu-open: false;
@@ -188,6 +211,8 @@ export component AppWindow inherits Window {
     callback action(string);
     callback resolved-action(string, [string]);
     callback row-clicked(int);
+    callback preview-requested(string, int);
+    callback preview-pdf-scrolled(string, float);
     callback about();
     callback new-window();
     callback shortcut-action(string, bool, bool, bool, bool) -> string;
@@ -382,7 +407,11 @@ export component AppWindow inherits Window {
                 }
             }
             Rectangle { height: 1px; background: Palette.foreground; opacity: 0.10; }
+            HorizontalLayout {
+                vertical-stretch: 1;
+                spacing: 0px;
             keys := FocusScope {
+                horizontal-stretch: 1;
                 vertical-stretch: 1;
                 forward-focus: table;
                 key-pressed(event) => {
@@ -583,6 +612,137 @@ export component AppWindow inherits Window {
                         ContextMenuItem { label: "Delete"; activated => { root.context-menu-open = false; root.action("delete"); } }
                         ContextMenuItem { label: "Delete permanently…"; activated => { root.context-menu-open = false; root.action("delete-permanently"); } }
                       }
+                    }
+                }
+            }
+                Rectangle {
+                    width: 8px;
+                    background: Palette.background;
+                    Rectangle {
+                        x: 3px; width: 2px; height: 100%;
+                        background: Palette.foreground; opacity: divider-touch.has-hover ? 0.35 : 0.14;
+                    }
+                    divider-touch := TouchArea {
+                        width: 100%; height: 100%;
+                        mouse-cursor: ew-resize;
+                        moved => {
+                            if (self.pressed) {
+                                root.preview-width = max(180px, min(600px,
+                                    min(root.width - 220px, root.preview-width + self.pressed-x - self.mouse-x)));
+                            }
+                        }
+                    }
+                }
+                Rectangle {
+                    width: root.preview-width;
+                    background: Palette.background;
+                    VerticalLayout {
+                        padding: 12px;
+                        spacing: 10px;
+                        Text {
+                            text: root.selected-details-visible ? root.rows[root.selected][0].text : "Preview";
+                            font-size: 13px; font-weight: 600;
+                            color: Palette.foreground;
+                            overflow: elide;
+                        }
+                        if root.preview-pdf-active: Text {
+                            height: 18px;
+                            text: root.preview-pdf-pages > 0
+                                ? "Page " + root.preview-pdf-page + " of " + root.preview-pdf-pages
+                                : "PDF preview";
+                            font-size: 12px;
+                            color: Palette.foreground;
+                            opacity: 0.65;
+                        }
+                        Rectangle {
+                            vertical-stretch: 1;
+                            background: Palette.alternate-background;
+                            clip: true;
+                            Image {
+                                width: parent.width; height: parent.height;
+                                visible: root.preview-ready && !root.preview-pdf-active;
+                                source: root.preview-image;
+                                image-fit: contain;
+                            }
+                            pdf-scroll := ScrollView {
+                                width: parent.width; height: parent.height;
+                                visible: root.preview-pdf-active;
+                                viewport-width: self.visible-width;
+                                viewport-height: max(self.visible-height,
+                                    self.visible-height * max(1, root.preview-pdf-pages));
+                                scrolled() => {
+                                    root.preview-pdf-scrolled(root.selected-preview-path,
+                                        -self.viewport-y / max(1px, self.visible-height));
+                                }
+                                Image {
+                                    y: (root.preview-pdf-rendered-page - 2) * pdf-scroll.visible-height + 8px;
+                                    width: pdf-scroll.visible-width;
+                                    height: max(1px, pdf-scroll.visible-height - 16px);
+                                    visible: root.preview-pdf-previous-ready;
+                                    source: root.preview-pdf-previous-image;
+                                    image-fit: contain;
+                                }
+                                Image {
+                                    y: (root.preview-pdf-rendered-page - 1) * pdf-scroll.visible-height + 8px;
+                                    width: pdf-scroll.visible-width;
+                                    height: max(1px, pdf-scroll.visible-height - 16px);
+                                    visible: root.preview-ready;
+                                    source: root.preview-image;
+                                    image-fit: contain;
+                                }
+                                Image {
+                                    y: root.preview-pdf-rendered-page * pdf-scroll.visible-height + 8px;
+                                    width: pdf-scroll.visible-width;
+                                    height: max(1px, pdf-scroll.visible-height - 16px);
+                                    visible: root.preview-pdf-next-ready;
+                                    source: root.preview-pdf-next-image;
+                                    image-fit: contain;
+                                }
+                                Text {
+                                    x: 16px;
+                                    y: (root.preview-pdf-page - 1) * pdf-scroll.visible-height + 16px;
+                                    width: pdf-scroll.visible-width - 32px;
+                                    height: max(1px, pdf-scroll.visible-height - 32px);
+                                    visible: !root.preview-ready
+                                        || (root.preview-pdf-page != root.preview-pdf-rendered-page
+                                            && !(root.preview-pdf-page == root.preview-pdf-rendered-page - 1
+                                                && root.preview-pdf-previous-ready)
+                                            && !(root.preview-pdf-page == root.preview-pdf-rendered-page + 1
+                                                && root.preview-pdf-next-ready));
+                                    text: root.preview-message;
+                                    color: Palette.foreground; opacity: 0.60;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            if root.preview-text-ready: ScrollView {
+                                width: parent.width; height: parent.height;
+                                viewport-width: self.visible-width;
+                                viewport-height: max(self.visible-height, text-body.height + 24px);
+                                viewport-y: 0px;
+                                text-body := Text {
+                                    x: 12px; y: 12px;
+                                    width: parent.width - 36px;
+                                    height: self.preferred-height;
+                                    vertical-alignment: top;
+                                    text: root.preview-text;
+                                    font-family: "monospace";
+                                    font-size: 12px;
+                                    color: Palette.foreground;
+                                    wrap: word-wrap;
+                                }
+                            }
+                            if !root.preview-ready && !root.preview-text-ready && !root.preview-pdf-active: Text {
+                                x: 16px; y: 16px;
+                                width: parent.width - 32px; height: parent.height - 32px;
+                                text: root.preview-message;
+                                color: Palette.foreground; opacity: 0.60;
+                                horizontal-alignment: center;
+                                vertical-alignment: center;
+                                wrap: word-wrap;
+                            }
+                        }
                     }
                 }
             }
