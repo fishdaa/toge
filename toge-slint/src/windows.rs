@@ -1,7 +1,7 @@
 //! Search windows. Each window has its own query, daemon session and worker;
 //! table settings and the About window are shared.
 use crate::instance::Request;
-use crate::{AboutWindow, AppWindow, preferences, worker};
+use crate::{AboutWindow, AppWindow, OptionsWindow, preferences, shortcuts, worker};
 use slint::ComponentHandle;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -19,6 +19,8 @@ struct App {
     windows: Vec<Entry>,
     next_id: u64,
     about: Option<AboutWindow>,
+    options: Option<OptionsWindow>,
+    shortcuts: Option<Rc<RefCell<shortcuts::Shortcuts>>>,
     preferences: Option<Rc<RefCell<preferences::UiState>>>,
 }
 
@@ -31,6 +33,7 @@ pub fn handle(request: Request) {
         Request::Show => show(),
         Request::NewWindow => open().map(|_| ()),
         Request::Toggle => toggle(),
+        Request::Hide => hide(),
     };
     if let Err(error) = result {
         eprintln!("Could not open a Toge window: {error}");
@@ -39,7 +42,14 @@ pub fn handle(request: Request) {
 
 /// Number of open windows, visible or hidden.
 pub fn count() -> usize {
-    APP.with_borrow(|app| app.windows.len())
+    APP.with_borrow(|app| {
+        app.windows.len()
+            + usize::from(
+                app.options
+                    .as_ref()
+                    .is_some_and(|ui| ui.window().is_visible()),
+            )
+    })
 }
 
 fn current() -> Option<AppWindow> {
@@ -61,9 +71,18 @@ fn toggle() -> Result<(), slint::PlatformError> {
     }
 }
 
+fn hide() -> Result<(), slint::PlatformError> {
+    match current() {
+        Some(ui) => ui.hide(),
+        None => Ok(()),
+    }
+}
+
 fn reveal(ui: &AppWindow) -> Result<(), slint::PlatformError> {
     ui.window().set_minimized(false);
-    ui.show()
+    ui.show()?;
+    ui.invoke_focus_search();
+    Ok(())
 }
 
 /// Open and show a new search window listing the whole index.
@@ -79,6 +98,14 @@ pub fn open() -> Result<AppWindow, slint::PlatformError> {
             .clone()
     });
     preferences::connect(&ui, preferences::path(), state, mailbox.clone());
+    let shortcut_state = shortcut_state();
+    ui.on_shortcut_action(move |text, control, alt, shift, meta| {
+        let event = shortcuts::Chord::from_event(&text, control, alt, shift, meta);
+        event
+            .and_then(|event| shortcut_state.borrow().action(&event))
+            .unwrap_or_default()
+            .into()
+    });
     ui.on_about(show_about);
     ui.on_new_window(|| handle(Request::NewWindow));
     let id = APP.with_borrow_mut(|app| {
@@ -162,6 +189,7 @@ fn close(id: u64) {
 pub fn shutdown() {
     let windows = APP.with_borrow_mut(|app| {
         app.about = None;
+        app.options = None;
         std::mem::take(&mut app.windows)
     });
     for entry in windows {
@@ -185,4 +213,112 @@ pub fn show_about() {
             },
         };
     let _ = about.show();
+}
+
+fn shortcut_state() -> Rc<RefCell<shortcuts::Shortcuts>> {
+    APP.with_borrow_mut(|app| {
+        app.shortcuts
+            .get_or_insert_with(|| {
+                Rc::new(RefCell::new(shortcuts::Shortcuts::load(&shortcuts::path())))
+            })
+            .clone()
+    })
+}
+
+pub fn show_options() {
+    let options = match APP.with_borrow(|app| {
+        app.options
+            .as_ref()
+            .map(slint::ComponentHandle::clone_strong)
+    }) {
+        Some(ui) => ui,
+        None => match OptionsWindow::new() {
+            Ok(ui) => {
+                let state = shortcut_state();
+                ui.set_shortcuts(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                    state.borrow().rows(),
+                ))));
+                ui.set_global_status(crate::global_shortcuts::status().into());
+                let weak = ui.as_weak();
+                let clear_state = state.clone();
+                ui.on_save_shortcut(move |id, binding| {
+                    if let Some(ui) = weak.upgrade() {
+                        update_shortcut(&ui, &clear_state, &id, &binding);
+                    }
+                });
+                let weak = ui.as_weak();
+                ui.on_record_shortcut(move |id, text, control, alt, shift, meta| {
+                    let Some(ui) = weak.upgrade() else {
+                        return false;
+                    };
+                    let Some(chord) =
+                        shortcuts::Chord::from_event(&text, control, alt, shift, meta)
+                    else {
+                        return false;
+                    };
+                    update_shortcut(&ui, &state, &id, &chord.display())
+                });
+                ui.window().on_close_requested(|| {
+                    slint::Timer::single_shot(std::time::Duration::ZERO, || {
+                        if count() == 0 && !crate::tray::resident() {
+                            let _ = slint::quit_event_loop();
+                        }
+                    });
+                    slint::CloseRequestResponse::HideWindow
+                });
+                APP.with_borrow_mut(|app| app.options = Some(ui.clone_strong()));
+                ui
+            }
+            Err(error) => {
+                eprintln!("Could not open Options: {error}");
+                return;
+            }
+        },
+    };
+    options.window().set_minimized(false);
+    if let Err(error) = options.show() {
+        eprintln!("Could not show Options: {error}");
+    } else {
+        options.invoke_focus_recorder();
+    }
+}
+
+pub fn set_global_shortcut_status(status: &str) {
+    APP.with_borrow(|app| {
+        if let Some(options) = &app.options {
+            options.set_global_status(status.into());
+        }
+    });
+}
+
+fn update_shortcut(
+    ui: &OptionsWindow,
+    state: &Rc<RefCell<shortcuts::Shortcuts>>,
+    id: &str,
+    binding: &str,
+) -> bool {
+    let mut updated = state.borrow().clone();
+    let result = updated.set(id, binding).and_then(|()| {
+        updated
+            .save(&shortcuts::path())
+            .map_err(|_| "Could not save shortcuts")
+    });
+    match result {
+        Ok(()) => {
+            let global_changed = state.borrow().global_entries() != updated.global_entries();
+            if global_changed {
+                crate::global_shortcuts::refresh(&updated);
+            }
+            *state.borrow_mut() = updated;
+            ui.set_error_message("".into());
+            ui.set_shortcuts(slint::ModelRc::from(Rc::new(slint::VecModel::from(
+                state.borrow().rows(),
+            ))));
+            true
+        }
+        Err(message) => {
+            ui.set_error_message(message.into());
+            false
+        }
+    }
 }

@@ -4742,6 +4742,7 @@ dependencies = [
  "tempfile",
  "time",
  "toge-core",
+ "zbus",
 ]
 
 [[package]]

@@ -2,9 +2,11 @@ mod access;
 mod actions;
 mod client;
 mod format;
+mod global_shortcuts;
 mod instance;
 mod model;
 mod preferences;
+mod shortcuts;
 mod tray;
 mod windows;
 mod worker;
@@ -26,12 +28,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         [arg] => instance::Request::from_arg(arg.to_str()),
         _ => None,
     }
-    .ok_or("Usage: toge-slint [--new-window | --toggle]")?;
+    .ok_or("Usage: toge-slint [--new-window | --toggle | --hide]")?;
     let socket = instance::socket_path();
     match instance::send(&socket, request) {
         Ok(true) => return Ok(()),
         Ok(false) => {}
         Err(error) => eprintln!("Could not reach the running Toge instance: {error}"),
+    }
+    if request == instance::Request::Hide {
+        // There is nothing to hide when no GUI instance is running.
+        return Ok(());
     }
     // Without the socket this process still works, but later launches start
     // their own instance instead of opening or toggling a window here.
@@ -46,6 +52,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
     tray::start();
+    global_shortcuts::start();
     // Hidden (toggled) windows keep the GUI running; closing the last window
     // quits unless the tray icon is registered.
     let result = slint::run_event_loop_until_quit();

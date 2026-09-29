@@ -10,15 +10,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 enum Action {
     Window(Request),
     About,
+    Options,
     Quit,
 }
 
 /// Menu entries in display order; `None` is a separator.
-const MENU: [Option<(&str, Action)>; 6] = [
+const MENU: [Option<(&str, Action)>; 7] = [
     Some(("Show Window", Action::Window(Request::Show))),
     Some(("New Window", Action::Window(Request::NewWindow))),
     Some(("Toggle Window", Action::Window(Request::Toggle))),
     Some(("About Toge", Action::About)),
+    Some(("Options…", Action::Options)),
     None,
     Some(("Quit", Action::Quit)),
 ];
@@ -86,6 +88,7 @@ fn dispatch(action: Action) {
     let _ = slint::invoke_from_event_loop(move || match action {
         Action::Window(request) => windows::handle(request),
         Action::About => windows::show_about(),
+        Action::Options => windows::show_options(),
         Action::Quit => {
             let _ = slint::quit_event_loop();
         }
@@ -120,7 +123,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn menu_offers_window_requests_about_and_quit() {
+    fn menu_offers_window_requests_about_options_and_quit() {
         let actions: Vec<_> = MENU.iter().flatten().map(|(_, action)| *action).collect();
         assert_eq!(
             actions,
@@ -129,6 +132,7 @@ mod tests {
                 Action::Window(Request::NewWindow),
                 Action::Window(Request::Toggle),
                 Action::About,
+                Action::Options,
                 Action::Quit,
             ]
         );

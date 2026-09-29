@@ -59,11 +59,12 @@ daemon socket, and later launches hand their request to it and exit:
 toge-slint                # show the current window
 toge-slint --new-window   # open another search window
 toge-slint --toggle       # hide the current window, or show it again
+toge-slint --hide         # hide the current window
 ```
 
-With no GUI running, each form starts one. Bind these commands to compositor
-shortcuts (for example niri `spawn`) in place of global hotkeys. Ctrl+N opens a new
-window from inside the app. Each window has its own query, results, selection and
+With no GUI running, show, new-window, and toggle start one; hide has no effect.
+The commands can also be bound in a compositor (for example niri `spawn`). Ctrl+N
+opens a new window from inside the app. Each window has its own query, results, selection and
 daemon session; table sort and column widths are shared. Toggle acts on the most
 recently opened window and keeps its query and results while hidden. Closing a
 window discards it; the GUI exits when no window, including hidden ones, remains, unless
@@ -72,7 +73,7 @@ the tray icon is registered.
 The tray icon uses the freedesktop StatusNotifierItem protocol over D-Bus (KDE, most
 Wayland panels such as Waybar or Noctalia, and GNOME with the AppIndicator extension).
 Clicking it shows the current window; its menu offers Show Window, New Window, Toggle
-Window, About Toge and Quit. While the icon is registered, closing the last window keeps
+Window, About Toge, Options… and Quit. While the icon is registered, closing the last window keeps
 the GUI running in the tray, and Quit exits. Without a StatusNotifierItem host, or if the
 host goes away while no window is open, the GUI exits as before.
 
@@ -138,9 +139,26 @@ query. Session requests have a 30-second read timeout; status checks have a
 two-second timeout and retry while the daemon is busy, within the readiness
 deadline.
 
-The client does not yet implement built-in global shortcuts, autostart, settings
-editing, diagnostics, or installer packages. Edit configuration in the configuration
-file. Keyboard bindings are fixed.
+Options… opens a separate window for keyboard shortcuts. App shortcuts can be
+changed by clicking Record and pressing a key combination; they are saved to
+`toge/shortcuts.conf` under the active XDG configuration directory. Press Escape
+to cancel recording, or click Clear to disable a binding. Duplicate bindings in
+the same scope are rejected. Systemwide shortcuts for showing, hiding, toggling,
+and opening a new search window use the desktop Global Shortcuts portal when
+available. The desktop can grant a different key than the requested one; its
+shortcut settings are authoritative. On desktops without that portal, use the
+compositor commands above. For niri development launches, bind the saved key
+in `~/.config/niri/config.kdl` to the helper, which discovers the launcher's
+temporary socket for the active profile:
+
+```kdl
+Ctrl+F10 { spawn "python3" "/path/to/toge/scripts/toggle-slint-dev.py"; }
+```
+
+Use the absolute checkout path in the binding. `TOGE_DEV_PROFILE` selects a
+nondefault development profile. Niri handles the key even while Toge is hidden.
+Autostart, diagnostics, and installer packages are not yet implemented; edit
+daemon configuration in its configuration file.
 
 Slint is used under its Royalty-free Desktop, Mobile, and Web Applications license;
 the About dialog includes the `AboutSlint` attribution. See

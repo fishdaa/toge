@@ -1,5 +1,12 @@
 import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette, ScrollView, Spinner } from "std-widgets.slint";
 
+export struct ShortcutEntry {
+    id: string,
+    label: string,
+    binding: string,
+    global: bool,
+}
+
 component ContextMenuItem {
     in property <string> label;
     callback activated;
@@ -69,6 +76,76 @@ export component AboutWindow inherits Window {
     }
 }
 
+export component OptionsWindow inherits Window {
+    title: "Toge — Options";
+    preferred-width: 620px; preferred-height: 550px;
+    min-width: 480px; min-height: 350px;
+    background: Palette.background;
+    in property <[ShortcutEntry]> shortcuts;
+    in-out property <string> error-message: "";
+    in property <string> global-status: "";
+    private property <string> recording-id: "";
+    callback save-shortcut(string, string);
+    callback record-shortcut(string, string, bool, bool, bool, bool) -> bool;
+    forward-focus: recorder;
+    public function focus-recorder() { recorder.focus(); }
+    recorder := FocusScope {
+        width: 100%; height: 100%;
+        capture-key-pressed(event) => {
+            if (root.recording-id == "") { return reject; }
+            if (event.text == Key.Escape) { root.recording-id = ""; return accept; }
+            if (root.record-shortcut(root.recording-id, event.text, event.modifiers.control,
+                event.modifiers.alt, event.modifiers.shift, event.modifiers.meta)) {
+                root.recording-id = "";
+            }
+            return accept;
+        }
+        VerticalLayout {
+            padding: 20px; spacing: 12px;
+            Text { text: "Keyboard shortcuts"; font-size: 21px; font-weight: 700; color: Palette.foreground; }
+            Text {
+                text: root.recording-id == "" ? "Click Record, then press a key combination. Escape cancels; Clear disables it."
+                    : "Press the new key combination now. Escape cancels.";
+                wrap: word-wrap; color: Palette.foreground;
+            }
+            ScrollView {
+                vertical-stretch: 1;
+                VerticalLayout {
+                    spacing: 8px;
+                    for shortcut in root.shortcuts: HorizontalLayout {
+                        spacing: 8px;
+                        Text {
+                            text: shortcut.label;
+                            width: 165px;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                            color: Palette.foreground;
+                        }
+                        Text {
+                            text: shortcut.binding == "" ? "Unassigned" : shortcut.binding;
+                            horizontal-stretch: 1;
+                            vertical-alignment: center;
+                            color: Palette.foreground;
+                        }
+                        Button {
+                            text: root.recording-id == shortcut.id ? "Press keys…" : "Record";
+                            width: 100px;
+                            clicked => { root.recording-id = shortcut.id; root.error-message = ""; recorder.focus(); }
+                        }
+                        Button {
+                            text: "Clear";
+                            width: 55px;
+                            clicked => { root.recording-id = ""; root.save-shortcut(shortcut.id, ""); }
+                        }
+                    }
+                }
+            }
+            Text { text: root.global-status; color: Palette.foreground; wrap: word-wrap; }
+            Text { text: root.error-message; color: #b93535; wrap: word-wrap; }
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "Toge";
     preferred-width: 900px; preferred-height: 580px;
@@ -113,7 +190,9 @@ export component AppWindow inherits Window {
     callback row-clicked(int);
     callback about();
     callback new-window();
+    callback shortcut-action(string, bool, bool, bool, bool) -> string;
     forward-focus: search;
+    public function focus-search() { search.focus(); }
     public function select-row(index: int) {
         root.selection-anchor = -1;
         root.selected = index;
@@ -249,12 +328,12 @@ export component AppWindow inherits Window {
         // window, including the search field, without moving keyboard focus.
         capture-key-pressed(event) => {
             if (root.rename-row >= 0 || root.context-menu-open || root.delete-path != "" || root.rows.length == 0) { return reject; }
-            if (event.modifiers.control || event.modifiers.alt) { return reject; }
-            if (event.text == Key.DownArrow) {
+            let action = root.shortcut-action(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
+            if (action == "down") {
                 root.move-to(min(root.rows.length - 1, root.selected + 1), event.modifiers.shift);
                 return accept;
             }
-            if (event.text == Key.UpArrow) {
+            if (action == "up") {
                 if (root.selected > 0) { root.move-to(root.selected - 1, event.modifiers.shift); }
                 return accept;
             }
@@ -262,10 +341,11 @@ export component AppWindow inherits Window {
         }
         key-pressed(event) => {
             if (root.delete-path != "") { return reject; }
-            if (event.modifiers.control && event.text == "l") {
+            let action = root.shortcut-action(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
+            if (action == "focus-search") {
                 root.cancel-rename(false); search.focus(); search.select-all(); return accept;
             }
-            if (event.modifiers.control && event.text == "n") { root.new-window(); return accept; }
+            if (action == "new-window") { root.new-window(); return accept; }
             return reject;
         }
         VerticalLayout {
@@ -308,21 +388,19 @@ export component AppWindow inherits Window {
                 key-pressed(event) => {
                     // Let the inline field handle text shortcuts and Enter itself.
                     if (root.rename-path != "") { return reject; }
-                    if (event.text == Key.Return) { root.action("open"); return accept; }
-                    if (event.modifiers.control && event.text == "c") { root.action(event.modifiers.shift ? "copy-path" : "copy"); return accept; }
-                    if (event.modifiers.control && event.text == "x") { root.action("cut"); return accept; }
-                    if (event.text == Key.F2) { root.action("rename"); return accept; }
-                    if (event.text == Key.Delete) { root.action(event.modifiers.shift ? "delete-permanently" : "delete"); return accept; }
+                    let action = root.shortcut-action(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
+                    if (action == "open" || action == "copy" || action == "copy-path" || action == "cut" || action == "rename" || action == "delete" || action == "delete-permanently") {
+                        root.action(action); return accept;
+                    }
                     if (event.text == Key.Escape) { root.context-menu-open = false; return accept; }
-                    // StandardTableView handles only Up/Down itself.
                     if (root.rows.length > 0) {
-                        if (event.text == Key.Home) { root.move-to(0, event.modifiers.shift); return accept; }
-                        if (event.text == Key.End) { root.move-to(root.rows.length - 1, event.modifiers.shift); return accept; }
-                        if (event.text == Key.PageDown) {
+                        if (action == "home") { root.move-to(0, event.modifiers.shift); return accept; }
+                        if (action == "end") { root.move-to(root.rows.length - 1, event.modifiers.shift); return accept; }
+                        if (action == "page-down") {
                             root.move-to(min(root.rows.length - 1, max(0, root.selected) + self.page-rows), event.modifiers.shift);
                             return accept;
                         }
-                        if (event.text == Key.PageUp) {
+                        if (action == "page-up") {
                             root.move-to(max(0, root.selected - self.page-rows), event.modifiers.shift);
                             return accept;
                         }

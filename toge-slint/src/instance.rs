@@ -12,6 +12,8 @@ pub enum Request {
     NewWindow,
     /// Hide the current window if it is visible, otherwise show it.
     Toggle,
+    /// Hide the current window if it is visible.
+    Hide,
 }
 
 impl Request {
@@ -20,6 +22,7 @@ impl Request {
             None => Some(Self::Show),
             Some("--new-window") => Some(Self::NewWindow),
             Some("--toggle") => Some(Self::Toggle),
+            Some("--hide") => Some(Self::Hide),
             Some(_) => None,
         }
     }
@@ -28,10 +31,11 @@ impl Request {
             Self::Show => "show",
             Self::NewWindow => "new-window",
             Self::Toggle => "toggle",
+            Self::Hide => "hide",
         }
     }
     fn parse(word: &str) -> Option<Self> {
-        [Self::Show, Self::NewWindow, Self::Toggle]
+        [Self::Show, Self::NewWindow, Self::Toggle, Self::Hide]
             .into_iter()
             .find(|request| request.word() == word)
     }
@@ -197,6 +201,7 @@ mod tests {
             Some(Request::NewWindow)
         );
         assert_eq!(Request::from_arg(Some("--toggle")), Some(Request::Toggle));
+        assert_eq!(Request::from_arg(Some("--hide")), Some(Request::Hide));
         assert_eq!(Request::from_arg(Some("--bogus")), None);
     }
 
