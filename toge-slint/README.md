@@ -160,11 +160,10 @@ Previews use installed tools:
 - Code colors: optional `bat` or `batcat`; no Rust syntax-parser dependency.
   Fontconfig (`fc-match`) selects the installed monospace font.
 
-The pane's Support button lists capabilities and missing tools. Tool availability
-is detected once per process; restart after installing another backend. Each
-backend is optional. Unsupported or unreadable files show a message; selected-file
-metadata stays in the footer. Enter or double-click opens the desktop's default
-viewer through `xdg-open`.
+Tool availability is detected once per process; restart after installing another
+backend. Each backend is optional. Unsupported or unreadable files show a message;
+selected-file metadata stays in the footer. Enter or double-click opens the
+desktop's default viewer through `xdg-open`.
 
 Conversion runs off the UI thread and cancels when selection changes. Source
 limits are 32 MiB for raster images, 4 MiB for SVG, and 64 MiB for PDFs and office

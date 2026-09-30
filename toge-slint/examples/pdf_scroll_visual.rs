@@ -259,7 +259,7 @@ fn main() -> Result<(), slint::PlatformError> {
             26 => { assert!(ui.get_preview_ready(), "{}", ui.get_preview_message()); select(&ui, 8); }
             28 => { assert!(ui.get_preview_ready(), "desktop thumbnail must preview an otherwise unsupported type"); select(&ui, 9); }
             30 => { assert!(!ui.get_preview_ready()); assert!(!ui.get_preview_message().is_empty()); select(&ui, 0); select(&ui, 1); select(&ui, 2); }
-            32 => { assert!(ui.get_preview_text_ready()); assert!(!ui.get_preview_pdf_active()); assert_eq!(ui.get_selected(), 2); println!("PASS: PDF size/resize/pages, code colors/focus/keyboard/scroll, text reset/wrap, XLSX/ODS, audio/art, SVG, desktop cache, errors and selection cancellation"); let size = ui.window().size().to_logical(ui.window().scale_factor()); click(&ui, size.width - 45.0, 90.0); }
+            32 => { assert!(ui.get_preview_text_ready()); assert!(!ui.get_preview_pdf_active()); assert_eq!(ui.get_selected(), 2); println!("PASS: PDF size/resize/pages, code colors/focus/keyboard/scroll, text reset/wrap, XLSX/ODS, audio/art, SVG, desktop cache, errors and selection cancellation"); }
             34 => { slint::quit_event_loop().unwrap(); }
             _ => {}
         }

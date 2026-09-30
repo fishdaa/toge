@@ -342,7 +342,6 @@ pub fn connect(ui: &crate::AppWindow) {
         }
     });
 
-    ui.set_preview_support(tools::support_summary().into());
     let weak_copy = ui.as_weak();
     ui.on_preview_copy_requested(move || {
         let Some(ui) = weak_copy.upgrade() else {

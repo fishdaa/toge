@@ -182,7 +182,6 @@ export component AppWindow inherits Window {
     out property <float> preview-character-width: glyph.preferred-width / 10px;
     out property <float> preview-text-scroll-x: text-scroll.viewport-x / 1px;
     out property <bool> preview-text-has-focus: text-focus.has-focus;
-    in property <string> preview-support;
     in property <bool> preview-audio-active: false;
     in property <string> preview-audio-details;
     out property <bool> preview-dark: Palette.color-scheme == ColorScheme.dark;
@@ -684,19 +683,6 @@ export component AppWindow inherits Window {
                                 font-size: 13px; font-weight: 600;
                                 color: Palette.foreground; overflow: elide;
                                 horizontal-stretch: 1;
-                            }
-                            Button { text: "Support"; clicked => { support-popup.show(); } }
-                        }
-                        support-popup := PopupWindow {
-                            width: 310px; height: 310px;
-                            Rectangle {
-                                background: Palette.background;
-                                border-width: 1px; border-color: Palette.foreground;
-                                VerticalLayout {
-                                    padding: 12px;
-                                    Text { text: root.preview-support; color: Palette.foreground; wrap: word-wrap; }
-                                    Button { text: "Close"; clicked => { support-popup.close(); } }
-                                }
                             }
                         }
                         if root.preview-pdf-active: Text {

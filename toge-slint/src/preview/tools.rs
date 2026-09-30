@@ -58,35 +58,6 @@ pub(super) fn available(name: &OsStr) -> bool {
         .unwrap_or(true)
 }
 
-pub(super) fn support_summary() -> String {
-    let has = |names: &[&str]| names.iter().any(|name| available(OsStr::new(name)));
-    let ffmpeg = has(&["ffmpeg"]) && has(&["ffprobe"]);
-    let status = |ready, missing| if ready { "Available" } else { missing };
-    format!(
-        "Preview support (detected at startup)\n\nImages: {}\nSVG: {}\nPDF: {}\nOffice layout: {}\nOffice text: {}\nSheets: {}\nAudio details / art: {}\nText: Available\nCode colors: {}",
-        status(
-            ffmpeg || has(&["magick", "convert", "gm"]),
-            "Install FFmpeg or ImageMagick"
-        ),
-        status(
-            has(&["resvg", "rsvg-convert", "magick", "convert", "gm"]),
-            "Depends on FFmpeg SVG codec"
-        ),
-        status(has(&["pdftoppm", "mutool"]), "Install Poppler or MuPDF"),
-        status(
-            has(&["soffice", "libreoffice", "lowriter"]) && has(&["pdftoppm", "mutool"]),
-            "Install LibreOffice and Poppler"
-        ),
-        status(
-            has(&["python3", "catdoc"]) || (has(&["unzip"]) && has(&["xmllint"])),
-            "Install Python 3 / catdoc"
-        ),
-        status(has(&["python3"]), "Install Python 3"),
-        status(ffmpeg, "Install FFmpeg"),
-        status(has(&["bat", "batcat"]), "Install bat (optional)")
-    )
-}
-
 fn png_reader(bytes: Vec<u8>) -> Result<png::Reader<Cursor<Vec<u8>>>, &'static str> {
     let mut decoder = png::Decoder::new_with_limits(
         Cursor::new(bytes),

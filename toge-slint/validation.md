@@ -509,6 +509,27 @@ a static stored image; it is not a live document editor.
   [office-thumbnail-preview.mp4](https://fedora.taila85941.ts.net:8952/office-thumbnail-preview.mp4).
   Frames, fixture, and logs are in `/tmp/toge-office-thumbnail-visual-20260929/`.
 
+## Remove preview Support button — 2026-09-30
+
+Removed the preview header's Support button, its popup and unused diagnostic
+summary. Updated the shared-UI fixture to stop opening the removed popup.
+
+- `cargo test --workspace --all-targets --locked`: 345 tests passed on rerun.
+  The first run hit a transient `Text file busy` error in an authentication test.
+- `python3 -m unittest discover -s scripts/tests`: 22 tests passed.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- Recorded the native shared Slint UI from startup through final assertions:
+  PDF selection/loading, pane resize, page scrolling, code focus and keyboard
+  input, horizontal scrolling, wrapping, text scroll reset, sheets, audio, SVG,
+  desktop thumbnails, errors and rapid selection changes. Assertions passed.
+- Inspected captured frames for header layout, clipping, focus, scroll position
+  and visible errors; the Support button is absent before and after selection.
+- [Recording](https://fedora.taila85941.ts.net:8960/remove-preview-support.mp4)
+  is tailnet only. Artifacts are ignored under
+  `visual-test-artifacts/remove-preview-support-20260930/`.
+- Environment: native Slint/Winit software rendering in a headless Wayland Cage
+  compositor with injected window input; physical desktop input was not tested.
+
 ## Pane-sized PDF, text and system previews — 2026-09-30
 
 PDFs now render one bitmap at the visible pane width multiplied by the window's
