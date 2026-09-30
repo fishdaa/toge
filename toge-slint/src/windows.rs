@@ -108,6 +108,7 @@ pub fn open() -> Result<AppWindow, slint::PlatformError> {
     });
     ui.on_about(show_about);
     ui.on_new_window(|| handle(Request::NewWindow));
+    crate::search_controls::connect(&ui);
     crate::preview::connect(&ui);
     let id = APP.with_borrow_mut(|app| {
         app.next_id += 1;
@@ -123,6 +124,7 @@ pub fn open() -> Result<AppWindow, slint::PlatformError> {
         let callback = move |text: slint::SharedString| {
             m.submit(text.to_string(), immediate);
             if let Some(ui) = weak.upgrade() {
+                crate::search_controls::sync(&ui, &text);
                 ui.set_busy(true);
                 ui.set_has_error(false);
                 ui.set_status("Searching…".into());

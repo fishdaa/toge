@@ -94,6 +94,13 @@ No Node, WebKit or Qt is needed for the Slint build. Runtime file actions use
 
 Type the existing query syntax (`ext:pdf`, `folder:`, `path:src`, etc.). Search is
 initially debounced by 100 ms; Enter in the search field submits immediately.
+The filter selector offers Everything, Files, Folders, Audio, Documents,
+Pictures, Video, and Archives. Choosing a preset replaces existing file-type
+filters while preserving the other query terms. Custom extension filters are
+shown as Custom. Case, Whole words, Path, and Regex controls edit the search text;
+typing the equivalent modifiers updates the controls. Quoted literals and
+quoted filter values are preserved. The controls wrap below the selector in
+narrow windows.
 The initial empty query lists indexed entries. Use Up/Down in the table, Enter
 or double-click to open, and Ctrl+L to return to the search field. Right-click a
 row for Open, Copy path, Open folder, Cut, Copy, Rename, Delete, and Delete

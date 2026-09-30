@@ -7,6 +7,7 @@ mod instance;
 mod model;
 mod preferences;
 mod preview;
+mod search_controls;
 mod shortcuts;
 mod tray;
 mod windows;

@@ -2,7 +2,7 @@
 
 use crate::index::{Entry, Index, contains_ignore_case, entry_id};
 use crate::query::{Query, RangeFilter, TextTerm};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 
 struct CompiledTerms {
     items: Vec<CompiledTerm>,
@@ -31,7 +31,10 @@ fn compile_terms(terms: &[TextTerm], match_case: bool) -> CompiledTerms {
             TextTerm::Substring(s) => CompiledTerm::Substring(cased(s)),
             TextTerm::Wildcard(p) => CompiledTerm::Wildcard(cased(p)),
             TextTerm::Regex(p) => CompiledTerm::Regex(
-                Regex::new(p).expect("regex patterns should be validated during query parsing"),
+                RegexBuilder::new(p)
+                    .case_insensitive(!match_case)
+                    .build()
+                    .expect("regex patterns should be validated during query parsing"),
             ),
             TextTerm::Not(inner) => CompiledTerm::Not(Box::new(
                 compile_terms(&[inner.as_ref().clone()], match_case)
@@ -60,11 +63,6 @@ impl QueryMatcher {
     }
 
     pub fn matches(&self, entry: &Entry) -> bool {
-        if let Some(exts) = &self.query.ext
-            && (entry.is_dir || !exts.iter().any(|ext| ext == entry.extension()))
-        {
-            return false;
-        }
         entry_matches(entry, &self.query, &self.compiled)
     }
 }
@@ -149,6 +147,39 @@ fn intersect_sorted_ids(left: &[u32], right: &[u32]) -> Vec<u32> {
 }
 
 fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool {
+    if let Some(exts) = &query.ext
+        && (entry.is_dir || !exts.iter().any(|ext| ext == entry.extension()))
+    {
+        return false;
+    }
+    if let Some(parent) = &query.parent_filter {
+        let actual = std::path::Path::new(&entry.path)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""));
+        let expected = std::path::Path::new(parent);
+        let matches = if query.match_case {
+            actual == expected
+        } else {
+            std::path::Path::new(&actual.to_string_lossy().to_lowercase())
+                == std::path::Path::new(&expected.to_string_lossy().to_lowercase())
+        };
+        if !matches {
+            return false;
+        }
+    }
+    if let Some(depth) = &query.depth {
+        let count = std::path::Path::new(&entry.path)
+            .parent()
+            .map_or(0, |parent| {
+                parent
+                    .components()
+                    .filter(|part| matches!(part, std::path::Component::Normal(_)))
+                    .count()
+            });
+        if !in_range(u64::try_from(count).unwrap_or(u64::MAX), depth) {
+            return false;
+        }
+    }
     if query.require_file && entry.is_dir {
         return false;
     }
@@ -212,6 +243,13 @@ fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool
     if let Some(attrs) = &query.attributes
         && attrs.dir.is_some()
         && attrs.dir != Some(entry.is_dir)
+    {
+        return false;
+    }
+    if let Some(attrs) = &query.attributes
+        && attrs
+            .hidden
+            .is_some_and(|hidden| hidden != entry.name().starts_with('.'))
     {
         return false;
     }

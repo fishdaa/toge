@@ -1,4 +1,4 @@
-import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette, ScrollView, ListView, Spinner } from "std-widgets.slint";
+import { VerticalBox, LineEdit, Button, CheckBox, ComboBox, StandardTableView, AboutSlint, Palette, ScrollView, ListView, Spinner } from "std-widgets.slint";
 
 export struct PreviewToken {
     text: string,
@@ -161,6 +161,14 @@ export component AppWindow inherits Window {
     title: "Toge";
     preferred-width: 900px; preferred-height: 580px;
     min-width: 560px; min-height: 300px;
+    in-out property <string> query-text <=> search.text;
+    in-out property <bool> match-case: false;
+    in-out property <bool> match-whole-word: false;
+    in-out property <bool> match-path: false;
+    in-out property <bool> regex-enabled: false;
+    in-out property <int> filter-preset: 0;
+    callback search-option(string, bool);
+    callback preset-selected(int);
     background: Palette.background;
     in property <[[StandardListViewItem]]> rows;
     in property <string> status: "Connecting to index…";
@@ -442,6 +450,44 @@ export component AppWindow inherits Window {
                         text: "Retry";
                         clicked => { root.submit(search.text); }
                     }
+                }
+            }
+            Rectangle {
+                height: root.width < 700px ? 84px : 44px;
+                ComboBox {
+                    x: 16px; y: 4px; width: 160px; height: 32px;
+                    model: ["Everything", "Files", "Folders", "Audio", "Documents", "Pictures", "Video", "Archives", "Custom"];
+                    current-index <=> root.filter-preset;
+                    accessible-label: "File type filter";
+                    enabled: !root.rename-working;
+                    selected(value) => { root.cancel-rename(false); root.preset-selected(self.current-index); }
+                }
+                HorizontalLayout {
+                    x: root.width < 700px ? 16px : 196px;
+                    y: root.width < 700px ? 44px : 4px;
+                    width: parent.width - self.x - 16px; height: 32px;
+                    spacing: 12px;
+                    CheckBox {
+                        text: "Case"; accessible-label: "Match case";
+                        checked <=> root.match-case; enabled: !root.rename-working;
+                        toggled => { root.cancel-rename(false); root.search-option("case", self.checked); }
+                    }
+                    CheckBox {
+                        text: "Whole words"; accessible-label: "Match whole words";
+                        checked <=> root.match-whole-word; enabled: !root.rename-working;
+                        toggled => { root.cancel-rename(false); root.search-option("ww", self.checked); }
+                    }
+                    CheckBox {
+                        text: "Path"; accessible-label: "Match full path";
+                        checked <=> root.match-path; enabled: !root.rename-working;
+                        toggled => { root.cancel-rename(false); root.search-option("path", self.checked); }
+                    }
+                    CheckBox {
+                        text: "Regex"; accessible-label: "Use regular expressions";
+                        checked <=> root.regex-enabled; enabled: !root.rename-working;
+                        toggled => { root.cancel-rename(false); root.search-option("regex", self.checked); }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
                 }
             }
             Rectangle { height: 1px; background: Palette.foreground; opacity: 0.10; }

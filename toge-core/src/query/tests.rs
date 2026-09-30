@@ -1,6 +1,80 @@
 use super::*;
 
 #[test]
+fn quoted_filter_values_and_literal_modifiers_are_distinct() {
+    let query = Query::parse("parent:\"/My Files\" \"folder:\" \"two words\"").unwrap();
+    assert_eq!(query.parent_filter.as_deref(), Some("/My Files"));
+    assert!(!query.require_folder);
+    assert_eq!(
+        query.terms,
+        vec![
+            TextTerm::Substring("folder:".into()),
+            TextTerm::Substring("two words".into())
+        ]
+    );
+    assert!(
+        Query::parse("parent:\"/My Files")
+            .unwrap_err()
+            .to_string()
+            .contains("unterminated")
+    );
+    for name in ["parent", "infolder", "nosubfolders"] {
+        assert_eq!(
+            Query::parse(&format!("{name}:/tmp"))
+                .unwrap()
+                .parent_filter
+                .as_deref(),
+            Some("/tmp")
+        );
+        assert!(Query::parse(&format!("{name}:")).is_err());
+    }
+}
+
+#[test]
+fn unsupported_filters_and_attributes_report_errors() {
+    for raw in [
+        "child:foo",
+        "empty:",
+        "diacritics:",
+        "attrib:R",
+        "attrib:S",
+        "attrib:X",
+        "attrib:",
+        "ext:",
+    ] {
+        assert!(Query::parse(raw).is_err(), "silently accepted {raw}");
+    }
+    let attributes = Query::parse("attrib:dh").unwrap().attributes.unwrap();
+    assert_eq!(attributes.dir, Some(true));
+    assert_eq!(attributes.hidden, Some(true));
+}
+
+#[test]
+fn depth_filters_validate_ranges_and_overflow() {
+    for (raw, min, max) in [
+        ("depth:2", Some(2), Some(2)),
+        ("parents:2..4", Some(2), Some(4)),
+        ("depth:>2", Some(3), None),
+        ("depth:<=2", None, Some(2)),
+    ] {
+        assert_eq!(
+            Query::parse(raw).unwrap().depth,
+            Some(RangeFilter { min, max })
+        );
+    }
+    for raw in [
+        "depth:",
+        "depth:<0",
+        "depth:4-2",
+        "depth:>18446744073709551615",
+        "depth:-1",
+        "depth:1mb",
+    ] {
+        assert!(Query::parse(raw).is_err(), "accepted invalid range: {raw}");
+    }
+}
+
+#[test]
 fn test_parse_simple_substring() {
     let q = Query::parse("foo").unwrap();
     assert_eq!(q.mode, SearchMode::Substring);

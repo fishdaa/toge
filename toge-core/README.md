@@ -61,6 +61,22 @@ cargo run --release --example profile -p toge-core -- insert
 
 For the broader project overview, see the repository root [README.md](../README.md).
 
+## Search filters
+
+`parent:/path` (also `infolder:` or `nosubfolders:`) matches entries directly in
+that folder, excluding descendants. Quote paths containing spaces, for example
+`parent:"/home/user/My Files"`. `depth:` (also `parents:`) counts parent directory
+components below `/`: `/file.txt` has depth 0 and `/home/user/file.txt` has depth 2.
+It accepts a count, ranges such as `2..4`, and comparisons such as `>=2`.
+`attrib:D` selects directories and `attrib:H` selects names beginning with a dot;
+`attrib:DH` selects hidden directories. Extension filters exclude directories.
+
+`child:`, `empty:`, `diacritics:`, and readonly/system attribute filters return
+explicit unsupported-filter errors. The current index does not store the
+information needed to evaluate them reliably. Empty extension filters and
+unterminated quoted values also return errors. Regex matching respects `case:`
+and `nocase:`.
+
 ## Streaming queries
 
 For a local index, `matcher::iter_query` yields IDs lazily in index order:

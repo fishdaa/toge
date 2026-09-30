@@ -29,6 +29,8 @@ pub struct Query {
     pub terms: Vec<TextTerm>,
     pub ext: Option<Vec<String>>,
     pub path_filter: Option<String>,
+    pub parent_filter: Option<String>,
+    pub depth: Option<RangeFilter<u64>>,
     pub size: Option<RangeFilter<u64>>,
     pub date_modified: Option<RangeFilter<i64>>,
     pub date_created: Option<RangeFilter<i64>>,
@@ -94,6 +96,8 @@ impl Default for Query {
             terms: Vec::new(),
             ext: None,
             path_filter: None,
+            parent_filter: None,
+            depth: None,
             size: None,
             date_modified: None,
             date_created: None,
@@ -113,7 +117,7 @@ impl Query {
             ..Self::default()
         };
 
-        let tokens = tokenize(input);
+        let tokens = tokenize(input)?;
         for token in tokens {
             match token {
                 Token::Modifier(name, value) => apply_modifier(&mut query, &name, &value)?,
@@ -135,42 +139,52 @@ enum Token {
     Macro(String),
 }
 
-fn tokenize(input: &str) -> Vec<Token> {
+fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
     let mut tokens = Vec::new();
     let mut chars = input.chars().peekable();
     let mut current = String::new();
+    let mut literal = false;
 
     while let Some(c) = chars.next() {
         match c {
             ' ' | '\t' | '\n' | '\r' => {
                 if !current.is_empty() {
-                    tokens.push(classify_token(&current));
+                    tokens.push(if literal {
+                        Token::Text(current.clone())
+                    } else {
+                        classify_token(&current)
+                    });
                     current.clear();
+                    literal = false;
                 }
             }
             '"' => {
-                if !current.is_empty() {
-                    tokens.push(classify_token(&current));
-                    current.clear();
-                }
-                let mut quoted = String::new();
+                literal |= current.is_empty();
+                let mut closed = false;
                 for qc in chars.by_ref() {
                     if qc == '"' {
+                        closed = true;
                         break;
                     }
-                    quoted.push(qc);
+                    current.push(qc);
                 }
-                tokens.push(Token::Text(quoted));
+                if !closed {
+                    return Err(ParseError("unterminated quoted search term".into()));
+                }
             }
             _ => current.push(c),
         }
     }
 
     if !current.is_empty() {
-        tokens.push(classify_token(&current));
+        tokens.push(if literal {
+            Token::Text(current)
+        } else {
+            classify_token(&current)
+        });
     }
 
-    tokens
+    Ok(tokens)
 }
 
 fn classify_token(s: &str) -> Token {
@@ -218,6 +232,8 @@ fn is_function(name: &str) -> bool {
         name,
         "ext"
             | "parent"
+            | "infolder"
+            | "nosubfolders"
             | "size"
             | "dm"
             | "dc"
@@ -225,6 +241,7 @@ fn is_function(name: &str) -> bool {
             | "attrib"
             | "child"
             | "depth"
+            | "parents"
             | "empty"
             | "sort"
     )
@@ -260,7 +277,7 @@ fn apply_modifier(query: &mut Query, name: &str, value: &str) -> Result<(), Pars
         "nowildcards" | "noregex" => query.mode = SearchMode::Substring,
         "wholefilename" => query.whole_filename = true,
         "nowholefilename" => query.whole_filename = false,
-        _ => {}
+        _ => return Err(ParseError(format!("unsupported search modifier: {name}:"))),
     }
     Ok(())
 }
@@ -273,17 +290,25 @@ fn apply_function(query: &mut Query, name: &str, value: &str) -> Result<(), Pars
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty())
                 .collect();
-            if !exts.is_empty() {
-                query.ext = Some(exts);
+            if exts.is_empty() {
+                return Err(ParseError("ext: requires at least one extension".into()));
             }
+            query.ext = Some(exts);
         }
+        "parent" | "infolder" | "nosubfolders" => {
+            if value.is_empty() {
+                return Err(ParseError(format!("{name}: requires a folder path")));
+            }
+            query.parent_filter = Some(value.to_string());
+        }
+        "depth" | "parents" => query.depth = Some(parse_depth(value)?),
         "size" => query.size = Some(parse_size(value)?),
         "dm" => query.date_modified = Some(parse_date(value)?),
         "dc" => query.date_created = Some(parse_date(value)?),
         "da" => query.date_accessed = Some(parse_date(value)?),
-        "attrib" => query.attributes = Some(parse_attributes(value)),
+        "attrib" => query.attributes = Some(parse_attributes(value)?),
         "sort" => query.sort = parse_sort(value)?,
-        _ => {}
+        _ => return Err(ParseError(format!("unsupported search filter: {name}:"))),
     }
     Ok(())
 }
@@ -315,10 +340,10 @@ fn parse_sort(value: &str) -> Result<Sort, ParseError> {
 fn apply_macro(query: &mut Query, name: &str) {
     let exts = match name {
         "audio" => "aac;ac3;aiff;flac;m4a;mid;midi;mp3;ogg;ra;wav;wma",
-        "doc" => "doc;docx;xls;xlsx;ppt;pptx;pdf;txt;rtf;csv",
+        "doc" => "doc;docx;odt;ods;odp;xls;xlsx;ppt;pptx;pdf;txt;rtf;csv;epub",
         "exe" => "exe;com;bat;cmd;msi;scr;pif",
-        "pic" => "bmp;gif;ico;jpg;jpeg;png;psd;svg;tif;tiff;webp",
-        "video" => "avi;flv;m4v;mkv;mov;mp4;mpeg;mpg;wmv",
+        "pic" => "avif;bmp;gif;heic;heif;ico;jpg;jpeg;png;psd;svg;tif;tiff;webp",
+        "video" => "avi;flv;m4v;mkv;mov;mp4;mpeg;mpg;webm;wmv",
         "zip" => "7z;cab;bz2;gz;rar;tar;tgz;zip",
         _ => return,
     };
@@ -532,23 +557,71 @@ fn end_of_day(ts: i64) -> i64 {
     start_of_day(ts) + 86400 - 1
 }
 
-fn parse_attributes(value: &str) -> AttributeFilter {
+fn parse_depth(value: &str) -> Result<RangeFilter<u64>, ParseError> {
+    let number = |text: &str| {
+        text.parse::<u64>()
+            .map_err(|_| ParseError(format!("invalid depth: {value}")))
+    };
+    let value = value.trim();
+    let (min, max) =
+        if let Some((min, max)) = value.split_once("..").or_else(|| value.split_once('-')) {
+            (Some(number(min)?), Some(number(max)?))
+        } else if let Some(rest) = value.strip_prefix(">=") {
+            (Some(number(rest)?), None)
+        } else if let Some(rest) = value.strip_prefix("<=") {
+            (None, Some(number(rest)?))
+        } else if let Some(rest) = value.strip_prefix('>') {
+            (
+                Some(
+                    number(rest)?
+                        .checked_add(1)
+                        .ok_or_else(|| ParseError("depth is too large".into()))?,
+                ),
+                None,
+            )
+        } else if let Some(rest) = value.strip_prefix('<') {
+            (
+                None,
+                Some(
+                    number(rest)?
+                        .checked_sub(1)
+                        .ok_or_else(|| ParseError("depth cannot be less than zero".into()))?,
+                ),
+            )
+        } else {
+            let count = number(value)?;
+            (Some(count), Some(count))
+        };
+    if matches!((min, max), (Some(min), Some(max)) if min > max) {
+        return Err(ParseError("depth range is reversed".into()));
+    }
+    Ok(RangeFilter { min, max })
+}
+
+fn parse_attributes(value: &str) -> Result<AttributeFilter, ParseError> {
     let mut filter = AttributeFilter {
         dir: None,
         hidden: None,
         readonly: None,
         system: None,
     };
+    if value.is_empty() {
+        return Err(ParseError(
+            "attrib: requires D (directory) or H (hidden)".into(),
+        ));
+    }
     for c in value.to_uppercase().chars() {
         match c {
             'D' => filter.dir = Some(true),
             'H' => filter.hidden = Some(true),
-            'R' => filter.readonly = Some(true),
-            'S' => filter.system = Some(true),
-            _ => {}
+            _ => {
+                return Err(ParseError(format!(
+                    "unsupported attribute: {c}; supported attributes are D (directory) and H (hidden)"
+                )));
+            }
         }
     }
-    filter
+    Ok(filter)
 }
 
 fn validate_regex(pattern: &str) -> Result<(), ParseError> {
