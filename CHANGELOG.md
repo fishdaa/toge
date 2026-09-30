@@ -11,6 +11,12 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 - The unused `exclude_fstypes` (`[roots]`) and `interval_secs` (`[polling]`) config options. Existing config files that set them still load; the values are ignored.
 - The CLI flags `-pause`/`-more` and `-config`, which were parsed but had no effect. Passing them is now an unknown-flag error.
 
+## [0.2.1] - 2026-09-28
+
+### Fixed
+
+- fix: reject unrepresentable index paths and enable pedantic clippy lints (#36)
+
 ## [0.2.0] - 2026-09-27
 
 ### Added
@@ -136,7 +142,8 @@ This version was released without a Git tag.
 - Initial public workspace structure for `needle-core`, `needled`, and `ndl`
 - Initial open source project scaffolding
 
-[Unreleased]: https://github.com/fishdaa/needle/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/fishdaa/needle/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/fishdaa/needle/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/fishdaa/needle/compare/v0.1.16...v0.2.0
 [0.1.16]: https://github.com/fishdaa/needle/compare/v0.1.15...v0.1.16
 [0.1.15]: https://github.com/fishdaa/needle/compare/v0.1.14...v0.1.15
