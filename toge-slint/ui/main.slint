@@ -1,5 +1,16 @@
 import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette, ScrollView, ListView, Spinner } from "std-widgets.slint";
 
+export struct PreviewToken {
+    text: string,
+    column: int,
+    color: color,
+}
+export struct PreviewLine {
+    number: int,
+    text: string,
+    tokens: [PreviewToken],
+}
+
 export struct ShortcutEntry {
     id: string,
     label: string,
@@ -161,9 +172,21 @@ export component AppWindow inherits Window {
     in property <bool> preview-text-ready: false;
     in property <bool> preview-video-active: false;
     in property <int> preview-video-frame: 0;
-    // Short text chunks: the software renderer uses i16 coordinates, so one
-    // Text item taller than about 32k physical pixels would overflow.
-    in property <[string]> preview-text;
+    in property <[PreviewLine]> preview-text;
+    in property <int> preview-text-columns: 0;
+    in property <string> preview-text-label;
+    in property <string> preview-font-family: "DejaVu Sans Mono";
+    in property <string> preview-copy-text;
+    out property <float> preview-text-scroll-y: text-scroll.viewport-y / 1px;
+    out property <float> preview-text-content-width: text-scroll.viewport-width / 1px;
+    out property <float> preview-character-width: glyph.preferred-width / 10px;
+    out property <float> preview-text-scroll-x: text-scroll.viewport-x / 1px;
+    out property <bool> preview-text-has-focus: text-focus.has-focus;
+    in property <string> preview-support;
+    in property <bool> preview-audio-active: false;
+    in property <string> preview-audio-details;
+    out property <bool> preview-dark: Palette.color-scheme == ColorScheme.dark;
+    in-out property <bool> preview-wrap: true;
     in property <string> preview-message: "Select a file";
     in property <bool> preview-pdf-active: false;
     in property <int> preview-pdf-page: 1;
@@ -171,18 +194,15 @@ export component AppWindow inherits Window {
     in property <int> preview-pdf-rendered-page: 0;
     in property <image> preview-pdf-previous-image;
     in property <image> preview-pdf-next-image;
-    in property <image> preview-pdf-fit-image;
-    in property <image> preview-pdf-previous-fit-image;
-    in property <image> preview-pdf-next-fit-image;
     in property <bool> preview-pdf-previous-ready: false;
     in property <bool> preview-pdf-next-ready: false;
-    // 0 fits the page to the panel; 100 displays it near native size.
-    in-out property <int> preview-pdf-zoom: 0;
-    changed preview-pdf-zoom => {
-        pdf-scroll.viewport-y = -(root.preview-pdf-page - 1) * pdf-scroll.page-height;
-        pdf-scroll.viewport-x = 0px;
-    }
     in-out property <length> preview-width: 300px;
+    out property <float> preview-pdf-width: pdf-scroll.page-width / 1px;
+    changed preview-pdf-width => {
+        if root.preview-pdf-active {
+            root.preview-pdf-resized(root.selected-preview-path, root.preview-pdf-page);
+        }
+    }
     changed width => {
         if (root.width >= 560px) { root.preview-width = min(root.preview-width, root.width - 220px); }
     }
@@ -198,6 +218,8 @@ export component AppWindow inherits Window {
     changed selected-preview-path => {
         pdf-scroll.viewport-y = 0px;
         pdf-scroll.viewport-x = 0px;
+        text-scroll.viewport-y = 0px;
+        text-scroll.viewport-x = 0px;
         root.preview-requested(root.selected-preview-path, 1);
     }
     private property <bool> has-range: root.selection-anchor >= 0 && root.selected >= 0 && root.range-end > root.range-start;
@@ -227,6 +249,8 @@ export component AppWindow inherits Window {
     callback row-clicked(int);
     callback preview-requested(string, int);
     callback preview-pdf-scrolled(string, float);
+    callback preview-pdf-resized(string, int);
+    callback preview-copy-requested();
     callback about();
     callback new-window();
     callback shortcut-action(string, bool, bool, bool, bool) -> string;
@@ -366,7 +390,7 @@ export component AppWindow inherits Window {
         // Up/Down step through results from anywhere in the
         // window, including the search field, without moving keyboard focus.
         capture-key-pressed(event) => {
-            if (root.rename-row >= 0 || root.context-menu-open || root.delete-path != "" || root.rows.length == 0) { return reject; }
+            if (root.rename-row >= 0 || root.context-menu-open || root.delete-path != "" || root.rows.length == 0 || root.preview-text-has-focus) { return reject; }
             let action = root.shortcut-action(event.text, event.modifiers.control, event.modifiers.alt, event.modifiers.shift, event.modifiers.meta);
             if (action == "down") {
                 root.move-to(min(root.rows.length - 1, root.selected + 1), event.modifiers.shift);
@@ -653,55 +677,62 @@ export component AppWindow inherits Window {
                     VerticalLayout {
                         padding: 12px;
                         spacing: 10px;
-                        Text {
-                            text: root.selected-details-visible ? root.rows[root.selected][0].text : "Preview";
-                            font-size: 13px; font-weight: 600;
-                            color: Palette.foreground;
-                            overflow: elide;
-                        }
-                        if root.preview-pdf-active: HorizontalLayout {
-                            spacing: 4px;
+                        HorizontalLayout {
+                            spacing: 8px;
                             Text {
+                                text: root.selected-details-visible ? root.rows[root.selected][0].text : "Preview";
+                                font-size: 13px; font-weight: 600;
+                                color: Palette.foreground; overflow: elide;
                                 horizontal-stretch: 1;
-                                text: root.preview-pdf-pages > 0
-                                    ? "Page " + root.preview-pdf-page + " of " + root.preview-pdf-pages
-                                    : "PDF preview";
-                                font-size: 12px;
-                                color: Palette.foreground;
-                                opacity: 0.65;
-                                vertical-alignment: center;
                             }
-                            Button {
-                                text: "−";
-                                width: 30px;
-                                enabled: root.preview-pdf-zoom > 50;
-                                clicked => {
-                                    root.preview-pdf-zoom = root.preview-pdf-zoom == 0 ? 50 : max(50, root.preview-pdf-zoom - 25);
+                            Button { text: "Support"; clicked => { support-popup.show(); } }
+                        }
+                        support-popup := PopupWindow {
+                            width: 310px; height: 310px;
+                            Rectangle {
+                                background: Palette.background;
+                                border-width: 1px; border-color: Palette.foreground;
+                                VerticalLayout {
+                                    padding: 12px;
+                                    Text { text: root.preview-support; color: Palette.foreground; wrap: word-wrap; }
+                                    Button { text: "Close"; clicked => { support-popup.close(); } }
                                 }
                             }
+                        }
+                        if root.preview-pdf-active: Text {
+                            text: root.preview-pdf-pages > 0
+                                ? "Page " + root.preview-pdf-page + " of " + root.preview-pdf-pages
+                                : "PDF preview";
+                            font-size: 12px;
+                            color: Palette.foreground;
+                            opacity: 0.65;
+                        }
+                        if root.preview-text-ready: HorizontalLayout {
                             Text {
-                                text: root.preview-pdf-zoom == 0 ? "Fit" : root.preview-pdf-zoom + "%";
+                                text: root.preview-text-label;
+                                horizontal-stretch: 1;
                                 font-size: 12px;
                                 color: Palette.foreground;
-                                vertical-alignment: center;
+                                overflow: elide;
                             }
+                            Button { text: "Copy"; clicked => { root.preview-copy-requested(); } }
                             Button {
-                                text: "+";
-                                width: 30px;
-                                enabled: root.preview-pdf-zoom < 150;
-                                clicked => { root.preview-pdf-zoom = root.preview-pdf-zoom == 0 ? 100 : min(150, root.preview-pdf-zoom + 25); }
+                                text: root.preview-wrap ? "Wrap: on" : "Wrap: off";
+                                clicked => { root.preview-wrap = !root.preview-wrap; }
                             }
-                            Button {
-                                text: "Fit";
-                                width: 38px;
-                                enabled: root.preview-pdf-zoom != 0;
-                                clicked => { root.preview-pdf-zoom = 0; }
-                            }
+                        }
+                        if root.preview-audio-active: Text {
+                            text: root.preview-audio-details;
+                            font-size: 12px;
+                            color: Palette.foreground;
+                            wrap: word-wrap;
                         }
                         if root.preview-video-active: Text {
                             text: root.preview-video-frame > 0
                                 ? "Video frames · " + root.preview-video-frame + " / 5"
-                                : "Video frames";
+                                : root.preview-ready
+                                    ? "First frame · " + root.preview-message
+                                    : "Video frames";
                             font-size: 12px;
                             color: Palette.foreground;
                             overflow: elide;
@@ -719,9 +750,7 @@ export component AppWindow inherits Window {
                             pdf-scroll := ScrollView {
                                 width: parent.width; height: parent.height;
                                 visible: root.preview-pdf-active;
-                                private property <length> page-width: root.preview-pdf-zoom == 0
-                                    ? max(1px, self.visible-width - 16px)
-                                    : 900px * root.preview-pdf-zoom / 100;
+                                private property <length> page-width: max(1px, self.visible-width - 16px);
                                 // Reserve the tallest loaded page so the image cannot overlap the next slot.
                                 private property <length> page-height: max(self.visible-height,
                                     max(self.page-width * root.preview-image.height / max(1, root.preview-image.width),
@@ -740,8 +769,7 @@ export component AppWindow inherits Window {
                                     width: pdf-scroll.page-width;
                                     height: max(1px, self.source.height * self.width / max(1, self.source.width));
                                     visible: root.preview-pdf-previous-ready;
-                                    source: root.preview-pdf-zoom == 0
-                                        ? root.preview-pdf-previous-fit-image : root.preview-pdf-previous-image;
+                                    source: root.preview-pdf-previous-image;
                                     image-fit: contain;
                                     image-rendering: smooth;
                                 }
@@ -751,8 +779,7 @@ export component AppWindow inherits Window {
                                     width: pdf-scroll.page-width;
                                     height: max(1px, self.source.height * self.width / max(1, self.source.width));
                                     visible: root.preview-ready;
-                                    source: root.preview-pdf-zoom == 0
-                                        ? root.preview-pdf-fit-image : root.preview-image;
+                                    source: root.preview-image;
                                     image-fit: contain;
                                     image-rendering: smooth;
                                 }
@@ -762,8 +789,7 @@ export component AppWindow inherits Window {
                                     width: pdf-scroll.page-width;
                                     height: max(1px, self.source.height * self.width / max(1, self.source.width));
                                     visible: root.preview-pdf-next-ready;
-                                    source: root.preview-pdf-zoom == 0
-                                        ? root.preview-pdf-next-fit-image : root.preview-pdf-next-image;
+                                    source: root.preview-pdf-next-image;
                                     image-fit: contain;
                                     image-rendering: smooth;
                                 }
@@ -785,16 +811,76 @@ export component AppWindow inherits Window {
                                     wrap: word-wrap;
                                 }
                             }
-                            if root.preview-text-ready: ListView {
+                            glyph := Text {
+                                text: "0000000000"; font-family: root.preview-font-family;
+                                font-size: 13px; visible: false;
+                            }
+                            text-focus := FocusScope {
                                 width: parent.width; height: parent.height;
-                                for chunk in root.preview-text: Text {
-                                    x: 12px;
-                                    width: parent.width - 36px;
-                                    text: chunk;
-                                    font-family: "monospace";
-                                    font-size: 12px;
-                                    color: Palette.foreground;
-                                    wrap: word-wrap;
+                                visible: root.preview-text-ready;
+                                key-pressed(event) => {
+                                    if event.modifiers.control && (event.text == "c" || event.text == "C") {
+                                        root.preview-copy-requested(); return accept;
+                                    }
+                                    if event.text == Key.Home {
+                                        text-scroll.viewport-y = 0px; text-scroll.viewport-x = 0px; return accept;
+                                    }
+                                    if event.text == Key.End {
+                                        text-scroll.viewport-y = min(0px, text-scroll.visible-height - text-scroll.viewport-height); return accept;
+                                    }
+                                    if event.text == Key.DownArrow || event.text == Key.PageDown {
+                                        text-scroll.viewport-y = max(min(0px, text-scroll.visible-height - text-scroll.viewport-height), text-scroll.viewport-y - (event.text == Key.PageDown ? text-scroll.visible-height : 22px)); return accept;
+                                    }
+                                    if event.text == Key.UpArrow || event.text == Key.PageUp {
+                                        text-scroll.viewport-y = min(0px, text-scroll.viewport-y + (event.text == Key.PageUp ? text-scroll.visible-height : 22px)); return accept;
+                                    }
+                                    if event.text == Key.LeftArrow || event.text == Key.RightArrow {
+                                        text-scroll.viewport-x = min(0px, max(min(0px, text-scroll.visible-width - text-scroll.viewport-width), text-scroll.viewport-x + (event.text == Key.LeftArrow ? 40px : -40px))); return accept;
+                                    }
+                                    return reject;
+                                }
+                                text-scroll := ListView {
+                                    width: parent.width; height: parent.height;
+                                    visible: root.preview-text-ready;
+                                    viewport-width: root.preview-wrap ? self.visible-width
+                                        : max(self.visible-width, 60px + root.preview-text-columns * glyph.preferred-width / 10);
+                                    for line in root.preview-text: HorizontalLayout {
+                                        spacing: 0px;
+                                        width: root.preview-wrap ? text-scroll.visible-width : max(text-scroll.visible-width, 60px + root.preview-text-columns * glyph.preferred-width / 10);
+                                        height: root.preview-wrap ? max(22px, plain.height + 4px) : 22px;
+                                        Rectangle {
+                                            // ListView uses the row layout's minimum width for horizontal scrolling.
+                                            min-width: root.preview-wrap ? 0px : 60px + root.preview-text-columns * glyph.preferred-width / 10;
+                                            Text {
+                                                x: 4px; width: 40px; height: parent.height;
+                                                text: line.number > 0 ? line.number : "";
+                                                horizontal-alignment: right;
+                                                vertical-alignment: top;
+                                                font-family: root.preview-font-family; font-size: 13px;
+                                                color: Palette.foreground; opacity: 0.4;
+                                            }
+                                            plain := Text {
+                                                x: 56px; width: parent.width - 64px;
+                                                text: line.text;
+                                                visible: root.preview-wrap;
+                                                font-family: root.preview-font-family; font-size: 13px;
+                                                color: Palette.foreground;
+                                                wrap: word-wrap;
+                                            }
+                                            TouchArea {
+                                                width: parent.width; height: parent.height;
+                                                clicked => { text-focus.focus(); }
+                                            }
+                                            for token in line.tokens: Text {
+                                                x: 56px + token.column * glyph.preferred-width / 10;
+                                                y: 0px;
+                                                text: token.text;
+                                                visible: !root.preview-wrap;
+                                                font-family: root.preview-font-family; font-size: 13px;
+                                                color: token.color;
+                                            }
+                                        }
+                                    }
                                 }
                             }
                             if !root.preview-ready && !root.preview-text-ready && !root.preview-pdf-active: Text {

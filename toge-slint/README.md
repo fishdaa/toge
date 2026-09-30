@@ -107,42 +107,70 @@ without the filesystem watcher. Click **toge** at the top left to open About.
 Clicking a row moves keyboard focus to the table. Up/Down, PageUp/PageDown and
 Home/End then move the selection, loading distant rows as needed.
 
-The resizable right pane previews common images, SVG, the first page of a
-PDF, and DOC, DOCX, ODT, and RTF documents. Text, Markdown, logs, CSV, JSON,
-configuration, and source files use a scrollable, read-only text view. Videos
-(including MP4, MKV, WebM, MOV, and AVI) show five randomly sampled still
-frames in a repeating cycle. The frame loop stops when selecting another file
-or hiding the window. GIFs show one frame. Additional image codecs such as AVIF and HEIC work when an
-installed renderer supports them. Unsupported or unreadable files show a
-message; selected-file metadata stays in the footer.
+The resizable right pane previews common images, SVG, PDF pages, and DOC,
+DOCX, ODT, and RTF documents. PDFs render at the viewport's physical pixel
+width, including display scaling, and re-render after resizing settles.
+The visible page appears before adjacent pages are prefetched. Scroll through
+pages; there are no zoom or Fit controls.
 
-Previews use installed tools instead of format-specific Rust dependencies:
+Text and code show line numbers and preserve indentation. Code starts with
+wrapping off and supports horizontal scrolling; prose starts with wrapping on.
+Use the Wrap button to switch, and Copy to copy the preview text. Click inside
+the text pane for arrow keys, PageUp/PageDown, Home/End, and Ctrl+C. Selecting
+another file resets both scroll directions. Optional `bat`/`batcat` supplies
+syntax colors; without it the same view shows plain text. Source text is bounded
+to 64 KiB; displayed lines are bounded to 1,024 columns, with a truncation label.
 
-- Images and SVG: FFmpeg (`ffprobe` and `ffmpeg`), then ImageMagick (`magick`
-  or `convert`) or GraphicsMagick (`gm`).
-- Video stills: FFmpeg (`ffprobe` and `ffmpeg`) decodes five frames once,
-  within 640 × 640 pixels, and cycles those images. Audio is not decoded.
-  Large video files can be previewed without the image source-size
-  limit. Supported codecs depend on the installed FFmpeg build. A finite
-  duration and source dimensions within the image pixel limits are required.
-  If FFmpeg is unavailable, open the file in mpv, VLC, or your desktop's
-  default video player (Enter or double-click). Those players run separately.
-- PDFs: Poppler (`pdftoppm`), then MuPDF (`mutool`).
-- Embedded office thumbnails: `gsf-office-thumbnailer` for DOC, DOCX, and ODT
-  when the file contains a usable preview image. Blank or missing thumbnails
-  fall through to the next backend.
+XLSX and ODS show bounded sheet data using Python 3's standard library: up to
+eight sheets, 200 rows and 30 columns per sheet. The view shows stored values,
+not recalculated formulas or original cell formatting. LibreOffice page rendering
+is a fallback when data extraction fails.
+
+Audio files show FFprobe metadata and embedded artwork, without playback.
+Videos (including MP4, MKV, WebM, MOV, and AVI) show five sampled still frames in
+a repeating cycle. The first frame appears before duration inspection and sample
+seeking; it remains visible if sampling fails. The loop stops when selecting another file or hiding the
+window. GIFs show one frame. Additional image codecs such as AVIF and HEIC work
+when an installed renderer supports them.
+
+Existing freedesktop thumbnails under `$XDG_CACHE_HOME/thumbnails` (normally
+`~/.cache/thumbnails`) appear before a fresh render. The cache reader validates
+`Thumb::URI`, `Thumb::MTime`, and optional source size, and tries the largest
+available thumbnail first. It also handles otherwise unsupported file types
+when a valid thumbnail exists. PDF cache images apply only to page one and must
+be at least as wide as the viewport. Toge reads this cache without modifying it.
+
+Previews use installed tools:
+
+- Images: FFmpeg (`ffprobe` and `ffmpeg`), then ImageMagick (`magick` or
+  `convert`) or GraphicsMagick (`gm`).
+- SVG: `resvg` or `rsvg-convert` first, then the image backends.
+- Video stills: FFmpeg decodes the first frame, then five samples once, within 640 × 640 pixels, and
+  cycles those images. Audio is not decoded. Large video files have no image
+  source-size limit; finite duration and bounded source dimensions are required.
+- Audio metadata and cover art: `ffprobe` and `ffmpeg`.
+- PDFs: Poppler (`pdftoppm`, with `pdfinfo` for page count), then MuPDF (`mutool`).
+- Embedded office thumbnails: `gsf-office-thumbnailer` for DOC, DOCX, and ODT.
+  Blank or missing thumbnails fall through to the next backend.
 - Office page layout: LibreOffice (`soffice`, `libreoffice`, or `lowriter`)
   converts to a temporary PDF for a first-page preview.
 - Office text when page rendering is unavailable: Python 3's standard library,
-  then `unzip` with `xmllint` for DOCX/ODT; `catdoc` for DOC/RTF. The
-  `unzip`/`xmllint` fallback may lose paragraph spacing.
+  then `unzip` with `xmllint` for DOCX/ODT; `catdoc` for DOC/RTF.
+- Sheet data: Python 3's standard library.
+- Code colors: optional `bat` or `batcat`; no Rust syntax-parser dependency.
+  Fontconfig (`fc-match`) selects the installed monospace font.
 
-Each backend is optional. The worker tries available alternatives and shows a
-missing-tool message if it cannot preview the selected type. Conversion runs
-off the UI thread and cancels when selection changes. Source limits are 32 MiB
-for raster images, 4 MiB for SVG, and 64 MiB for PDFs and office documents.
-Images fit within 1,200 × 1,200 pixels; text is limited to the first 64 KiB.
-Image/PDF rendering times out after eight seconds, office conversion after ten.
+The pane's Support button lists capabilities and missing tools. Tool availability
+is detected once per process; restart after installing another backend. Each
+backend is optional. Unsupported or unreadable files show a message; selected-file
+metadata stays in the footer. Enter or double-click opens the desktop's default
+viewer through `xdg-open`.
+
+Conversion runs off the UI thread and cancels when selection changes. Source
+limits are 32 MiB for raster images, 4 MiB for SVG, and 64 MiB for PDFs and office
+documents. Images fit within 1,200 × 1,200 pixels. PDF bitmap width is bounded to
+1,200 pixels. Image/PDF rendering times out after eight seconds, office conversion
+after ten, and optional code highlighting after two.
 
 Column headers sort in the daemon, using cached whole-index name and path
 orders, so sorting a million matches takes milliseconds. Size and modified time sort numerically.

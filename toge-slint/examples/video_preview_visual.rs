@@ -134,6 +134,8 @@ fn click(ui: &AppWindow, x: f32, y: f32) {
 
 fn main() -> Result<(), slint::PlatformError> {
     let folder = std::env::args().nth(1).expect("fixture folder");
+    // The visual runner can delay duration probes and fail fallback.mp4's probe.
+    let poster_test = std::env::var_os("TOGE_VIDEO_POSTER_TEST").is_some();
     if let Some(output) = std::env::args().nth(2) {
         offscreen::install(output.into());
     }
@@ -145,6 +147,7 @@ fn main() -> Result<(), slint::PlatformError> {
         row("clip.mp4", &folder),
         row("notes.txt", &folder),
         row("broken.mp4", &folder),
+        row("fallback.mp4", &folder),
     ])));
     preview::connect(&ui);
     ui.show()?;
@@ -164,7 +167,13 @@ fn main() -> Result<(), slint::PlatformError> {
             3 => {
                 assert!(ui.get_preview_ready());
                 assert!(ui.get_preview_video_active());
-                assert!((1..=5).contains(&ui.get_preview_video_frame()));
+                if poster_test {
+                    assert_eq!(ui.get_preview_video_frame(), 0);
+                    assert!(ui.get_preview_message().contains("Loading video frames"));
+                    println!("PASS: first frame visible while duration inspection is delayed");
+                } else {
+                    assert!((1..=5).contains(&ui.get_preview_video_frame()));
+                }
             }
             5 => {
                 assert!(ui.get_preview_ready());
@@ -208,10 +217,44 @@ fn main() -> Result<(), slint::PlatformError> {
             }
             16 => {
                 assert!(ui.get_preview_ready());
-                assert!((1..=5).contains(&ui.get_preview_video_frame()));
+                assert!((0..=5).contains(&ui.get_preview_video_frame()));
                 println!("PASS: sampled-frame loop, selection, error, pane resize, hiding and reselection");
             }
-            17 => { slint::quit_event_loop().unwrap(); }
+            17 if !poster_test => { slint::quit_event_loop().unwrap(); }
+            18 if poster_test => {
+                assert!((1..=5).contains(&ui.get_preview_video_frame()));
+                click(&ui, 100.0, 226.0);
+                assert_eq!(ui.get_selected(), 3);
+            }
+            20 if poster_test => {
+                assert!(ui.get_preview_ready());
+                assert_eq!(ui.get_preview_video_frame(), 0);
+                assert!(ui.get_preview_message().contains("Loading video frames"));
+            }
+            22 if poster_test => {
+                assert!(ui.get_preview_ready());
+                assert_eq!(ui.get_preview_video_frame(), 0);
+                assert!(ui.get_preview_message().contains("Cannot inspect video"));
+                println!("PASS: first frame retained after sampling failure");
+                click(&ui, 100.0, 122.0);
+            }
+            23 if poster_test => {
+                assert!(ui.get_preview_ready());
+                assert_eq!(ui.get_preview_video_frame(), 0);
+                let key = slint::platform::Key::DownArrow.into();
+                ui.window().dispatch_event(WindowEvent::KeyPressed { text: key });
+                ui.window().dispatch_event(WindowEvent::KeyReleased {
+                    text: slint::platform::Key::DownArrow.into(),
+                });
+                assert_eq!(ui.get_selected(), 1);
+            }
+            24 if poster_test => {
+                assert!(ui.get_preview_text_ready());
+                assert!(!ui.get_preview_video_active());
+                assert_eq!(ui.get_preview_video_frame(), 0);
+                println!("PASS: keyboard selection cancels delayed sampling and clears the poster");
+                slint::quit_event_loop().unwrap();
+            }
             _ => {}
         }
     });

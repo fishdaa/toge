@@ -2,6 +2,7 @@
 //! one worker per window keeps only the newest selection.
 use slint::{ComponentHandle, Rgba8Pixel, SharedPixelBuffer};
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::os::unix::fs::DirBuilderExt;
@@ -9,20 +10,23 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
+
+#[path = "preview/spreadsheet.rs"]
+mod spreadsheet;
+#[path = "preview/text.rs"]
+mod text;
+#[path = "preview/tools.rs"]
+mod tools;
 use std::time::{Duration, Instant};
 
 const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_PDF_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
-// Keeps each wrapped Text item far below the software renderer's i16 limit.
-const TEXT_CHUNK_CHARS: usize = 1_024;
 const MAX_SVG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PIXELS: u64 = 24_000_000;
 const MAX_SIDE: u32 = 8_192;
 const PREVIEW_SIDE: u32 = 1_200;
-// Supersample PDF glyphs before the Fit image is downscaled.
-const PDF_RENDER_SIDE: u32 = 1_800;
 const MAX_RENDER_BYTES: u64 = 10 * 1024 * 1024;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(8);
 const DOCUMENT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -38,6 +42,8 @@ struct Request {
     path: String,
     page: u32,
     serial: u64,
+    width: u32,
+    dark: bool,
 }
 
 enum Preview {
@@ -54,6 +60,11 @@ enum Preview {
         next: Option<PdfPage>,
     },
     Text(String),
+    FormattedText(text::TextPreview),
+    Audio {
+        pixels: Option<Pixels>,
+        details: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -63,6 +74,8 @@ enum Kind {
     Pdf,
     Video,
     Document,
+    Spreadsheet,
+    Audio,
     Text,
     Unsupported,
 }
@@ -94,6 +107,9 @@ fn kind(path: &str) -> Kind {
         "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "mpg" | "mpeg" | "ogv" | "3gp" | "mts"
         | "m2ts" | "wmv" | "flv" | "vob" => Kind::Video,
         "doc" | "docx" | "odt" | "rtf" => Kind::Document,
+        "xlsx" | "ods" => Kind::Spreadsheet,
+        "mp3" | "flac" | "ogg" | "oga" | "wav" | "m4a" | "aac" | "opus" | "aiff" | "aif"
+        | "wma" => Kind::Audio,
         "txt" | "text" | "md" | "markdown" | "log" | "csv" | "tsv" | "json" | "jsonl" | "toml"
         | "yaml" | "yml" | "xml" | "html" | "htm" | "css" | "js" | "jsx" | "ts" | "tsx" | "rs"
         | "py" | "sh" | "bash" | "zsh" | "c" | "h" | "cc" | "cpp" | "hpp" | "go" | "java"
@@ -153,7 +169,11 @@ fn publish(
             Ok(Preview::Image(pixels)) => {
                 ui.set_preview_image(slint::Image::from_rgba8(pixels));
                 ui.set_preview_ready(true);
-                ui.set_preview_message("".into());
+                ui.set_preview_message(if ui.get_preview_video_active() {
+                    "Loading video frames…".into()
+                } else {
+                    "".into()
+                });
             }
             Ok(Preview::Pdf {
                 page,
@@ -166,31 +186,51 @@ fn publish(
                 ui.set_preview_pdf_pages(i32::try_from(pages).unwrap_or(1));
                 ui.set_preview_pdf_previous_ready(previous.is_some());
                 if let Some(previous) = previous {
-                    ui.set_preview_pdf_previous_image(slint::Image::from_rgba8(previous.full));
-                    ui.set_preview_pdf_previous_fit_image(slint::Image::from_rgba8(previous.fit));
+                    ui.set_preview_pdf_previous_image(slint::Image::from_rgba8(previous));
                 } else {
                     ui.set_preview_pdf_previous_image(slint::Image::default());
-                    ui.set_preview_pdf_previous_fit_image(slint::Image::default());
                 }
-                ui.set_preview_image(slint::Image::from_rgba8(current.full));
-                ui.set_preview_pdf_fit_image(slint::Image::from_rgba8(current.fit));
+                ui.set_preview_image(slint::Image::from_rgba8(current));
                 ui.set_preview_pdf_next_ready(next.is_some());
                 if let Some(next) = next {
-                    ui.set_preview_pdf_next_image(slint::Image::from_rgba8(next.full));
-                    ui.set_preview_pdf_next_fit_image(slint::Image::from_rgba8(next.fit));
+                    ui.set_preview_pdf_next_image(slint::Image::from_rgba8(next));
                 } else {
                     ui.set_preview_pdf_next_image(slint::Image::default());
-                    ui.set_preview_pdf_next_fit_image(slint::Image::default());
                 }
                 ui.set_preview_ready(true);
                 ui.set_preview_message("".into());
             }
-            Ok(Preview::Text(contents)) => {
-                ui.set_preview_text(text_chunks(&contents));
+            Ok(Preview::FormattedText(contents)) => {
+                ui.set_preview_ready(false);
+                ui.set_preview_image(slint::Image::default());
+                ui.set_preview_font_family(contents.font.into());
+                ui.set_preview_copy_text(contents.source.into());
+                ui.set_preview_text_columns(contents.columns);
+                ui.set_preview_text_label(contents.label.into());
+                ui.set_preview_wrap(contents.wrap);
+                ui.set_preview_text(text::model(contents.lines));
                 ui.set_preview_text_ready(true);
                 ui.set_preview_message("".into());
             }
+            Ok(Preview::Audio { pixels, details }) => {
+                ui.set_preview_audio_details(details.into());
+                ui.set_preview_ready(pixels.is_some());
+                if let Some(pixels) = pixels {
+                    ui.set_preview_image(slint::Image::from_rgba8(pixels));
+                    ui.set_preview_message("".into());
+                } else {
+                    ui.set_preview_message("No embedded cover art".into());
+                }
+            }
+            Ok(Preview::Text(_)) => unreachable!("text is formatted by the worker"),
             Err(message) => {
+                // Keep a useful still if sampling fails after the poster appeared.
+                if ui.get_preview_ready() && !ui.get_preview_pdf_active() {
+                    if ui.get_preview_video_active() {
+                        ui.set_preview_message(message.into());
+                    }
+                    return;
+                }
                 ui.set_preview_ready(false);
                 ui.set_preview_video_frame(0);
                 ui.set_preview_message(message.into());
@@ -241,13 +281,52 @@ pub fn connect(ui: &crate::AppWindow) {
                 }
                 continue;
             }
-            let result = load(
-                &request.path,
-                request.page,
-                request.serial,
-                &worker_serial,
-                &mut pdf_cache,
-            );
+            if kind(&request.path) == Kind::Pdf {
+                let result =
+                    stream_pdf_preview(&request, &worker_serial, &mut pdf_cache, |preview| {
+                        publish(
+                            &weak,
+                            &worker_pending,
+                            &worker_serial,
+                            request.serial,
+                            Ok(preview),
+                        )
+                    });
+                if let Err(message) = result {
+                    publish(
+                        &weak,
+                        &worker_pending,
+                        &worker_serial,
+                        request.serial,
+                        Err(message),
+                    );
+                }
+                continue;
+            }
+            if matches!(
+                kind(&request.path),
+                Kind::Raster | Kind::Svg | Kind::Document | Kind::Spreadsheet
+            ) && let Some(pixels) = tools::cached_thumbnail(Path::new(&request.path), 128)
+            {
+                publish(
+                    &weak,
+                    &worker_pending,
+                    &worker_serial,
+                    request.serial,
+                    Ok(Preview::Image(pixels)),
+                );
+            }
+            let result = load(&request.path, request.page, request.serial, &worker_serial);
+            let result = result.map(|preview| match preview {
+                Preview::Text(contents) => Preview::FormattedText(text::prepare(
+                    &contents,
+                    Path::new(&request.path),
+                    request.dark,
+                    request.serial,
+                    &worker_serial,
+                )),
+                other => other,
+            });
             if worker_serial.load(Ordering::Acquire) != request.serial {
                 continue;
             }
@@ -263,6 +342,24 @@ pub fn connect(ui: &crate::AppWindow) {
         }
     });
 
+    ui.set_preview_support(tools::support_summary().into());
+    let weak_copy = ui.as_weak();
+    ui.on_preview_copy_requested(move || {
+        let Some(ui) = weak_copy.upgrade() else {
+            return;
+        };
+        ui.set_status(
+            if tools::copy_text(ui.get_preview_copy_text().to_string()).is_ok() {
+                "Copied preview text"
+            } else {
+                "Clipboard unavailable"
+            }
+            .into(),
+        );
+    });
+    let send_resize = send.clone();
+    let serial_resize = serial.clone();
+    let pending_resize = pending.clone();
     let send_scroll = send.clone();
     let serial_scroll = serial.clone();
     let pending_scroll = pending.clone();
@@ -276,12 +373,13 @@ pub fn connect(ui: &crate::AppWindow) {
         ui.set_preview_ready(false);
         ui.set_preview_text_ready(false);
         ui.set_preview_text(slint::ModelRc::default());
+        ui.set_preview_copy_text("".into());
+        ui.set_preview_text_columns(0);
+        ui.set_preview_text_label("".into());
+        ui.set_preview_audio_details("".into());
         ui.set_preview_image(slint::Image::default());
         ui.set_preview_pdf_previous_image(slint::Image::default());
         ui.set_preview_pdf_next_image(slint::Image::default());
-        ui.set_preview_pdf_fit_image(slint::Image::default());
-        ui.set_preview_pdf_previous_fit_image(slint::Image::default());
-        ui.set_preview_pdf_next_fit_image(slint::Image::default());
         ui.set_preview_pdf_previous_ready(false);
         ui.set_preview_pdf_next_ready(false);
         ui.set_preview_pdf_rendered_page(0);
@@ -289,6 +387,7 @@ pub fn connect(ui: &crate::AppWindow) {
         let file_kind = kind(&path);
         ui.set_preview_pdf_active(!path.is_empty() && file_kind == Kind::Pdf);
         ui.set_preview_video_active(!path.is_empty() && file_kind == Kind::Video);
+        ui.set_preview_audio_active(!path.is_empty() && file_kind == Kind::Audio);
         ui.set_preview_video_frame(0);
         ui.set_preview_pdf_page(page.max(1));
         if page <= 1 {
@@ -309,15 +408,19 @@ pub fn connect(ui: &crate::AppWindow) {
                 Kind::Pdf => "Loading PDF…",
                 Kind::Video => "Loading video frames…",
                 Kind::Document => "Loading document…",
+                Kind::Spreadsheet => "Loading spreadsheet…",
+                Kind::Audio => "Loading audio details…",
                 Kind::Text => "Loading text…",
                 Kind::Unsupported => "Preview unavailable for this file type",
             };
             ui.set_preview_message(message.into());
-            if file_kind != Kind::Unsupported {
+            {
                 let _ = send.send(Request {
                     path,
                     page: u32::try_from(page.max(1)).unwrap_or(1),
                     serial: id,
+                    width: pdf_width(&ui),
+                    dark: ui.get_preview_dark(),
                 });
             }
         }
@@ -344,30 +447,47 @@ pub fn connect(ui: &crate::AppWindow) {
             path: path.to_string(),
             page: u32::try_from(page).unwrap_or(1),
             serial: id,
+            width: pdf_width(&ui),
+            dark: ui.get_preview_dark(),
+        });
+    });
+    let weak = ui.as_weak();
+    ui.on_preview_pdf_resized(move |path, page| {
+        let Some(ui) = weak.upgrade() else { return };
+        if path.is_empty() {
+            return;
+        }
+        let id = serial_resize.fetch_add(1, Ordering::AcqRel) + 1;
+        pending_resize.lock().unwrap().take();
+        let _ = send_resize.send(Request {
+            path: path.to_string(),
+            page: u32::try_from(page.max(1)).unwrap_or(1),
+            serial: id,
+            width: pdf_width(&ui),
+            dark: ui.get_preview_dark(),
         });
     });
 }
 
-#[derive(Clone)]
-struct PdfPage {
-    full: Pixels,
-    fit: Pixels,
+fn pdf_width(ui: &crate::AppWindow) -> u32 {
+    // Render at the actual viewport width in physical pixels, including DPI.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let width = (ui.get_preview_pdf_width() * ui.window().scale_factor()).round() as u32;
+    width.clamp(100, 1_200)
 }
+
+type PdfPage = Pixels;
 
 #[derive(Default)]
 struct PdfCache {
     path: PathBuf,
+    stamp: Option<(u64, std::time::SystemTime)>,
+    width: u32,
     pages: u32,
     images: BTreeMap<u32, PdfPage>,
 }
 
-fn load(
-    path: &str,
-    page: u32,
-    request: u64,
-    serial: &AtomicU64,
-    pdf_cache: &mut PdfCache,
-) -> Result<Preview, &'static str> {
+fn load(path: &str, _page: u32, request: u64, serial: &AtomicU64) -> Result<Preview, &'static str> {
     let path = Path::new(path);
     let metadata = std::fs::metadata(path).map_err(|_| "File is unavailable")?;
     if !metadata.is_file() {
@@ -375,11 +495,15 @@ fn load(
     }
     match kind(path.to_str().unwrap_or("")) {
         Kind::Raster | Kind::Svg => load_image(path, request, serial).map(Preview::Image),
-        Kind::Pdf => load_pdf_preview(path, page, request, serial, pdf_cache),
+        Kind::Pdf => unreachable!("PDF uses the progressive worker"),
         Kind::Video => unreachable!("video uses the frame cycle worker"),
         Kind::Document => load_document(path, request, serial),
+        Kind::Spreadsheet => spreadsheet::load(path, request, serial),
+        Kind::Audio => load_audio(path, request, serial),
         Kind::Text => load_text(path).map(Preview::Text),
-        Kind::Unsupported => Err("Preview unavailable for this file type"),
+        Kind::Unsupported => tools::cached_thumbnail(path, 128)
+            .map(Preview::Image)
+            .ok_or("Preview unavailable for this file type"),
     }
 }
 
@@ -430,6 +554,12 @@ fn run_command(
     unavailable: &'static str,
     failed: &'static str,
 ) -> Result<(), &'static str> {
+    if serial.load(Ordering::Acquire) != request {
+        return Err("Preview cancelled");
+    }
+    if !tools::available(command.get_program()) {
+        return Err(unavailable);
+    }
     command.stderr(Stdio::null());
     let mut child = command.spawn().map_err(|_| unavailable)?;
     let started = Instant::now();
@@ -703,16 +833,13 @@ fn decode_video_frame(
     Ok(pixels)
 }
 
-fn cycle_video_frames(
-    request: &Request,
+fn inspect_video(
+    path: &Path,
+    scratch: &ScratchDir,
+    request: u64,
     serial: &AtomicU64,
-    mut emit: impl FnMut(Preview) -> bool,
-) -> Result<(), &'static str> {
-    let path = Path::new(&request.path);
-    if !fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
-        return Err("Video file is unavailable");
-    }
-    let scratch = ScratchDir::new().map_err(|_| "Cannot prepare video preview")?;
+    duration: bool,
+) -> Result<VideoInfo, &'static str> {
     let output = scratch.join("video-info.txt");
     let mut probe = Command::new("ffprobe");
     probe
@@ -722,7 +849,11 @@ fn cycle_video_frames(
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,duration:stream_side_data=rotation:format=duration",
+            if duration {
+                "stream=width,height,duration:stream_side_data=rotation:format=duration"
+            } else {
+                "stream=width,height:stream_side_data=rotation"
+            },
             "-of",
             "default=noprint_wrappers=1",
             "-i",
@@ -733,12 +864,35 @@ fn cycle_video_frames(
         &output,
         4096,
         RENDER_TIMEOUT,
-        request.serial,
+        request,
         serial,
         "Install FFmpeg (ffmpeg and ffprobe) for video previews",
         "Cannot inspect video",
     )?;
-    let info = parse_video_info(&fs::read_to_string(output).map_err(|_| "Cannot inspect video")?)?;
+    let mut info = fs::read_to_string(output).map_err(|_| "Cannot inspect video")?;
+    if !duration {
+        // The first-frame decode needs bounded dimensions, but no duration or seek.
+        info.push_str("\nduration=1\n");
+    }
+    parse_video_info(&info)
+}
+
+fn cycle_video_frames(
+    request: &Request,
+    serial: &AtomicU64,
+    mut emit: impl FnMut(Preview) -> bool,
+) -> Result<(), &'static str> {
+    let path = Path::new(&request.path);
+    if !fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return Err("Video file is unavailable");
+    }
+    let scratch = ScratchDir::new().map_err(|_| "Cannot prepare video preview")?;
+    let info = inspect_video(path, &scratch, request.serial, serial, false)?;
+    let first = decode_video_frame(path, &info, 0.0, &scratch, request.serial, serial)?;
+    if !emit(Preview::Image(first)) {
+        return Ok(());
+    }
+    let info = inspect_video(path, &scratch, request.serial, serial, true)?;
     let positions = sample_positions(info.duration, random_seed());
     let mut frames = Vec::with_capacity(VIDEO_FRAMES);
     let mut first_shown = Instant::now();
@@ -791,6 +945,11 @@ fn load_image(path: &Path, request: u64, serial: &AtomicU64) -> Result<Pixels, &
         return Err("Image too large to preview");
     }
     let scratch = ScratchDir::new().map_err(|_| "Cannot prepare image preview")?;
+    if kind(path.to_str().unwrap_or("")) == Kind::Svg
+        && let Ok(pixels) = tools::render_svg(path, &scratch, request, serial)
+    {
+        return Ok(pixels);
+    }
     let mut last_error = match load_image_ffmpeg(path, &scratch, request, serial) {
         Ok(pixels) => return Ok(pixels),
         Err("Image dimensions too large to preview") => {
@@ -908,73 +1067,88 @@ fn load_image_magick(
     parse_ppm(&read_output(&output, MAX_RENDER_BYTES)?)
 }
 
-fn load_pdf_preview(
-    path: &Path,
-    page: u32,
-    request: u64,
-    serial: &AtomicU64,
-    cache: &mut PdfCache,
-) -> Result<Preview, &'static str> {
-    if cache.path != path {
-        cache.path = path.to_path_buf();
-        cache.pages = pdf_page_count(path, request, serial).unwrap_or(1);
-        cache.images.clear();
-    }
-    if page == 0 || page > cache.pages {
-        return Err("PDF page unavailable");
-    }
-    for number in [page, page.saturating_sub(1), page.saturating_add(1)] {
-        if number == 0 || number > cache.pages || cache.images.contains_key(&number) {
-            continue;
-        }
-        match load_pdf(path, number, request, serial) {
-            Ok(full) => {
-                let fit = smooth_pdf_fit(&full);
-                cache.images.insert(number, PdfPage { full, fit });
-            }
-            Err(error) if number == page => return Err(error),
-            Err(_) => {}
-        }
-    }
-    cache.images.retain(|number, _| number.abs_diff(page) <= 1);
-    Ok(Preview::Pdf {
+fn pdf_snapshot(cache: &PdfCache, page: u32) -> Preview {
+    Preview::Pdf {
         page,
         pages: cache.pages,
         previous: cache.images.get(&page.saturating_sub(1)).cloned(),
-        current: cache
-            .images
-            .get(&page)
-            .cloned()
-            .ok_or("Cannot render PDF")?,
+        current: cache.images[&page].clone(),
         next: cache.images.get(&page.saturating_add(1)).cloned(),
-    })
+    }
 }
 
-// Downscale once with a low-pass filter before Slint fits the page into
-// the narrow pane. A single large reduction in the software renderer leaves
-// small glyphs harsh and uneven.
-fn smooth_pdf_fit(full: &Pixels) -> Pixels {
-    // The widest supported preview pane displays a page at about 560 px.
-    // Prefilter to that width so Slint does not shrink tiny glyphs again there.
-    const FIT_WIDTH: u32 = 560;
-    if full.width() <= FIT_WIDTH {
-        return full.clone();
+fn stream_pdf_preview(
+    request: &Request,
+    serial: &AtomicU64,
+    cache: &mut PdfCache,
+    mut emit: impl FnMut(Preview) -> bool,
+) -> Result<(), &'static str> {
+    let path = Path::new(&request.path);
+    let metadata = fs::metadata(path).map_err(|_| "File is unavailable")?;
+    if !metadata.is_file() || metadata.len() > MAX_PDF_BYTES {
+        return Err("PDF too large to preview");
     }
-    let height = u32::try_from(
-        (u64::from(full.height()) * u64::from(FIT_WIDTH) + u64::from(full.width() / 2))
-            / u64::from(full.width()),
-    )
-    .unwrap()
-    .max(1);
-    let source = image::RgbaImage::from_raw(full.width(), full.height(), full.as_bytes().to_vec())
-        .expect("PDF pixel buffer has its declared dimensions");
-    let resized = image::imageops::resize(
-        &source,
-        FIT_WIDTH,
-        height,
-        image::imageops::FilterType::Gaussian,
-    );
-    SharedPixelBuffer::clone_from_slice(resized.as_raw(), FIT_WIDTH, height)
+    let stamp = metadata
+        .modified()
+        .ok()
+        .map(|mtime| (metadata.len(), mtime));
+    let changed = cache.path != path || cache.stamp != stamp || stamp.is_none();
+    if changed || cache.width != request.width {
+        if changed {
+            cache.pages = pdf_page_count(path, request.serial, serial).unwrap_or(1);
+        }
+        cache.path = path.to_path_buf();
+        cache.width = request.width;
+        cache.stamp = stamp;
+        cache.images.clear();
+    }
+    let page = request.page;
+    if page == 0 || page > cache.pages {
+        return Err("PDF page unavailable");
+    }
+    cache.images.retain(|number, _| number.abs_diff(page) <= 1);
+    if !cache.images.contains_key(&page) {
+        // Desktop thumbnails describe the first page only. Never use one for another page.
+        if page == 1
+            && let Some(pixels) = tools::cached_thumbnail(path, request.width)
+        {
+            cache.images.insert(page, pixels);
+            if !emit(pdf_snapshot(cache, page)) {
+                return Ok(());
+            }
+        }
+        match load_pdf(path, page, request.width, request.serial, serial) {
+            Ok(pixels) => {
+                cache.images.insert(page, pixels);
+            }
+            Err(_)
+                if cache.images.contains_key(&page)
+                    && serial.load(Ordering::Acquire) == request.serial =>
+            {
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // Publish the visible page before doing any speculative work.
+    if !emit(pdf_snapshot(cache, page)) {
+        return Ok(());
+    }
+    for number in [page.saturating_add(1), page.saturating_sub(1)] {
+        if serial.load(Ordering::Acquire) != request.serial {
+            return Err("Preview cancelled");
+        }
+        if number == 0 || number > cache.pages || cache.images.contains_key(&number) {
+            continue;
+        }
+        if let Ok(pixels) = load_pdf(path, number, request.width, request.serial, serial) {
+            cache.images.insert(number, pixels);
+            if !emit(pdf_snapshot(cache, page)) {
+                break;
+            }
+        }
+    }
+    Ok(())
 }
 
 fn parse_pdf_page_count(output: &str) -> Option<u32> {
@@ -1022,6 +1196,7 @@ fn pdf_page_count(path: &Path, request: u64, serial: &AtomicU64) -> Option<u32> 
 fn load_pdf(
     path: &Path,
     page: u32,
+    width: u32,
     request: u64,
     serial: &AtomicU64,
 ) -> Result<Pixels, &'static str> {
@@ -1033,8 +1208,8 @@ fn load_pdf(
     let output = scratch.join("page.ppm");
     let mut poppler = Command::new("pdftoppm");
     let page = page.to_string();
-    poppler.args(["-f", &page, "-l", &page, "-singlefile", "-scale-to"]);
-    poppler.arg(PDF_RENDER_SIDE.to_string());
+    poppler.args(["-f", &page, "-l", &page, "-singlefile", "-scale-to-x"]);
+    poppler.arg(width.to_string()).args(["-scale-to-y", "-1"]);
     poppler.arg(path).arg(&prefix).stdout(Stdio::null());
     let poppler_result = run_command(
         poppler,
@@ -1060,9 +1235,7 @@ fn load_pdf(
     mupdf
         .arg(&output)
         .arg("-w")
-        .arg(PDF_RENDER_SIDE.to_string())
-        .arg("-h")
-        .arg(PDF_RENDER_SIDE.to_string())
+        .arg(width.to_string())
         .args(["-m", "134217728"]);
     mupdf.arg(path).arg(&page).stdout(Stdio::null());
     if let Err(error) = run_command(
@@ -1179,7 +1352,12 @@ fn checked_pixel_count(
     channels: usize,
     length: usize,
 ) -> Result<(), &'static str> {
-    if width == 0 || height == 0 || width > PDF_RENDER_SIDE || height > PDF_RENDER_SIDE {
+    if width == 0
+        || height == 0
+        || width > MAX_SIDE
+        || height > MAX_SIDE
+        || u64::from(width) * u64::from(height) > MAX_PIXELS
+    {
         return Err("Invalid preview dimensions");
     }
     let expected = usize::try_from(width).unwrap() * usize::try_from(height).unwrap() * channels;
@@ -1251,6 +1429,108 @@ for paragraph in root.iter():
 if truncated: output.extend(b'\n... Preview limited to the first 64 KiB')
 sys.stdout.buffer.write(bytes(output).strip())
 ";
+
+fn load_audio(path: &Path, request: u64, serial: &AtomicU64) -> Result<Preview, &'static str> {
+    let scratch = ScratchDir::new().map_err(|_| "Cannot prepare audio preview")?;
+    let output = scratch.join("audio.json");
+    let mut probe = Command::new("ffprobe");
+    probe.args(["-v", "error", "-show_entries",
+        "stream=codec_type,codec_name,sample_rate,channels:stream_disposition=attached_pic:format=duration:format_tags=title,artist,album", "-of", "json", "-i"]).arg(path);
+    run_stdout(
+        probe,
+        &output,
+        64 * 1024,
+        RENDER_TIMEOUT,
+        request,
+        serial,
+        "Install FFmpeg for audio previews",
+        "Cannot inspect audio",
+    )?;
+    let metadata: serde_json::Value = serde_json::from_slice(&read_output(&output, 64 * 1024)?)
+        .map_err(|_| "Cannot inspect audio")?;
+    let streams = metadata["streams"]
+        .as_array()
+        .ok_or("Cannot inspect audio")?;
+    let audio = streams
+        .iter()
+        .find(|stream| stream["codec_type"] == "audio")
+        .ok_or("No audio stream")?;
+    let mut details = String::new();
+    for (key, label) in [("title", "Title"), ("artist", "Artist"), ("album", "Album")] {
+        if let Some(value) = metadata["format"]["tags"][key].as_str() {
+            let _ = writeln!(
+                details,
+                "{label}: {}",
+                value
+                    .chars()
+                    .filter(|ch| !ch.is_control())
+                    .take(160)
+                    .collect::<String>()
+            );
+        }
+    }
+    if let Some(seconds) = metadata["format"]["duration"]
+        .as_str()
+        .and_then(|value| value.parse::<f64>().ok())
+        .filter(|value| value.is_finite() && *value >= 0.0)
+    {
+        let _ = writeln!(details, "Duration: {seconds:.1} s");
+    }
+    if let Some(codec) = audio["codec_name"].as_str() {
+        let _ = writeln!(details, "Codec: {codec}");
+    }
+    if let Some(rate) = audio["sample_rate"].as_str() {
+        let _ = writeln!(details, "Sample rate: {rate} Hz");
+    }
+    if let Some(channels) = audio["channels"].as_u64() {
+        let _ = write!(details, "Channels: {channels}");
+    }
+    let mut pixels = tools::cached_thumbnail(path, 128);
+    if pixels.is_none()
+        && streams
+            .iter()
+            .any(|stream| stream["disposition"]["attached_pic"] == 1)
+    {
+        let output = scratch.join("cover.pam");
+        let mut command = Command::new("ffmpeg");
+        command
+            .args(["-nostdin", "-v", "error", "-threads", "1", "-i"])
+            .arg(path)
+            .args([
+                "-map",
+                "0:v:0",
+                "-an",
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=640:640:force_original_aspect_ratio=decrease",
+                "-pix_fmt",
+                "rgba",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "pam",
+                "pipe:1",
+            ]);
+        if run_stdout(
+            command,
+            &output,
+            MAX_RENDER_BYTES,
+            RENDER_TIMEOUT,
+            request,
+            serial,
+            "Install FFmpeg for cover art",
+            "Cannot decode cover art",
+        )
+        .is_ok()
+        {
+            pixels = read_output(&output, MAX_RENDER_BYTES)
+                .and_then(|bytes| parse_pam(&bytes))
+                .ok();
+        }
+    }
+    Ok(Preview::Audio { pixels, details })
+}
 
 fn load_document(path: &Path, request: u64, serial: &AtomicU64) -> Result<Preview, &'static str> {
     if fs::metadata(path).map_err(|_| "File is unavailable")?.len() > MAX_DOCUMENT_BYTES {
@@ -1348,7 +1628,7 @@ fn render_document_page(path: &Path, request: u64, serial: &AtomicU64) -> Option
         )
         .is_ok()
         {
-            return load_pdf(&pdf, 1, request, serial).ok();
+            return load_pdf(&pdf, 1, 560, request, serial).ok();
         }
         if serial.load(Ordering::Acquire) != request {
             return None;
@@ -1521,42 +1801,6 @@ fn load_text(path: &Path) -> Result<String, &'static str> {
     Ok(text)
 }
 
-/// Splits text into lines, cutting long lines, so the virtualized list only
-/// renders a few short Text items at a time.
-fn split_text(text: &str) -> Vec<String> {
-    let mut chunks = Vec::new();
-    for line in text.lines() {
-        let mut rest = line;
-        loop {
-            let mut end = rest
-                .char_indices()
-                .nth(TEXT_CHUNK_CHARS)
-                .map_or(rest.len(), |(index, _)| index);
-            // Prefer a word boundary so wrapping does not split a word across items.
-            if end < rest.len()
-                && let Some(space) = rest[..end].rfind(' ')
-            {
-                end = space + 1;
-            }
-            chunks.push(rest[..end].to_owned());
-            rest = &rest[end..];
-            if rest.is_empty() {
-                break;
-            }
-        }
-    }
-    chunks
-}
-
-fn text_chunks(text: &str) -> slint::ModelRc<slint::SharedString> {
-    slint::ModelRc::new(slint::VecModel::from(
-        split_text(text)
-            .into_iter()
-            .map(slint::SharedString::from)
-            .collect::<Vec<_>>(),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1586,6 +1830,11 @@ mod tests {
             assert_eq!(kind(name), Kind::Document, "{name}");
         }
         assert_eq!(kind("report.PDF"), Kind::Pdf);
+        assert_eq!(kind("sheet.xlsx"), Kind::Spreadsheet);
+        assert_eq!(kind("sheet.ods"), Kind::Spreadsheet);
+        for name in ["track.mp3", "track.flac", "track.opus"] {
+            assert_eq!(kind(name), Kind::Audio);
+        }
         for name in [
             "clip.MP4",
             "clip.mkv",
@@ -1673,17 +1922,33 @@ mod tests {
             path: path.to_string_lossy().into_owned(),
             page: 1,
             serial: 1,
+            width: 300,
+            dark: false,
         };
         let mut seen = Vec::new();
+        let mut poster_seen = false;
         cycle_video_frames(&request, &serial, |preview| {
+            if let Preview::Image(pixels) = preview {
+                assert!(seen.is_empty());
+                assert!(!poster_seen);
+                assert_eq!((pixels.width(), pixels.height()), (32, 24));
+                assert!(pixels.as_bytes()[0] > pixels.as_bytes()[2]);
+                poster_seen = true;
+                return true;
+            }
             let Preview::Video { pixels, frame } = preview else {
                 panic!("video expected")
             };
+            assert!(
+                poster_seen,
+                "first frame must appear before seeking for samples"
+            );
             assert_eq!((pixels.width(), pixels.height()), (32, 24));
             seen.push((frame, pixels.as_bytes()[0] > pixels.as_bytes()[2]));
             seen.len() < 6
         })
         .unwrap();
+        assert!(poster_seen);
         assert_eq!(
             seen.iter().map(|(frame, _)| *frame).collect::<Vec<_>>(),
             [0, 1, 2, 3, 4, 0]
@@ -1714,6 +1979,43 @@ mod tests {
     }
 
     #[test]
+    fn audio_metadata_is_visible_without_decoding_audio() {
+        if !tools::available(std::ffi::OsStr::new("ffmpeg"))
+            || !tools::available(std::ffi::OsStr::new("ffprobe"))
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("track.wav");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=0.05",
+                    "-metadata",
+                    "title=Test track"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let Preview::Audio { pixels, details } = load_audio(&path, 1, &AtomicU64::new(1)).unwrap()
+        else {
+            panic!("audio expected")
+        };
+        assert!(pixels.is_none());
+        assert!(details.contains("Title: Test track"));
+        assert!(details.contains("44100 Hz"));
+        assert!(load_audio(&path, 1, &AtomicU64::new(2)).is_err());
+    }
+
+    #[test]
     fn image_output_parsers_enforce_shape_and_preserve_color() {
         let pam = b"P7\nWIDTH 2\nHEIGHT 1\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n\x14\x28\x3c\xff\x01\x02\x03\x80";
         let pixels = parse_pam(pam).unwrap();
@@ -1724,21 +2026,6 @@ mod tests {
         assert_eq!(pixels.as_bytes(), &[20, 40, 60, 255, 1, 2, 3, 255]);
         assert!(parse_pam(&pam[..pam.len() - 1]).is_err());
         assert!(parse_ppm(&ppm[..ppm.len() - 1]).is_err());
-    }
-
-    #[test]
-    fn pdf_fit_prefilters_fine_edges() {
-        let mut stripes = Vec::with_capacity(1200 * 2 * 4);
-        for _ in 0..2 {
-            for x in 0..1200 {
-                let value = if x % 2 == 0 { 0 } else { 255 };
-                stripes.extend_from_slice(&[value, value, value, 255]);
-            }
-        }
-        let full = pixels_from_rgba(1200, 2, &stripes).unwrap();
-        let fit = smooth_pdf_fit(&full);
-        assert_eq!((fit.width(), fit.height()), (560, 1));
-        assert!((40..215).contains(&fit.as_bytes()[280 * 4]));
     }
 
     #[test]
@@ -1782,14 +2069,57 @@ mod tests {
         fs::write(&path, pdf).unwrap();
         let serial = AtomicU64::new(1);
         assert_eq!(pdf_page_count(&path, 1, &serial), Some(2));
-        let first = load_pdf(&path, 1, 1, &serial).unwrap();
-        let second = load_pdf(&path, 2, 1, &serial).unwrap();
+        let first = load_pdf(&path, 1, 320, 1, &serial).unwrap();
+        let second = load_pdf(&path, 2, 320, 1, &serial).unwrap();
         let center = |pixels: &Pixels| {
             let offset = ((pixels.height() / 2 * pixels.width() + pixels.width() / 2) * 4) as usize;
             pixels.as_bytes()[offset..offset + 3].to_vec()
         };
         assert_eq!(center(&first), [255, 0, 0]);
         assert_eq!(center(&second), [0, 0, 255]);
+        let fitted = load_pdf(&path, 2, 560, 1, &serial).unwrap();
+        assert_eq!((fitted.width(), fitted.height()), (560, 560));
+        assert_eq!(center(&fitted), [0, 0, 255]);
+        let mut cache = PdfCache::default();
+        let mut request = Request {
+            path: path.to_string_lossy().into_owned(),
+            page: 1,
+            serial: 1,
+            width: 248,
+            dark: false,
+        };
+        stream_pdf_preview(&request, &serial, &mut cache, |preview| {
+            let Preview::Pdf { current, next, .. } = preview else {
+                panic!("PDF expected")
+            };
+            assert_eq!(current.width(), 248);
+            assert!(
+                next.is_none(),
+                "visible page must arrive before adjacent pages"
+            );
+            false
+        })
+        .unwrap();
+        assert_eq!(cache.images.len(), 1);
+        request.width = 548;
+        stream_pdf_preview(&request, &serial, &mut cache, |preview| {
+            let Preview::Pdf { current, .. } = preview else {
+                panic!("PDF expected")
+            };
+            assert_eq!(current.width(), 548);
+            serial.store(2, Ordering::Release);
+            true
+        })
+        .unwrap_err();
+        request.serial = 2;
+        request.width = 548;
+        fs::write(&path, b"invalid PDF changed on disk").unwrap();
+        assert!(
+            stream_pdf_preview(&request, &serial, &mut cache, |_| panic!(
+                "must invalidate stale cached page"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1873,7 +2203,9 @@ with zipfile.ZipFile(sys.argv[1], 'w') as archive: archive.writestr('word/docume
             text.push('\n');
             text
         });
-        ui.set_preview_text(text_chunks(&lines));
+        ui.set_preview_text(text::model(
+            text::prepare(&lines, Path::new("notes.txt"), false, 1, &AtomicU64::new(1)).lines,
+        ));
         ui.set_preview_text_ready(true);
         // Before chunking, one Text item exceeded the renderer's i16 coordinates.
         let _ = ui.window().take_snapshot().unwrap();
@@ -1886,6 +2218,83 @@ with zipfile.ZipFile(sys.argv[1], 'w') as archive: archive.writestr('word/docume
                 });
             let _ = ui.window().take_snapshot().unwrap();
         }
+    }
+
+    #[test]
+    fn code_preview_scrolls_horizontally_and_keeps_keyboard_focus() {
+        use slint::platform::{PointerEventButton, WindowEvent};
+        headless_window(900, 580);
+        let ui = crate::AppWindow::new().unwrap();
+        ui.set_rows(slint::ModelRc::new(slint::VecModel::from(vec![
+            preview_row("code.rs", "/tmp"),
+            preview_row("other.rs", "/tmp"),
+        ])));
+        ui.set_selected(0);
+        ui.on_shortcut_action(|key, _, _, _, _| {
+            if key == slint::SharedString::from(slint::platform::Key::DownArrow) {
+                "down".into()
+            } else {
+                "".into()
+            }
+        });
+        let contents = (0..100)
+            .map(|index| {
+                format!(
+                    "let value_{index} = \"{}\";",
+                    "long source line ".repeat(12)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let text = text::prepare(
+            &contents,
+            Path::new("code.rs"),
+            false,
+            1,
+            &AtomicU64::new(1),
+        );
+        ui.set_preview_font_family(text.font.into());
+        ui.set_preview_text_columns(text.columns);
+        ui.set_preview_text(text::model(text.lines));
+        ui.set_preview_wrap(false);
+        ui.set_preview_text_ready(true);
+        ui.show().unwrap();
+        let _ = ui.window().take_snapshot().unwrap();
+        let _ = ui.window().take_snapshot().unwrap();
+        assert!(
+            ui.get_preview_text_content_width() > 1_000.0,
+            "columns={}, glyph={}, content={}",
+            ui.get_preview_text_columns(),
+            ui.get_preview_character_width(),
+            ui.get_preview_text_content_width()
+        );
+        let position = slint::LogicalPosition::new(750.0, 300.0);
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position,
+            button: PointerEventButton::Left,
+        });
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position,
+            button: PointerEventButton::Left,
+        });
+        assert!(ui.get_preview_text_has_focus());
+        for key in [
+            slint::platform::Key::RightArrow,
+            slint::platform::Key::DownArrow,
+        ] {
+            ui.window()
+                .dispatch_event(WindowEvent::KeyPressed { text: key.into() });
+            ui.window()
+                .dispatch_event(WindowEvent::KeyReleased { text: key.into() });
+        }
+        let _ = ui.window().take_snapshot().unwrap();
+        assert!(ui.get_preview_text_scroll_x() < 0.0);
+        assert!(ui.get_preview_text_scroll_y() < 0.0);
+        assert_eq!(
+            ui.get_selected(),
+            0,
+            "preview navigation must not move the selected result"
+        );
     }
 
     #[test]
@@ -1910,25 +2319,6 @@ with zipfile.ZipFile(sys.argv[1], 'w') as archive: archive.writestr('word/docume
             ui.set_preview_pdf_page(ui.get_preview_pdf_page() + 40);
             let _ = ui.window().take_snapshot().unwrap();
         }
-    }
-
-    #[test]
-    fn text_chunks_split_lines_and_bound_long_lines() {
-        let chunks = split_text("a\nb\n\n");
-        assert_eq!(chunks, ["a", "b", ""]);
-        let long = "é".repeat(TEXT_CHUNK_CHARS * 2 + 5);
-        let chunks = split_text(&long);
-        assert_eq!(chunks.len(), 3);
-        assert!(
-            chunks
-                .iter()
-                .all(|chunk| chunk.chars().count() <= TEXT_CHUNK_CHARS)
-        );
-        assert_eq!(chunks.concat(), long);
-        let words = "word ".repeat(TEXT_CHUNK_CHARS);
-        let chunks = split_text(&words);
-        assert!(chunks.iter().all(|chunk| chunk.ends_with("word ")));
-        assert_eq!(chunks.concat(), words);
     }
 
     #[test]

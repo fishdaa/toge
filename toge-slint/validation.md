@@ -508,3 +508,78 @@ a static stored image; it is not a live document editor.
 - Tailnet-only recording:
   [office-thumbnail-preview.mp4](https://fedora.taila85941.ts.net:8952/office-thumbnail-preview.mp4).
   Frames, fixture, and logs are in `/tmp/toge-office-thumbnail-visual-20260929/`.
+
+## Pane-sized PDF, text and system previews — 2026-09-30
+
+PDFs now render one bitmap at the visible pane width multiplied by the window's
+scale factor, bounded to 1,200 pixels. Zoom/Fit controls and duplicate fit renders
+are removed. The worker publishes the current page before rendering neighbors,
+retains at most three pages, and invalidates them when the source or width changes.
+Text uses the installed monospace font, line numbers, optional bat colors, wrapping,
+horizontal scrolling and keyboard focus. The pane also supports bounded XLSX/ODS
+data, audio metadata/artwork, dedicated SVG tools and a backend support popup.
+
+Desktop thumbnail reuse reads the freedesktop cache without modifying it, checks
+the URI and modification time (plus source size when present), and rejects small
+PDF thumbnails instead of stretching them. No PDF, SVG, office or syntax-parser
+Cargo dependency was added. The only new lockfile package is the small MD5 helper
+needed for standard thumbnail filenames; other direct dependencies already existed
+in the dependency graph.
+
+- `cargo test --workspace --all-targets --locked`: 345 tests passed.
+- `python3 -m unittest discover -s scripts/tests`: 22 tests passed.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`: passed.
+- Final Slint tests and binary/example build passed before the native recording.
+- Native shared-UI flow exercised PDF selection, pane resize, page scrolling,
+  code focus/arrows/PageDown/Home, horizontal scroll, wrapping, text scroll reset,
+  XLSX/ODS, audio with/without art, SVG, cached unsupported files, broken PDF,
+  rapid selection cancellation and the Support popup. Assertions passed.
+- PDF bitmap widths exactly matched measured physical viewports at 260 and 560
+  pixels. The synthetic two-page PDF first appeared after 166 ms in this debug
+  fixture; this is a fixture measurement, not a general performance benchmark.
+- Inspected captured frames for text alignment, readability, clipping, scroll
+  positions, loading/error messages and popup layout. The recording is 34 seconds:
+  [preview-improvements.mp4](https://fedora.taila85941.ts.net:8958/preview-improvements.mp4)
+  (tailnet only). Artifacts are ignored under
+  `visual-test-artifacts/preview-improvements-20260930/`.
+- Environment: native Slint/Winit software rendering in a headless Wayland Cage
+  compositor, using injected window input. This verifies the shared Slint UI but
+  does not exercise physical desktop input. Poppler, bat, Python and FFmpeg were
+  available; SVG used FFmpeg's fallback. LibreOffice, dedicated SVG renderers and
+  MuPDF were unavailable, so those optional backends were not visually verified.
+
+[Hayro](https://github.com/laurenzv/hayro) was reviewed and deferred. Its Rust 1.92
+minimum and Apache/MIT licensing are compatible, but upstream calls it experimental,
+lists rendering gaps and says performance has not yet been a focus. Its renderer,
+font and PDF image-codec dependency chain would bundle a substantial new subsystem.
+It is worth reconsidering if self-contained rendering becomes a requirement;
+there is no head-to-head Hayro performance or binary-size benchmark in this change.
+
+
+## Video first-frame preview — 2026-09-30
+
+Video previews now publish the actual first frame after bounded dimension
+inspection, before probing duration or seeking to sampled positions. It remains
+visible if later sampling fails. The pane labels the still while samples load.
+Selection cancellation, source/output bounds, and the five-frame cycle remain in
+place.
+
+- `cargo test -p toge-slint --all-targets --locked --offline`: 61 application
+  tests and 18 tests in each of the two examples passed. The video regression
+  asserts that the first decoded frame is published before sampled frames,
+  checks looping, and cancels immediately after the first frame.
+- `cargo clippy -p toge-slint --all-targets --locked --offline -- -D warnings`,
+  example build, formatting, and `git diff --check` passed.
+- Native shared `ui/main.slint` recording covers selection/loading, a first
+  frame visible during an intentionally delayed three-second duration probe,
+  transition to sampled frames, a broken file, pane resizing, hide/show,
+  a duration-probe failure retaining the still, and keyboard selection that
+  cancels sampling and clears the image. All fixture assertions passed.
+- Inspected captured frames for fit, clipping, selection/focus, error messages,
+  and stale images. The recording uses a native Slint/Winit software-rendered
+  window in a headless Wayland Cage compositor with injected input; it does not
+  exercise physical desktop input. The synthetic probe delays test loading
+  behavior and are not a performance benchmark. Artifacts are ignored under
+  `visual-test-artifacts/video-first-frame-20260930/`.
+- Tailnet-only recording:
+  [video-first-frame.mp4](https://fedora.taila85941.ts.net:8959/video-first-frame.mp4).
