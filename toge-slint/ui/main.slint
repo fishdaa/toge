@@ -1,4 +1,4 @@
-import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette, ScrollView, Spinner } from "std-widgets.slint";
+import { VerticalBox, LineEdit, Button, StandardTableView, AboutSlint, Palette, ScrollView, ListView, Spinner } from "std-widgets.slint";
 
 export struct ShortcutEntry {
     id: string,
@@ -159,7 +159,11 @@ export component AppWindow inherits Window {
     in property <image> preview-image;
     in property <bool> preview-ready: false;
     in property <bool> preview-text-ready: false;
-    in property <string> preview-text: "";
+    in property <bool> preview-video-active: false;
+    in property <int> preview-video-frame: 0;
+    // Short text chunks: the software renderer uses i16 coordinates, so one
+    // Text item taller than about 32k physical pixels would overflow.
+    in property <[string]> preview-text;
     in property <string> preview-message: "Select a file";
     in property <bool> preview-pdf-active: false;
     in property <int> preview-pdf-page: 1;
@@ -654,6 +658,14 @@ export component AppWindow inherits Window {
                             color: Palette.foreground;
                             opacity: 0.65;
                         }
+                        if root.preview-video-active: Text {
+                            text: root.preview-video-frame > 0
+                                ? "Video frames · " + root.preview-video-frame + " / 5"
+                                : "Video frames";
+                            font-size: 12px;
+                            color: Palette.foreground;
+                            overflow: elide;
+                        }
                         Rectangle {
                             vertical-stretch: 1;
                             background: Palette.alternate-background;
@@ -716,17 +728,12 @@ export component AppWindow inherits Window {
                                     wrap: word-wrap;
                                 }
                             }
-                            if root.preview-text-ready: ScrollView {
+                            if root.preview-text-ready: ListView {
                                 width: parent.width; height: parent.height;
-                                viewport-width: self.visible-width;
-                                viewport-height: max(self.visible-height, text-body.height + 24px);
-                                viewport-y: 0px;
-                                text-body := Text {
-                                    x: 12px; y: 12px;
+                                for chunk in root.preview-text: Text {
+                                    x: 12px;
                                     width: parent.width - 36px;
-                                    height: self.preferred-height;
-                                    vertical-alignment: top;
-                                    text: root.preview-text;
+                                    text: chunk;
                                     font-family: "monospace";
                                     font-size: 12px;
                                     color: Palette.foreground;

@@ -15,6 +15,8 @@ const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_PDF_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_DOCUMENT_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_TEXT_BYTES: usize = 64 * 1024;
+// Keeps each wrapped Text item far below the software renderer's i16 limit.
+const TEXT_CHUNK_CHARS: usize = 1_024;
 const MAX_SVG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PIXELS: u64 = 24_000_000;
 const MAX_SIDE: u32 = 8_192;
@@ -25,6 +27,10 @@ const DOCUMENT_TIMEOUT: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_millis(75);
 
 type Pixels = SharedPixelBuffer<Rgba8Pixel>;
+const VIDEO_SIDE: u32 = 640;
+const VIDEO_FRAMES: usize = 5;
+const VIDEO_FRAMES_F32: f32 = 5.0;
+const VIDEO_FRAME_INTERVAL: Duration = Duration::from_millis(850);
 
 struct Request {
     path: String,
@@ -34,6 +40,10 @@ struct Request {
 
 enum Preview {
     Image(Pixels),
+    Video {
+        pixels: Pixels,
+        frame: usize,
+    },
     Pdf {
         page: u32,
         pages: u32,
@@ -49,6 +59,7 @@ enum Kind {
     Raster,
     Svg,
     Pdf,
+    Video,
     Document,
     Text,
     Unsupported,
@@ -78,6 +89,8 @@ fn kind(path: &str) -> Kind {
         | "pnm" | "pbm" | "pgm" | "ppm" | "avif" | "heic" | "heif" => Kind::Raster,
         "svg" => Kind::Svg,
         "pdf" => Kind::Pdf,
+        "mp4" | "mkv" | "webm" | "mov" | "avi" | "m4v" | "mpg" | "mpeg" | "ogv" | "3gp" | "mts"
+        | "m2ts" | "wmv" | "flv" | "vob" => Kind::Video,
         "doc" | "docx" | "odt" | "rtf" => Kind::Document,
         "txt" | "text" | "md" | "markdown" | "log" | "csv" | "tsv" | "json" | "jsonl" | "toml"
         | "yaml" | "yml" | "xml" | "html" | "htm" | "css" | "js" | "jsx" | "ts" | "tsx" | "rs"
@@ -85,6 +98,95 @@ fn kind(path: &str) -> Kind {
         | "kt" | "swift" | "rb" | "php" | "sql" | "ini" | "conf" | "config" | "env" => Kind::Text,
         _ => Kind::Unsupported,
     }
+}
+
+type Pending = Arc<Mutex<Option<(u64, Result<Preview, &'static str>)>>>;
+
+// The request callback is owned by the window. Its destruction must also
+// interrupt streaming; a dropped Slint weak handle silently skips callbacks.
+struct CancelOnDrop(Arc<AtomicU64>);
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.fetch_add(1, Ordering::AcqRel);
+    }
+}
+
+fn publish(
+    weak: &slint::Weak<crate::AppWindow>,
+    pending: &Pending,
+    serial: &Arc<AtomicU64>,
+    id: u64,
+    result: Result<Preview, &'static str>,
+) -> bool {
+    if serial.load(Ordering::Acquire) != id {
+        return true;
+    }
+    let mut slot = pending.lock().unwrap();
+    let scheduled = slot.is_some();
+    *slot = Some((id, result));
+    drop(slot);
+    if scheduled {
+        return true;
+    }
+    let pending = pending.clone();
+    let serial = serial.clone();
+    weak.upgrade_in_event_loop(move |ui| {
+        let Some((id, result)) = pending.lock().unwrap().take() else {
+            return;
+        };
+        if serial.load(Ordering::Acquire) != id {
+            return;
+        }
+        if !ui.window().is_visible() && ui.get_preview_video_active() {
+            serial.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        match result {
+            Ok(Preview::Video { pixels, frame }) => {
+                ui.set_preview_image(slint::Image::from_rgba8(pixels));
+                ui.set_preview_video_frame(i32::try_from(frame + 1).unwrap_or(1));
+                ui.set_preview_ready(true);
+                ui.set_preview_message("".into());
+            }
+            Ok(Preview::Image(pixels)) => {
+                ui.set_preview_image(slint::Image::from_rgba8(pixels));
+                ui.set_preview_ready(true);
+                ui.set_preview_message("".into());
+            }
+            Ok(Preview::Pdf {
+                page,
+                pages,
+                previous,
+                current,
+                next,
+            }) => {
+                ui.set_preview_pdf_rendered_page(i32::try_from(page).unwrap_or(1));
+                ui.set_preview_pdf_pages(i32::try_from(pages).unwrap_or(1));
+                ui.set_preview_pdf_previous_ready(previous.is_some());
+                ui.set_preview_pdf_previous_image(
+                    previous.map_or_else(slint::Image::default, slint::Image::from_rgba8),
+                );
+                ui.set_preview_image(slint::Image::from_rgba8(current));
+                ui.set_preview_pdf_next_ready(next.is_some());
+                ui.set_preview_pdf_next_image(
+                    next.map_or_else(slint::Image::default, slint::Image::from_rgba8),
+                );
+                ui.set_preview_ready(true);
+                ui.set_preview_message("".into());
+            }
+            Ok(Preview::Text(contents)) => {
+                ui.set_preview_text(text_chunks(&contents));
+                ui.set_preview_text_ready(true);
+                ui.set_preview_message("".into());
+            }
+            Err(message) => {
+                ui.set_preview_ready(false);
+                ui.set_preview_video_frame(0);
+                ui.set_preview_message(message.into());
+            }
+        }
+    })
+    .is_ok()
 }
 
 pub fn connect(ui: &crate::AppWindow) {
@@ -107,6 +209,27 @@ pub fn connect(ui: &crate::AppWindow) {
             if worker_serial.load(Ordering::Acquire) != request.serial {
                 continue;
             }
+            if kind(&request.path) == Kind::Video {
+                let result = cycle_video_frames(&request, &worker_serial, |frame| {
+                    publish(
+                        &weak,
+                        &worker_pending,
+                        &worker_serial,
+                        request.serial,
+                        Ok(frame),
+                    )
+                });
+                if let Err(message) = result {
+                    publish(
+                        &weak,
+                        &worker_pending,
+                        &worker_serial,
+                        request.serial,
+                        Err(message),
+                    );
+                }
+                continue;
+            }
             let result = load(
                 &request.path,
                 request.page,
@@ -117,58 +240,13 @@ pub fn connect(ui: &crate::AppWindow) {
             if worker_serial.load(Ordering::Acquire) != request.serial {
                 continue;
             }
-            *worker_pending.lock().unwrap() = Some((request.serial, result));
-            let pending = worker_pending.clone();
-            let serial = worker_serial.clone();
-            if weak
-                .upgrade_in_event_loop(move |ui| {
-                    let Some((id, result)) = pending.lock().unwrap().take() else {
-                        return;
-                    };
-                    if serial.load(Ordering::Acquire) != id {
-                        return;
-                    }
-                    match result {
-                        Ok(Preview::Image(pixels)) => {
-                            ui.set_preview_image(slint::Image::from_rgba8(pixels));
-                            ui.set_preview_ready(true);
-                            ui.set_preview_message("".into());
-                        }
-                        Ok(Preview::Pdf {
-                            page,
-                            pages,
-                            previous,
-                            current,
-                            next,
-                        }) => {
-                            ui.set_preview_pdf_rendered_page(i32::try_from(page).unwrap_or(1));
-                            ui.set_preview_pdf_pages(i32::try_from(pages).unwrap_or(1));
-                            ui.set_preview_pdf_previous_ready(previous.is_some());
-                            ui.set_preview_pdf_previous_image(
-                                previous
-                                    .map_or_else(slint::Image::default, slint::Image::from_rgba8),
-                            );
-                            ui.set_preview_image(slint::Image::from_rgba8(current));
-                            ui.set_preview_pdf_next_ready(next.is_some());
-                            ui.set_preview_pdf_next_image(
-                                next.map_or_else(slint::Image::default, slint::Image::from_rgba8),
-                            );
-                            ui.set_preview_ready(true);
-                            ui.set_preview_message("".into());
-                        }
-                        Ok(Preview::Text(contents)) => {
-                            ui.set_preview_text(contents.into());
-                            ui.set_preview_text_ready(true);
-                            ui.set_preview_message("".into());
-                        }
-                        Err(message) => {
-                            ui.set_preview_ready(false);
-                            ui.set_preview_message(message.into());
-                        }
-                    }
-                })
-                .is_err()
-            {
+            if !publish(
+                &weak,
+                &worker_pending,
+                &worker_serial,
+                request.serial,
+                result,
+            ) {
                 break;
             }
         }
@@ -177,14 +255,16 @@ pub fn connect(ui: &crate::AppWindow) {
     let send_scroll = send.clone();
     let serial_scroll = serial.clone();
     let pending_scroll = pending.clone();
+    let cancel_on_drop = CancelOnDrop(serial.clone());
     let weak = ui.as_weak();
     ui.on_preview_requested(move |path, page| {
+        let _keep_alive = &cancel_on_drop;
         let Some(ui) = weak.upgrade() else { return };
         let id = serial.fetch_add(1, Ordering::AcqRel) + 1;
         pending.lock().unwrap().take();
         ui.set_preview_ready(false);
         ui.set_preview_text_ready(false);
-        ui.set_preview_text("".into());
+        ui.set_preview_text(slint::ModelRc::default());
         ui.set_preview_image(slint::Image::default());
         ui.set_preview_pdf_previous_image(slint::Image::default());
         ui.set_preview_pdf_next_image(slint::Image::default());
@@ -194,6 +274,8 @@ pub fn connect(ui: &crate::AppWindow) {
         let path = path.to_string();
         let file_kind = kind(&path);
         ui.set_preview_pdf_active(!path.is_empty() && file_kind == Kind::Pdf);
+        ui.set_preview_video_active(!path.is_empty() && file_kind == Kind::Video);
+        ui.set_preview_video_frame(0);
         ui.set_preview_pdf_page(page.max(1));
         if page <= 1 {
             ui.set_preview_pdf_pages(0);
@@ -211,6 +293,7 @@ pub fn connect(ui: &crate::AppWindow) {
             let message = match file_kind {
                 Kind::Raster | Kind::Svg => "Loading image…",
                 Kind::Pdf => "Loading PDF…",
+                Kind::Video => "Loading video frames…",
                 Kind::Document => "Loading document…",
                 Kind::Text => "Loading text…",
                 Kind::Unsupported => "Preview unavailable for this file type",
@@ -273,6 +356,7 @@ fn load(
     match kind(path.to_str().unwrap_or("")) {
         Kind::Raster | Kind::Svg => load_image(path, request, serial).map(Preview::Image),
         Kind::Pdf => load_pdf_preview(path, page, request, serial, pdf_cache),
+        Kind::Video => unreachable!("video uses the frame cycle worker"),
         Kind::Document => load_document(path, request, serial),
         Kind::Text => load_text(path).map(Preview::Text),
         Kind::Unsupported => Err("Preview unavailable for this file type"),
@@ -463,6 +547,217 @@ fn scaled_dimensions(width: u32, height: u32) -> (u32, u32) {
                 .unwrap(),
             PREVIEW_SIDE,
         )
+    }
+}
+
+struct VideoInfo {
+    width: u32,
+    height: u32,
+    duration: f32,
+}
+
+fn parse_video_info(text: &str) -> Result<VideoInfo, &'static str> {
+    let mut width = 0;
+    let mut height = 0;
+    let mut duration = 0.0_f32;
+    let mut rotation = 0_i32;
+    for line in text.lines() {
+        if let Some((key, value)) = line.split_once('=') {
+            match key {
+                "width" => width = value.parse().unwrap_or(0),
+                "height" => height = value.parse().unwrap_or(0),
+                "duration" => {
+                    if let Ok(seconds) = value.parse::<f32>()
+                        && seconds.is_finite()
+                        && seconds > 0.0
+                    {
+                        duration = seconds;
+                    }
+                }
+                "rotation" => rotation = value.parse().unwrap_or(0),
+                _ => {}
+            }
+        }
+    }
+    if width == 0 || height == 0 || duration <= 0.0 {
+        return Err("Cannot inspect video stream or duration");
+    }
+    if width > MAX_SIDE || height > MAX_SIDE || u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return Err("Video dimensions too large to preview");
+    }
+    if rotation.rem_euclid(180) == 90 {
+        std::mem::swap(&mut width, &mut height);
+    }
+    let largest = width.max(height).max(VIDEO_SIDE);
+    width = (width * VIDEO_SIDE / largest).max(1);
+    height = (height * VIDEO_SIDE / largest).max(1);
+    Ok(VideoInfo {
+        width,
+        height,
+        duration,
+    })
+}
+
+fn random_seed() -> u64 {
+    let mut bytes = [0_u8; 8];
+    if File::open("/dev/urandom")
+        .and_then(|mut file| file.read_exact(&mut bytes))
+        .is_ok()
+    {
+        return u64::from_ne_bytes(bytes);
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    now.as_secs() ^ u64::from(now.subsec_nanos())
+}
+
+fn sample_positions(duration: f32, seed: u64) -> [f32; VIDEO_FRAMES] {
+    let mut state = seed;
+    // Pick one random instant from each fifth, then display them in time order.
+    // Stay slightly before the reported end so the decoder can find a frame.
+    let span = duration * 0.98;
+    std::array::from_fn(|index| {
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut bits = state;
+        bits = (bits ^ (bits >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        bits = (bits ^ (bits >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        bits ^= bits >> 31;
+        #[allow(clippy::cast_precision_loss)]
+        let fraction = ((bits >> 40) as u32) as f32 / 16_777_216.0;
+        #[allow(clippy::cast_precision_loss)]
+        let segment = index as f32 + fraction;
+        segment * span / VIDEO_FRAMES_F32
+    })
+}
+
+fn decode_video_frame(
+    path: &Path,
+    info: &VideoInfo,
+    position: f32,
+    scratch: &ScratchDir,
+    request: u64,
+    serial: &AtomicU64,
+) -> Result<Pixels, &'static str> {
+    let output = scratch.join("video-frame.rgba");
+    let mut command = Command::new("ffmpeg");
+    command
+        .args(["-nostdin", "-v", "error", "-threads", "1", "-ss"])
+        .arg(format!("{position:.6}"))
+        .arg("-i")
+        .arg(path)
+        .args([
+            "-map",
+            "0:v:0",
+            "-an",
+            "-sn",
+            "-dn",
+            "-frames:v",
+            "1",
+            "-vf",
+        ])
+        .arg(format!(
+            "scale={}:{}:flags=bilinear,setsar=1",
+            info.width, info.height
+        ))
+        .args([
+            "-threads", "1", "-pix_fmt", "rgba", "-f", "rawvideo", "pipe:1",
+        ]);
+    let frame_bytes = u64::from(info.width) * u64::from(info.height) * 4;
+    run_stdout(
+        command,
+        &output,
+        frame_bytes,
+        RENDER_TIMEOUT,
+        request,
+        serial,
+        "Install FFmpeg for video previews",
+        "Cannot decode video frame",
+    )?;
+    let bytes = read_output(&output, frame_bytes)?;
+    if bytes.len() != usize::try_from(frame_bytes).unwrap() {
+        return Err("Cannot decode video frame");
+    }
+    let mut pixels = Pixels::new(info.width, info.height);
+    pixels.make_mut_bytes().copy_from_slice(&bytes);
+    Ok(pixels)
+}
+
+fn cycle_video_frames(
+    request: &Request,
+    serial: &AtomicU64,
+    mut emit: impl FnMut(Preview) -> bool,
+) -> Result<(), &'static str> {
+    let path = Path::new(&request.path);
+    if !fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) {
+        return Err("Video file is unavailable");
+    }
+    let scratch = ScratchDir::new().map_err(|_| "Cannot prepare video preview")?;
+    let output = scratch.join("video-info.txt");
+    let mut probe = Command::new("ffprobe");
+    probe
+        .args([
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=width,height,duration:stream_side_data=rotation:format=duration",
+            "-of",
+            "default=noprint_wrappers=1",
+            "-i",
+        ])
+        .arg(path);
+    run_stdout(
+        probe,
+        &output,
+        4096,
+        RENDER_TIMEOUT,
+        request.serial,
+        serial,
+        "Install FFmpeg (ffmpeg and ffprobe) for video previews",
+        "Cannot inspect video",
+    )?;
+    let info = parse_video_info(&fs::read_to_string(output).map_err(|_| "Cannot inspect video")?)?;
+    let positions = sample_positions(info.duration, random_seed());
+    let mut frames = Vec::with_capacity(VIDEO_FRAMES);
+    let mut first_shown = Instant::now();
+    for (index, position) in positions.into_iter().enumerate() {
+        if serial.load(Ordering::Acquire) != request.serial {
+            return Err("Preview cancelled");
+        }
+        let pixels = decode_video_frame(path, &info, position, &scratch, request.serial, serial)?;
+        if index == 0 {
+            first_shown = Instant::now();
+            if !emit(Preview::Video {
+                pixels: pixels.clone(),
+                frame: 0,
+            }) {
+                return Ok(());
+            }
+        }
+        frames.push(pixels);
+    }
+    let mut index = 1;
+    let mut next = first_shown + VIDEO_FRAME_INTERVAL;
+    loop {
+        while Instant::now() < next {
+            if serial.load(Ordering::Acquire) != request.serial {
+                return Err("Preview cancelled");
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if serial.load(Ordering::Acquire) != request.serial {
+            return Err("Preview cancelled");
+        }
+        if !emit(Preview::Video {
+            pixels: frames[index].clone(),
+            frame: index,
+        }) {
+            return Ok(());
+        }
+        index = (index + 1) % VIDEO_FRAMES;
+        next = Instant::now() + VIDEO_FRAME_INTERVAL;
     }
 }
 
@@ -1173,6 +1468,42 @@ fn load_text(path: &Path) -> Result<String, &'static str> {
     Ok(text)
 }
 
+/// Splits text into lines, cutting long lines, so the virtualized list only
+/// renders a few short Text items at a time.
+fn split_text(text: &str) -> Vec<String> {
+    let mut chunks = Vec::new();
+    for line in text.lines() {
+        let mut rest = line;
+        loop {
+            let mut end = rest
+                .char_indices()
+                .nth(TEXT_CHUNK_CHARS)
+                .map_or(rest.len(), |(index, _)| index);
+            // Prefer a word boundary so wrapping does not split a word across items.
+            if end < rest.len()
+                && let Some(space) = rest[..end].rfind(' ')
+            {
+                end = space + 1;
+            }
+            chunks.push(rest[..end].to_owned());
+            rest = &rest[end..];
+            if rest.is_empty() {
+                break;
+            }
+        }
+    }
+    chunks
+}
+
+fn text_chunks(text: &str) -> slint::ModelRc<slint::SharedString> {
+    slint::ModelRc::new(slint::VecModel::from(
+        split_text(text)
+            .into_iter()
+            .map(slint::SharedString::from)
+            .collect::<Vec<_>>(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1202,7 +1533,131 @@ mod tests {
             assert_eq!(kind(name), Kind::Document, "{name}");
         }
         assert_eq!(kind("report.PDF"), Kind::Pdf);
+        for name in [
+            "clip.MP4",
+            "clip.mkv",
+            "clip.webm",
+            "clip.mov",
+            "clip.avi",
+            "clip.m2ts",
+        ] {
+            assert_eq!(kind(name), Kind::Video, "{name}");
+        }
         assert_eq!(kind("archive.zip"), Kind::Unsupported);
+    }
+
+    #[test]
+    fn video_probe_bounds_dimensions_and_handles_rotation_and_bad_duration() {
+        let info = parse_video_info(
+            "width=1920\nheight=1080\nduration=N/A\nrotation=-90\nduration=61.5\n",
+        )
+        .unwrap();
+        assert_eq!((info.width, info.height), (360, 640));
+        let positions = sample_positions(info.duration, 1234);
+        assert!(
+            positions
+                .iter()
+                .all(|position| *position >= 0.0 && *position < info.duration)
+        );
+        for (index, position) in positions.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)]
+            let start = index as f32 * info.duration * 0.98 / VIDEO_FRAMES_F32;
+            #[allow(clippy::cast_precision_loss)]
+            let end = (index + 1) as f32 * info.duration * 0.98 / VIDEO_FRAMES_F32;
+            assert!(*position >= start && *position < end);
+        }
+        assert!(
+            positions
+                .iter()
+                .zip(sample_positions(info.duration, 5678))
+                .any(|(first, second)| (first - second).abs() > 0.001)
+        );
+        for duration in ["N/A", "NaN", "inf", "-1", "0"] {
+            assert!(
+                parse_video_info(&format!("width=1920\nheight=1080\nduration={duration}\n"))
+                    .is_err()
+            );
+        }
+        assert!(parse_video_info("width=10000\nheight=10000\nduration=2\n").is_err());
+        assert!(parse_video_info("duration=2\n").is_err());
+    }
+
+    #[test]
+    fn ffmpeg_video_samples_five_frames_loops_and_cancels() {
+        if Command::new("ffmpeg").arg("-version").output().is_err()
+            || Command::new("ffprobe").arg("-version").output().is_err()
+        {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("two colors.mkv");
+        assert!(
+            Command::new("ffmpeg")
+                .args([
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=red:s=32x24:r=12:d=1",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "color=blue:s=32x24:r=12:d=1",
+                    "-filter_complex",
+                    "[0:v][1:v]concat=n=2:v=1:a=0",
+                    "-c:v",
+                    "ffv1",
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let serial = AtomicU64::new(1);
+        let mut request = Request {
+            path: path.to_string_lossy().into_owned(),
+            page: 1,
+            serial: 1,
+        };
+        let mut seen = Vec::new();
+        cycle_video_frames(&request, &serial, |preview| {
+            let Preview::Video { pixels, frame } = preview else {
+                panic!("video expected")
+            };
+            assert_eq!((pixels.width(), pixels.height()), (32, 24));
+            seen.push((frame, pixels.as_bytes()[0] > pixels.as_bytes()[2]));
+            seen.len() < 6
+        })
+        .unwrap();
+        assert_eq!(
+            seen.iter().map(|(frame, _)| *frame).collect::<Vec<_>>(),
+            [0, 1, 2, 3, 4, 0]
+        );
+        assert_eq!(seen[0].1, seen[5].1);
+        assert!(seen.iter().any(|(_, red)| *red));
+        assert!(seen.iter().any(|(_, red)| !*red));
+
+        let started = Instant::now();
+        assert_eq!(
+            cycle_video_frames(&request, &serial, |_| {
+                serial.store(2, Ordering::Release);
+                true
+            })
+            .unwrap_err(),
+            "Preview cancelled"
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        request.serial = 2;
+        request.path = dir.path().join("broken.mp4").to_string_lossy().into_owned();
+        fs::write(&request.path, b"invalid video").unwrap();
+        assert!(
+            cycle_video_frames(&request, &serial, |_| panic!(
+                "broken video cannot produce frames"
+            ))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1306,13 +1761,9 @@ with zipfile.ZipFile(sys.argv[1], 'w') as archive: archive.writestr('word/docume
         );
     }
 
-    #[test]
-    fn divider_drag_resizes_and_window_shrink_clamps_the_pane() {
+    fn headless_window(width: u32, height: u32) {
         use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
-        use slint::platform::{
-            Platform, PlatformError, PointerEventButton, WindowAdapter, WindowEvent,
-        };
-        use slint::{LogicalPosition, PhysicalSize};
+        use slint::platform::{Platform, PlatformError, WindowAdapter};
         use std::rc::Rc;
         thread_local! { static WINDOW: Rc<MinimalSoftwareWindow> = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer); }
         struct TestPlatform;
@@ -1321,8 +1772,102 @@ with zipfile.ZipFile(sys.argv[1], 'w') as archive: archive.writestr('word/docume
                 Ok(WINDOW.with(Rc::clone))
             }
         }
-        slint::platform::set_platform(Box::new(TestPlatform)).unwrap();
-        WINDOW.with(|window| window.set_size(PhysicalSize::new(900, 580)));
+        // Tests share one process-wide platform; each test thread gets its own window.
+        let _ = slint::platform::set_platform(Box::new(TestPlatform));
+        WINDOW.with(|window| window.set_size(slint::PhysicalSize::new(width, height)));
+    }
+
+    fn preview_row(name: &str, folder: &str) -> slint::ModelRc<slint::StandardListViewItem> {
+        let item = |text: &str| {
+            let mut item = slint::StandardListViewItem::default();
+            item.text = text.into();
+            item
+        };
+        slint::ModelRc::new(slint::VecModel::from(vec![
+            item(name),
+            item(folder),
+            item(""),
+            item(""),
+        ]))
+    }
+
+    #[test]
+    fn long_text_preview_renders_with_the_software_renderer() {
+        headless_window(900, 580);
+        let ui = crate::AppWindow::new().unwrap();
+        ui.set_rows(slint::ModelRc::new(slint::VecModel::from(vec![
+            preview_row("notes.txt", "/tmp"),
+        ])));
+        ui.set_selected(0);
+        ui.show().unwrap();
+        let lines = (1..=5_000).fold(String::new(), |mut text, line| {
+            text.push_str(&line.to_string());
+            text.push('\n');
+            text
+        });
+        ui.set_preview_text(text_chunks(&lines));
+        ui.set_preview_text_ready(true);
+        // Before chunking, one Text item exceeded the renderer's i16 coordinates.
+        let _ = ui.window().take_snapshot().unwrap();
+        for _ in 0..20 {
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                    position: slint::LogicalPosition { x: 750.0, y: 300.0 },
+                    delta_x: 0.0,
+                    delta_y: -20_000.0,
+                });
+            let _ = ui.window().take_snapshot().unwrap();
+        }
+    }
+
+    #[test]
+    fn deep_pdf_pages_render_with_the_software_renderer() {
+        headless_window(900, 580);
+        let ui = crate::AppWindow::new().unwrap();
+        ui.set_rows(slint::ModelRc::new(slint::VecModel::from(vec![
+            preview_row("report.pdf", "/tmp"),
+        ])));
+        ui.set_selected(0);
+        ui.set_preview_pdf_active(true);
+        ui.set_preview_pdf_pages(1_000);
+        ui.show().unwrap();
+        let _ = ui.window().take_snapshot().unwrap();
+        for _ in 0..40 {
+            ui.window()
+                .dispatch_event(slint::platform::WindowEvent::PointerScrolled {
+                    position: slint::LogicalPosition { x: 750.0, y: 300.0 },
+                    delta_x: 0.0,
+                    delta_y: -20_000.0,
+                });
+            ui.set_preview_pdf_page(ui.get_preview_pdf_page() + 40);
+            let _ = ui.window().take_snapshot().unwrap();
+        }
+    }
+
+    #[test]
+    fn text_chunks_split_lines_and_bound_long_lines() {
+        let chunks = split_text("a\nb\n\n");
+        assert_eq!(chunks, ["a", "b", ""]);
+        let long = "é".repeat(TEXT_CHUNK_CHARS * 2 + 5);
+        let chunks = split_text(&long);
+        assert_eq!(chunks.len(), 3);
+        assert!(
+            chunks
+                .iter()
+                .all(|chunk| chunk.chars().count() <= TEXT_CHUNK_CHARS)
+        );
+        assert_eq!(chunks.concat(), long);
+        let words = "word ".repeat(TEXT_CHUNK_CHARS);
+        let chunks = split_text(&words);
+        assert!(chunks.iter().all(|chunk| chunk.ends_with("word ")));
+        assert_eq!(chunks.concat(), words);
+    }
+
+    #[test]
+    fn divider_drag_resizes_and_window_shrink_clamps_the_pane() {
+        use slint::LogicalPosition;
+        use slint::platform::{PointerEventButton, WindowEvent};
+        headless_window(900, 580);
         let ui = crate::AppWindow::new().unwrap();
         ui.show().unwrap();
         let _ = ui.window().take_snapshot().unwrap();
@@ -1341,7 +1886,7 @@ with zipfile.ZipFile(sys.argv[1], 'w') as archive: archive.writestr('word/docume
             button: PointerEventButton::Left,
         });
         assert!(ui.get_preview_width() > 300.0);
-        WINDOW.with(|window| window.set_size(PhysicalSize::new(560, 580)));
+        headless_window(560, 580);
         let _ = ui.window().take_snapshot().unwrap();
         assert!(ui.get_preview_width() <= 340.0);
     }

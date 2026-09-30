@@ -109,8 +109,10 @@ Home/End then move the selection, loading distant rows as needed.
 
 The resizable right pane previews common images, SVG, the first page of a
 PDF, and DOC, DOCX, ODT, and RTF documents. Text, Markdown, logs, CSV, JSON,
-configuration, and source files use a scrollable, read-only text view. GIFs
-show one frame. Additional image codecs such as AVIF and HEIC work when an
+configuration, and source files use a scrollable, read-only text view. Videos
+(including MP4, MKV, WebM, MOV, and AVI) show five randomly sampled still
+frames in a repeating cycle. The frame loop stops when selecting another file
+or hiding the window. GIFs show one frame. Additional image codecs such as AVIF and HEIC work when an
 installed renderer supports them. Unsupported or unreadable files show a
 message; selected-file metadata stays in the footer.
 
@@ -118,6 +120,13 @@ Previews use installed tools instead of format-specific Rust dependencies:
 
 - Images and SVG: FFmpeg (`ffprobe` and `ffmpeg`), then ImageMagick (`magick`
   or `convert`) or GraphicsMagick (`gm`).
+- Video stills: FFmpeg (`ffprobe` and `ffmpeg`) decodes five frames once,
+  within 640 × 640 pixels, and cycles those images. Audio is not decoded.
+  Large video files can be previewed without the image source-size
+  limit. Supported codecs depend on the installed FFmpeg build. A finite
+  duration and source dimensions within the image pixel limits are required.
+  If FFmpeg is unavailable, open the file in mpv, VLC, or your desktop's
+  default video player (Enter or double-click). Those players run separately.
 - PDFs: Poppler (`pdftoppm`), then MuPDF (`mutool`).
 - Embedded office thumbnails: `gsf-office-thumbnailer` for DOC, DOCX, and ODT
   when the file contains a usable preview image. Blank or missing thumbnails
