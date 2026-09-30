@@ -2,13 +2,17 @@
 
 **Fast local file search for Linux, built as a daemon-backed Rust workspace.**
 
-Toge is an open source project for indexing local files and querying them through a CLI-first workflow. The long-term aim is a search tool that feels immediate in the terminal, stays lightweight in memory, and scales cleanly from interactive use to shell scripts and automation.
+Toge is an open source project for indexing local files and searching them through
+a CLI, a Slint desktop client, or a Noctalia launcher plugin. All clients query
+the same local daemon. The aim is immediate search with lightweight clients that
+work well interactively and in shell scripts and automation.
 
 ## Why Toge
 
 - Fast local search without depending on a GUI
 - Daemon-backed queries for low-latency repeated lookups
 - A CLI workflow designed for piping, scripting, and terminal use
+- A desktop client with paged results, file actions, and selected-file previews
 - A modular Rust codebase with a shared core library
 
 ## Status
@@ -18,6 +22,8 @@ for the daemon, CLI, and Slint desktop client, along with beta and nightly
 prerelease channels.
 
 - Public interfaces may still change before `1.0`
+- These guides describe the current checkout. Features added after the latest
+  stable tag are listed under [Unreleased in the changelog](CHANGELOG.md#unreleased).
 
 ## Workspace
 
@@ -36,30 +42,38 @@ Repository layout:
 ├── toged/         # daemon binary sources
 ├── toge/          # CLI binary sources
 ├── toge-slint/    # desktop GUI sources
-├── scripts/       # dev launcher, benchmarks, profiling, and release helpers
-└── .github/       # CI, release, and repo automation
+├── integrations/ # Noctalia launcher plugin
+├── scripts/      # dev launcher, benchmarks, profiling, and release helpers
+└── .github/      # CI, release, and repo automation
 ```
 
 ## Architecture
 
-The intended runtime model is:
+The runtime model is:
 
 1. `toged` scans and watches configured filesystem roots
 2. `toge-core` maintains the in-memory index and query engine
 3. `toge` sends search requests over a Unix domain socket and prints results
+4. `toge-slint` keeps results in daemon sessions and fetches visible pages
+5. The Noctalia plugin invokes `toge` for JSON results and daemon status
 
 Each crate's README documents its part of this flow: [toge-core](toge-core/README.md), [toged](toged/README.md), [toge](toge/README.md), and [toge-slint](toge-slint/README.md).
+See the [Noctalia integration guide](integrations/noctalia/toge/README.md) for
+launcher setup and CLI compatibility requirements.
 
 ## Getting Started
 
 ### Requirements
 
 - Linux
-- Rust stable toolchain (edition 2024, so Rust 1.85 or newer)
+- The Rust toolchain pinned in `rust-toolchain.toml` (currently 1.97.1).
+  Slint 1.17.1 requires at least Rust 1.92.
 - Font and keyboard development headers for the Slint client, for example
   `libfontconfig1-dev` and `libxkbcommon-dev` on Debian/Ubuntu
 - `python3` and the libcap tools (`getcap`/`setcap`) for `make gui` and the
   launcher tests
+- `flock` for development profile locking; `pkexec` and a graphical Polkit
+  authentication agent for the launcher's live-update approval dialog
 
 The repository includes `rust-toolchain.toml` so the expected toolchain components are installed consistently for contributors.
 
@@ -84,7 +98,11 @@ also include SHA-256 checksum files.
 after extracting or rebuilding the daemon:
 
 ```bash
-sudo ./scripts/setcap-toged.sh target/debug/toged
+# From an extracted release archive (requires the libcap tools):
+sudo setcap cap_sys_admin,cap_dac_read_search+ep ./toged
+
+# From a source checkout after a debug build:
+./scripts/setcap-toged.sh target/debug/toged
 ```
 
 ### GUI Development Profiles
@@ -173,7 +191,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and release
 Near-term priorities:
 
 - stabilize public interfaces ahead of `1.0`
-- desktop integration for the Slint client: global shortcuts, autostart, and a settings UI
+- autostart and daemon configuration editing in the Slint client; shortcut
+  preferences and portal-backed global shortcuts are already available
 - installer packages for the Slint client
 
 ## Contributing

@@ -55,8 +55,12 @@ Rebuilding the binary with Cargo drops file capabilities, so grant them again
 after each build:
 
 ```bash
-sudo ./scripts/setcap-toged.sh target/debug/toged
+./scripts/setcap-toged.sh target/debug/toged
 ```
+
+The helper invokes `sudo` for `setcap`. Release archives contain the daemon but
+not the helper; from an extracted archive, use
+`sudo setcap cap_sys_admin,cap_dac_read_search+ep ./toged` instead.
 
 `toge -status` prints a hint when the watcher is not healthy.
 
@@ -64,6 +68,7 @@ sudo ./scripts/setcap-toged.sh target/debug/toged
 
 - `toge-core` provides indexing, query, IPC, and watcher primitives
 - `toge` acts as the user-facing command-line client
+- `toge-slint` uses result sessions for the desktop search interface
 
 For the overall architecture, see the repository root [README.md](../README.md).
 

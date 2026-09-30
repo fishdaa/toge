@@ -6,10 +6,37 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [Unreleased]
 
+### Added
+
+- CLI JSON Lines output (`--json`/`-jsonl`), nonblocking readiness checks
+  (`--no-wait`), and `--` to separate query text from options.
+- Noctalia launcher plugin with file search, daemon progress, index rebuilding,
+  and an optional action to open the Slint client.
+- Slint Options window for recording, clearing, and saving application shortcuts,
+  plus systemwide window shortcuts through the desktop Global Shortcuts portal.
+- Selected-file previews for images, SVG, PDFs, text/code, office documents,
+  spreadsheets, audio metadata/artwork, and sampled video stills using optional
+  installed tools; reuse of valid freedesktop thumbnails.
+
+### Changed
+
+- PDF previews render at the pane's physical pixel width, load the visible page
+  before neighboring pages, and support scrolling through the document.
+- Text/code previews show line numbers, wrapping controls, horizontal scrolling,
+  keyboard navigation, copying, and optional syntax colors from `bat`/`batcat`.
+
+### Fixed
+
+- Video previews display the first frame while samples load and keep it visible
+  if duration inspection or sampling fails.
+- Slint keeps selected-file details and a compact result summary on one footer
+  row, eliding long details to keep status visible.
+
 ### Removed
 
 - The unused `exclude_fstypes` (`[roots]`) and `interval_secs` (`[polling]`) config options. Existing config files that set them still load; the values are ignored.
 - The CLI flags `-pause`/`-more` and `-config`, which were parsed but had no effect. Passing them is now an unknown-flag error.
+- The preview Support button, its popup, and unused diagnostic summary.
 
 ## [0.2.1] - 2026-09-28
 

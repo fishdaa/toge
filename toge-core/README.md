@@ -2,7 +2,8 @@
 
 Shared library crate for the Toge workspace.
 
-`toge-core` contains the reusable building blocks behind the daemon and CLI:
+`toge-core` contains the reusable building blocks behind the daemon, CLI, and
+Slint client:
 
 - filesystem walking and exclusion rules
 - in-memory indexing and persistence

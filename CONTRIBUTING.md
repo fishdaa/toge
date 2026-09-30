@@ -31,6 +31,18 @@ parsed CLI flag is missing from `toge/README.md`, when `release-notes.md` and th
 current `CHANGELOG.md` section disagree, or when a Markdown link points at a
 missing or gitignored file. Update the docs in the same change as the code.
 
+The guides describe the current checkout. Document new behavior under
+`CHANGELOG.md`'s Unreleased section; keep `release-notes.md` aligned with the
+current released version until preparing the next release. Preserve dated
+Slint validation results as history, and mark superseded behavior without
+claiming new visual coverage from a documentation update.
+
+For UI changes, follow [AGENTS.md](AGENTS.md): run automated tests first, then
+record and inspect the affected visual flow. Slint verification must exercise
+`toge-slint/ui/main.slint`, using a native window where possible or the offscreen
+Slint software renderer. Keep artifacts outside version control and share a
+tailnet-only recording URL when Tailscale is available.
+
 ## Versioning
 
 Toge follows Semantic Versioning:

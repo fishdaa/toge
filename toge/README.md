@@ -6,6 +6,10 @@ Command-line client for querying the Toge search daemon.
 needed, sends search or maintenance requests, and prints the results in
 terminal-friendly formats.
 
+This guide describes the current checkout. JSON Lines output, `--no-wait`, and
+`--` were added after stable `v0.2.1`; see
+[Unreleased](../CHANGELOG.md#unreleased) before using them with a tagged build.
+
 ## Features
 
 - daemon-backed local file search

@@ -7,6 +7,14 @@ and daemon.
 Download the archive for your Linux architecture from GitHub Releases, extract
 it, and run `./toge-slint` from the extracted directory. Keep the bundled `toged`
 next to it so the client uses a daemon with the matching session protocol.
+This guide describes the current checkout; see
+[Unreleased](../CHANGELOG.md#unreleased) for features added after the latest
+stable tag.
+
+For live filesystem updates, grant the extracted daemon's capabilities using
+the libcap tools: `sudo setcap cap_sys_admin,cap_dac_read_search+ep ./toged`.
+Rebuilding or replacing the daemon removes these capabilities. See the
+[daemon guide](../toged/README.md#capabilities) for source-checkout setup.
 
 ```bash
 make gui                  # isolated development daemon and settings
@@ -79,6 +87,8 @@ host goes away while no window is open, the GUI exits as before.
 
 Build requires Rust and Linux development
 libraries for Winit rendering (including fontconfig and xkbcommon).
+Use the repository's pinned Rust toolchain; Slint 1.17.1 requires Rust 1.92
+or newer.
 No Node, WebKit or Qt is needed for the Slint build. Runtime file actions use
 `xdg-open` and `gio trash`; the clipboard supports Wayland and X11 directly.
 
@@ -179,6 +189,13 @@ directory and restored, including the header arrow, on launch. Resized Name,
 Path and Size column widths are saved to the same file once a drag settles and
 restored on launch; Modified fills the remaining width. Selection follows
 the full path when search results are replaced or refreshed.
+
+The footer stays on one row. With a selected result it shows the file's name,
+size, modified time and parent path, alongside its position and the result
+count and total size (for example `1 of 250 | 12.0 MB`). Long details are elided.
+Without a selected result it shows the search summary and daemon index status.
+Loading, action and error messages use the same status area; unavailable size
+metadata is labelled explicitly.
 
 Results live in the daemon. Each search opens a *result session* on its own
 connection: the daemon keeps the matching index IDs (4 bytes per match) and the

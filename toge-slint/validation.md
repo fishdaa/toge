@@ -1,8 +1,22 @@
-# MVP validation
+# Slint validation history
 
-Validated on 2026-09-09, Linux x86_64, Rust 1.97.1, Slint 1.17.1.
+This file records checks at the time of each change. Test counts, measurements,
+renderers, limitations, and recordings belong to the named revision; older
+entries are not descriptions of the current implementation. See the
+[Slint README](README.md) for current behavior and requirements.
 
-## Checks
+The client now uses daemon-held result sessions with a bounded page cache,
+supports shortcut preferences and portal-backed global shortcuts, and previews
+selected files. The preview Support popup was removed after the pane-sized
+preview validation. Autostart, daemon configuration editing, and installer
+packages remain unimplemented. This documentation alignment adds no new visual
+test evidence.
+
+## Initial MVP — 2026-09-09
+
+Validated on Linux x86_64, Rust 1.97.1, Slint 1.17.1.
+
+### Checks
 
 - Release build: `cargo build --release -p toge-slint -p toged` passed.
 - Seven unit/IPC tests passed with local Unix sockets enabled. Covers stale query
@@ -14,7 +28,7 @@ Validated on 2026-09-09, Linux x86_64, Rust 1.97.1, Slint 1.17.1.
 - Normal dependency tree contains the software renderer and excludes Tauri,
   WebKit and Qt.
 
-## Native window smoke test
+### Native window smoke test
 
 Launched the optimized client on Niri/Wayland against an isolated daemon indexing
 10,000 temporary text files. Configuration enabled size and modified-date metadata.
@@ -46,11 +60,14 @@ results. No claim of 50% RAM savings or 30% faster startup is established yet.
 
 - Matched Tauri comparison with 20 launch trials, median/p95, empty and populated
   windows, cold launch, idle CPU, peak memory and scrolling/input latency.
-- Interactive keyboard, clipboard, double-click, About dialog and resize checks
-  on both Wayland and X11; current native smoke coverage is Wayland rendering and
-  real daemon result loading only.
-- Global shortcuts, autostart, the settings UI and installer packages are outside
-  the MVP. Release archives ship `toge-slint`.
+- Physical-input keyboard, clipboard, double-click, About dialog and resize
+  checks on both Wayland and X11. Later entries record native flows with injected
+  window events and offscreen Slint checks; those do not establish physical-input
+  coverage on both display systems.
+- Native validation of shortcut preferences and desktop portal permission/key
+  handling is not recorded here. Those features are implemented; autostart,
+  daemon configuration editing and installer packages remain outside the
+  current client. Release archives ship `toge-slint`.
 - Tray icon behaviour (StatusNotifierItem registration, the menu's window and
   quit actions, and staying resident after the last window closes) has only
   unit coverage (`menu_offers_window_requests_about_and_quit`); it has no
@@ -93,6 +110,10 @@ older daemons display an instruction to restart or rebuild `toged`.
 
 
 ## Compact Slint result storage — 2026-09-27
+
+> Superseded by daemon-held result sessions below. The GUI now retains a bounded
+> cache of fetched pages; the O(M) client memory and measurements in this entry
+> describe the earlier implementation.
 
 The GUI drops unused wire metadata, stores one boxed path per ordinary row, and
 keeps exceptional wire display labels when they differ from the path. The
@@ -531,6 +552,10 @@ summary. Updated the shared-UI fixture to stop opening the removed popup.
   compositor with injected window input; physical desktop input was not tested.
 
 ## Pane-sized PDF, text and system previews — 2026-09-30
+
+> The Support popup described and exercised in this entry was subsequently
+> removed. See the removal entry above; the recorded popup checks describe
+> the earlier UI.
 
 PDFs now render one bitmap at the visible pane width multiplied by the window's
 scale factor, bounded to 1,200 pixels. Zoom/Fit controls and duplicate fit renders

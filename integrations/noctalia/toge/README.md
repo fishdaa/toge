@@ -14,11 +14,14 @@ up as you type, even across hundreds of thousands of files.
 
 ## Requirements
 
-- `toge` 0.3.0 or newer on `PATH`. It is the first release whose CLI supports
-  `--json`, `--no-wait` and `--`. With an older `toge`, the launcher shows
+- A `toge` build on `PATH` that supports `--json`, `--no-wait` and `--`.
+  These flags are available in the current checkout but not in stable `v0.2.1`.
+  Build this checkout or use a nightly containing the CLI integration changes.
+  With an older `toge`, the launcher shows
   "toge is too old for this plugin" instead of results.
 - `toged`, the toge daemon, on `PATH` or installed next to `toge`. `toge`
-  starts it on first use. The DEB and RPM packages install both.
+  starts it on first use. Linux binary archives include both binaries and
+  `toge-slint`; DEB and RPM packages are no longer produced.
 - `xdg-open`, used to open results.
 - `sleep`, used as a one-second timer while the index is still building.
 
@@ -29,7 +32,7 @@ Open the launcher and type `/toge` followed by a query:
 ```
 /toge report ext:pdf
 /toge folder: src
-/toge regex:^main\.rs$ sort:dm
+/toge regex:^main\.rs$ sort:modified
 ```
 
 Queries use toge's own syntax: `ext:`, `file:`, `folder:`, `path:`, `regex:`,
@@ -43,7 +46,8 @@ With an empty query, the launcher shows the index status and these rows:
   installed.
 
 While the daemon is still loading or indexing, a progress row appears in place
-of results. The plugin retries once a second until the index is ready.
+of results. The plugin retries once a second, up to 120 attempts, while the
+query remains current.
 
 ## Settings
 
