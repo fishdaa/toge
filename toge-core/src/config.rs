@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 )]
 pub struct Config {
     pub roots: Vec<PathBuf>,
-    pub exclude_fstypes: Vec<String>,
     pub exclude_hidden: bool,
     pub exclude_patterns: Vec<String>,
     pub exclude_folders: Vec<String>,
@@ -25,7 +24,6 @@ pub struct Config {
     pub fast_sort_path: bool,
     pub whole_filename_wildcards: bool,
     pub operator_precedence: OperatorOrder,
-    pub poll_interval_secs: u64,
     pub keyboard: KeyboardConfig,
 }
 
@@ -61,7 +59,6 @@ impl Config {
     pub fn default_config() -> Self {
         Self {
             roots: default_roots(),
-            exclude_fstypes: vec!["tmpfs".into(), "nfs4".into(), "fuse.sshfs".into()],
             exclude_hidden: false,
             exclude_patterns: Vec::new(),
             exclude_folders: Vec::new(),
@@ -75,7 +72,6 @@ impl Config {
             fast_sort_path: false,
             whole_filename_wildcards: true,
             operator_precedence: OperatorOrder::OrAnd,
-            poll_interval_secs: 300,
             keyboard: KeyboardConfig::default(),
         }
     }
@@ -141,7 +137,6 @@ impl Config {
                             .map(PathBuf::from)
                             .collect();
                     }
-                    "exclude_fstypes" => cfg.exclude_fstypes = parse_string_array(value)?,
                     _ => {}
                 },
                 "exclude" => match key {
@@ -151,9 +146,6 @@ impl Config {
                     "include_only" => cfg.include_only = parse_string_array(value)?,
                     _ => {}
                 },
-                "polling" if key == "interval_secs" => {
-                    cfg.poll_interval_secs = value.parse().map_err(|_| "invalid interval")?;
-                }
                 "keyboard" => match key {
                     "new_window_hotkey" => {
                         cfg.keyboard.new_window_hotkey = parse_string(value)?;
@@ -201,7 +193,7 @@ impl Config {
             format_shortcuts(&self.keyboard.command_shortcuts, KeyboardScope::ResultList);
 
         format!(
-            "[index]\nsize = {size}\ndate_modified = {date_modified}\ndate_created = {date_created}\ndate_accessed = {date_accessed}\npermissions = {permissions}\nfast_extension = {fast_extension}\nwhole_filename_wildcards = {whole_filename_wildcards}\noperator_precedence = {operator_precedence}\n\n[roots]\nauto_detect = {auto_detect}\ninclude = {roots}\nexclude_fstypes = {exclude_fstypes}\n\n[exclude]\nhidden_files = {exclude_hidden}\npatterns = {exclude_patterns}\nfolders = {exclude_folders}\ninclude_only = {include_only}\n\n[polling]\ninterval_secs = {poll_interval_secs}\n\n[keyboard]\nnew_window_hotkey = {new_window_hotkey}\nshow_window_hotkey = {show_window_hotkey}\ntoggle_window_hotkey = {toggle_window_hotkey}\n\n[keyboard.shortcuts]\nglobal = {global}\nsearch_edit = {search_edit}\nresult_list = {result_list}\n",
+            "[index]\nsize = {size}\ndate_modified = {date_modified}\ndate_created = {date_created}\ndate_accessed = {date_accessed}\npermissions = {permissions}\nfast_extension = {fast_extension}\nwhole_filename_wildcards = {whole_filename_wildcards}\noperator_precedence = {operator_precedence}\n\n[roots]\nauto_detect = {auto_detect}\ninclude = {roots}\n\n[exclude]\nhidden_files = {exclude_hidden}\npatterns = {exclude_patterns}\nfolders = {exclude_folders}\ninclude_only = {include_only}\n\n[keyboard]\nnew_window_hotkey = {new_window_hotkey}\nshow_window_hotkey = {show_window_hotkey}\ntoggle_window_hotkey = {toggle_window_hotkey}\n\n[keyboard.shortcuts]\nglobal = {global}\nsearch_edit = {search_edit}\nresult_list = {result_list}\n",
             size = self.index_size,
             date_modified = self.index_date_modified,
             date_created = self.index_date_created,
@@ -221,12 +213,10 @@ impl Config {
                     .map(|path| path.to_string_lossy().to_string())
                     .collect::<Vec<_>>()
             ),
-            exclude_fstypes = format_string_array(&self.exclude_fstypes),
             exclude_hidden = self.exclude_hidden,
             exclude_patterns = format_string_array(&self.exclude_patterns),
             exclude_folders = format_string_array(&self.exclude_folders),
             include_only = format_string_array(&self.include_only),
-            poll_interval_secs = self.poll_interval_secs,
             new_window_hotkey = format_string(&self.keyboard.new_window_hotkey),
             show_window_hotkey = format_string(&self.keyboard.show_window_hotkey),
             toggle_window_hotkey = format_string(&self.keyboard.toggle_window_hotkey),

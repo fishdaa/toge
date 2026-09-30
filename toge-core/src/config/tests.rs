@@ -12,7 +12,6 @@ fn test_default_config_values() {
         Some(home) => assert_eq!(cfg.roots, vec![home]),
         None => assert!(cfg.roots.is_empty()),
     }
-    assert_eq!(cfg.poll_interval_secs, 300);
     assert_eq!(cfg.operator_precedence, OperatorOrder::OrAnd);
     assert!(cfg.index_size);
     assert!(!cfg.index_date_created);
@@ -38,6 +37,10 @@ exclude_fstypes = ["tmpfs", "nfs4"]
 hidden_files = true
 patterns = ["*.tmp"]
 folders = ["**/node_modules"]
+
+# Removed options are still accepted so older configs keep loading.
+[polling]
+interval_secs = 60
 "#,
     )
     .unwrap();
@@ -47,7 +50,6 @@ folders = ["**/node_modules"]
     assert!(cfg.index_date_modified);
     assert!(cfg.exclude_hidden);
     assert_eq!(cfg.roots, vec![Path::new("/home"), Path::new("/data")]);
-    assert!(cfg.exclude_fstypes.contains(&"tmpfs".to_string()));
     assert!(cfg.exclude_patterns.contains(&"*.tmp".to_string()));
     assert!(cfg.exclude_folders.contains(&"**/node_modules".to_string()));
 }

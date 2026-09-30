@@ -87,3 +87,44 @@ fn read_response_rejects_malformed_body() {
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert!(err.to_string().contains("unknown response type"));
 }
+
+#[test]
+fn json_string_escapes_quotes_backslashes_and_control_chars() {
+    assert_eq!(
+        super::json_string("a\"b\\c\nd\u{1}"),
+        "\"a\\\"b\\\\c\\nd\\u0001\""
+    );
+}
+
+#[test]
+fn render_jsonl_emits_one_object_per_row() {
+    let row = toge_core::ipc::ResultRow {
+        path: "/tmp/a dir/x.txt".into(),
+        name: "x.txt".into(),
+        parent: "/tmp/a dir".into(),
+        extension: "txt".into(),
+        is_dir: false,
+        size: 5,
+        modified_unix: 1_700_000_000,
+        created_unix: 0,
+        accessed_unix: 0,
+    };
+    let dir = toge_core::ipc::ResultRow {
+        path: "/tmp/a dir".into(),
+        name: "a dir".into(),
+        parent: "/tmp".into(),
+        extension: String::new(),
+        is_dir: true,
+        size: 0,
+        modified_unix: 0,
+        created_unix: 0,
+        accessed_unix: 0,
+    };
+    assert_eq!(
+        super::render_jsonl(&[row, dir]),
+        concat!(
+            "{\"path\":\"/tmp/a dir/x.txt\",\"name\":\"x.txt\",\"parent\":\"/tmp/a dir\",\"ext\":\"txt\",\"is_dir\":false,\"size\":5,\"modified\":1700000000}\n",
+            "{\"path\":\"/tmp/a dir\",\"name\":\"a dir\",\"parent\":\"/tmp\",\"ext\":\"\",\"is_dir\":true,\"size\":0,\"modified\":0}\n",
+        )
+    );
+}

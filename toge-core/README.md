@@ -2,7 +2,8 @@
 
 Shared library crate for the Toge workspace.
 
-`toge-core` contains the reusable building blocks behind the daemon and CLI:
+`toge-core` contains the reusable building blocks behind the daemon, CLI, and
+Slint client:
 
 - filesystem walking and exclusion rules
 - in-memory indexing and persistence
@@ -106,10 +107,19 @@ Batches contain at most 128 rows, and client frames are limited to 4 MiB. A fina
 EOF without that summary is an interrupted stream, not successful completion.
 A callback error stops consumption; close/drop the socket to cancel the daemon.
 
-`StreamOrder::Index` explicitly ignores sorting and avoids collecting matching
-IDs. For fixed query and path sizes its extra memory is O(1) with respect to the
-number of files: one batch, one encoded frame, and matcher state.
+`StreamOrder::Index` explicitly ignores sorting and never buffers or sorts
+matches. Queries with a selective seed (an `ext:` filter or a substring of three
+or more characters) first collect candidate IDs from the extension and trigram
+posting lists via `matcher::candidate_ids`, so their extra memory grows with the
+number of candidates. Seedless queries, like `matcher::iter_query`, use O(1)
+extra memory with respect to the number of files: one batch, one encoded frame,
+and matcher state.
 `StreamOrder::Sorted` honors `Query.sort` and retains O(M) IDs for M matches,
 while result-row serialization stays bounded to one batch.
 Both modes honor the request's offset and limit, and scan all matches to produce
 exact final totals. The pre-existing `Request::Query` protocol is unchanged.
+
+Result sessions (`ipc::session`) keep a query's results on the daemon so a
+client can fetch pages, resort, locate a path, and reconcile paths it changed on
+disk without re-running the query. See the [toged README](../toged/README.md) for the request types
+and limits.

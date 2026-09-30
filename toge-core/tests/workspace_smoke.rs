@@ -28,5 +28,5 @@ fn binaries_exist() {
     let target = format!("{}/target/debug", workspace_root.display());
     assert!(std::path::Path::new(&format!("{target}/toged")).exists());
     assert!(std::path::Path::new(&format!("{target}/toge")).exists());
-    assert!(std::path::Path::new(&format!("{target}/toge-gui")).exists());
+    assert!(std::path::Path::new(&format!("{target}/toge-slint")).exists());
 }

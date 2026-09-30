@@ -9,8 +9,10 @@ socket, persists index state, and keeps watch over indexed directories.
 
 - load config and discover indexing roots
 - build or restore the on-disk index
-- answer query, status, save, and reindex requests
-- maintain directory watches through the Linux watcher layer
+- answer query, streaming query, result session, status, save, reindex, and
+  shutdown requests
+- watch indexed filesystems through fanotify, skipping its own state and config
+  directories and configured excludes
 
 ## CLI
 
@@ -35,12 +37,38 @@ cargo run -p toged -- --help
 cargo run -p toged
 ```
 
-The default socket and state files live under the Toge XDG state directory.
+Default locations:
+
+- config: `$XDG_CONFIG_HOME/toge/config.toml` (fallback
+  `~/.config/toge/config.toml`); a missing or unreadable config falls back to
+  built-in defaults
+- state directory: `$XDG_STATE_HOME/toge` (fallback `~/.local/state/toge`),
+  holding `index.bin` and the `toged.sock` socket
+
+The state directory is created owner-only, and the daemon rejects socket peers
+whose UID differs from its own.
+
+### Capabilities
+
+Filesystem-wide fanotify marks need `cap_sys_admin` and `cap_dac_read_search`.
+Rebuilding the binary with Cargo drops file capabilities, so grant them again
+after each build:
+
+```bash
+./scripts/setcap-toged.sh target/debug/toged
+```
+
+The helper invokes `sudo` for `setcap`. Release archives contain the daemon but
+not the helper; from an extracted archive, use
+`sudo setcap cap_sys_admin,cap_dac_read_search+ep ./toged` instead.
+
+`toge -status` prints a hint when the watcher is not healthy.
 
 ## Relationship To Other Crates
 
 - `toge-core` provides indexing, query, IPC, and watcher primitives
 - `toge` acts as the user-facing command-line client
+- `toge-slint` uses result sessions for the desktop search interface
 
 For the overall architecture, see the repository root [README.md](../README.md).
 
@@ -60,11 +88,23 @@ toge --stream --export-csv results.csv ext:rs
 toge --stream --get-result-count ext:rs
 ```
 
-Without `--sort`, `--stream` explicitly uses index order (including when the raw
-search string contains a `sort:` modifier). Use `--sort` to request sorted
-streaming. Existing clients continue to use paginated, sorted queries.
-Index-order streams scan lazily with bounded temporary memory; sorted streams
-still collect matching IDs before emitting results.
+`--stream` uses index order unless a sort is requested (`--sort`, `-s`, `/o…`,
+or an inline `sort:` modifier), in which case it streams sorted results.
+Index-order streams never buffer or sort matches, but selective queries (`ext:`
+filters or substrings of three or more characters) first collect candidate IDs
+from the posting lists. Sorted streams collect all matching IDs before emitting
+results.
+
+## Result sessions
+
+`Request::OpenSession` and `Request::OpenSessionPreview` keep a query's results
+on the daemon for the lifetime of the connection. The client then sends
+`toge_core::ipc::session::SessionRequest` messages: `Fetch` a page of rows,
+`Resort`, `Locate` a path, `Sync` after index changes, or `Reconcile` paths the
+client changed on disk (for example after a rename, trash, or permanent delete).
+Every response carries the session generation and totals. Fetches return at most
+1,024 rows, previews at most 256, and one reconcile at most 256 paths. The Slint
+client uses sessions for paging and sorting.
 
 Streams hold the index mutex to keep IDs, ordering, and totals consistent without
 copying the index. Other queries and watcher updates wait until the stream ends.

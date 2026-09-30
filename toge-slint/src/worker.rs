@@ -358,9 +358,7 @@ fn serve_commands(
                         }
                         match outcome {
                             Ok(paths) if results(&ui).generation() == generation => {
-                                ui.set_status(
-                                    status_text(state, results(&ui).size_indexed.get()).into(),
-                                );
+                                set_search_status(&ui, state, results(&ui).size_indexed.get());
                                 ui.invoke_resolved_action(
                                     action.into(),
                                     slint::ModelRc::new(slint::VecModel::from(
@@ -540,7 +538,13 @@ fn status_text(state: SessionState, size_indexed: bool) -> String {
     crate::format::search_status(state.total_count, state.total_size, size_indexed)
 }
 
-/// Keep the status bar's index summary current, as toge-gui does every 3s.
+fn set_search_status(ui: &crate::AppWindow, state: SessionState, size_indexed: bool) {
+    let text = status_text(state, size_indexed);
+    ui.set_result_summary(text.clone().into());
+    ui.set_status(text.into());
+}
+
+/// Keep the status bar's index summary current, refreshing every 3s.
 /// Only reads daemon status; searches are what start the daemon. Stops when
 /// the window closes.
 fn poll_index_status(
@@ -585,7 +589,7 @@ fn opened(
     }
     ui.set_has_error(false);
     ui.set_busy(false);
-    ui.set_status(status_text(state, size_indexed).into());
+    set_search_status(ui, state, size_indexed);
     match previous {
         // The previously selected path may still match; keep it selected.
         Some(path) => {
@@ -617,7 +621,7 @@ fn apply(ui: &crate::AppWindow, state: SessionState, reply: Reply) {
         // Explicit rebuilds (sort, rename, delete) set the selection themselves
         // and keep the action's status message.
         if !matches!(reply, Reply::Rebuilt { .. }) {
-            ui.set_status(status_text(state, results.size_indexed.get()).into());
+            set_search_status(ui, state, results.size_indexed.get());
             if let Some(path) = selected {
                 results.send(Command::Locate {
                     path,

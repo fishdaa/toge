@@ -24,11 +24,11 @@ pub struct NdlOptions {
     pub sort_ascending: bool,
     pub format: OutputFormat,
     pub export_file: Option<String>,
-    pub pause: bool,
     pub no_header: bool,
     pub highlight: bool,
     pub highlight_color: u8,
     pub stream: bool,
+    pub no_wait: bool,
     pub status: bool,
     pub save_db: bool,
     pub reindex: bool,
@@ -38,7 +38,6 @@ pub struct NdlOptions {
     pub hide_empty: bool,
     pub help: bool,
     pub version: bool,
-    pub config_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +47,8 @@ pub enum OutputFormat {
     Tsv,
     Txt,
     Efu,
+    /// One JSON object per result row (and a single object for `--status`).
+    Jsonl,
 }
 
 impl Default for NdlOptions {
@@ -70,11 +71,11 @@ impl Default for NdlOptions {
             sort_ascending: false,
             format: OutputFormat::Default,
             export_file: None,
-            pause: false,
             no_header: false,
             highlight: false,
             highlight_color: 2,
             stream: false,
+            no_wait: false,
             status: false,
             save_db: false,
             reindex: false,
@@ -84,7 +85,6 @@ impl Default for NdlOptions {
             hide_empty: false,
             help: false,
             version: false,
-            config_path: None,
         }
     }
 }
@@ -102,6 +102,12 @@ impl NdlOptions {
         iter.next();
 
         while let Some(arg) = iter.next() {
+            // `--` ends option parsing so search text may start with `-` or `/`.
+            if arg == "--" {
+                positional.extend(iter.by_ref());
+                break;
+            }
+
             if arg.starts_with('/') {
                 parse_windows_flag(&arg, &mut positional)?;
                 continue;
@@ -151,6 +157,7 @@ impl NdlOptions {
                 "tsv" => opts.format = OutputFormat::Tsv,
                 "txt" => opts.format = OutputFormat::Txt,
                 "efu" => opts.format = OutputFormat::Efu,
+                "json" | "jsonl" => opts.format = OutputFormat::Jsonl,
                 "export-csv" => {
                     let value = iter.next().ok_or("missing export file")?;
                     opts.export_file = Some(value);
@@ -171,7 +178,6 @@ impl NdlOptions {
                     opts.export_file = Some(value);
                     opts.format = OutputFormat::Efu;
                 }
-                "pause" | "more" => opts.pause = true,
                 "no-header" => opts.no_header = true,
                 "highlight" => opts.highlight = true,
                 "highlight-color" => {
@@ -179,6 +185,7 @@ impl NdlOptions {
                     opts.highlight_color = value.parse().map_err(|_| "invalid highlight color")?;
                 }
                 "stream" => opts.stream = true,
+                "no-wait" => opts.no_wait = true,
                 "status" => opts.status = true,
                 "save-db" => opts.save_db = true,
                 "reindex" => opts.reindex = true,
@@ -188,10 +195,6 @@ impl NdlOptions {
                 "hide-empty-search-results" => opts.hide_empty = true,
                 "h" | "help" => opts.help = true,
                 "v" | "version" => opts.version = true,
-                "config" => {
-                    let value = iter.next().ok_or("missing config path")?;
-                    opts.config_path = Some(value);
-                }
                 _ => return Err(format!("unknown flag: {arg}")),
             }
         }

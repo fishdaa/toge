@@ -2,32 +2,37 @@
 
 **Fast local file search for Linux, built as a daemon-backed Rust workspace.**
 
-Toge is an open source project for indexing local files and querying them through a CLI-first workflow. The long-term aim is a search tool that feels immediate in the terminal, stays lightweight in memory, and scales cleanly from interactive use to shell scripts and automation.
+Toge is an open source project for indexing local files and searching them through
+a CLI, a Slint desktop client, or a Noctalia launcher plugin. All clients query
+the same local daemon. The aim is immediate search with lightweight clients that
+work well interactively and in shell scripts and automation.
 
 ## Why Toge
 
 - Fast local search without depending on a GUI
 - Daemon-backed queries for low-latency repeated lookups
 - A CLI workflow designed for piping, scripting, and terminal use
+- A desktop client with paged results, file actions, and selected-file previews
 - A modular Rust codebase with a shared core library
 
 ## Status
 
-Toge is pre-release software and still under active development.
+Toge is under active development. Tagged releases publish Linux binary archives
+for the daemon, CLI, and Slint desktop client, along with beta and nightly
+prerelease channels.
 
-- The workspace structure, architecture, and automation are in place
-- Core modules and tests are being built out in the open
 - Public interfaces may still change before `1.0`
-
-If you are evaluating the project today, think of it as an early open source build rather than a finished end-user release.
+- These guides describe the current checkout. Features added after the latest
+  stable tag are listed under [Unreleased in the changelog](CHANGELOG.md#unreleased).
 
 ## Workspace
 
-Toge is split into three crates:
+Toge is split into four crates:
 
 - `toge-core`: indexing, matching, sorting, config, and IPC primitives
 - `toged`: background daemon that builds and serves the index
 - `toge`: command-line client for querying the daemon
+- `toge-slint`: Slint desktop client for the daemon
 
 Repository layout:
 
@@ -36,26 +41,39 @@ Repository layout:
 ├── toge-core/     # shared library
 ├── toged/         # daemon binary sources
 ├── toge/          # CLI binary sources
-├── needle-docs/   # architecture and design notes
-└── .github/       # CI, release, and repo automation
+├── toge-slint/    # desktop GUI sources
+├── integrations/ # Noctalia launcher plugin
+├── scripts/      # dev launcher, benchmarks, profiling, and release helpers
+└── .github/      # CI, release, and repo automation
 ```
 
 ## Architecture
 
-The intended runtime model is:
+The runtime model is:
 
 1. `toged` scans and watches configured filesystem roots
 2. `toge-core` maintains the in-memory index and query engine
 3. `toge` sends search requests over a Unix domain socket and prints results
+4. `toge-slint` keeps results in daemon sessions and fetches visible pages
+5. The Noctalia plugin invokes `toge` for JSON results and daemon status
 
-The broader design and indexing strategy are documented in [needle-docs/architecture.md](needle-docs/architecture.md).
+Each crate's README documents its part of this flow: [toge-core](toge-core/README.md), [toged](toged/README.md), [toge](toge/README.md), and [toge-slint](toge-slint/README.md).
+See the [Noctalia integration guide](integrations/noctalia/toge/README.md) for
+launcher setup and CLI compatibility requirements.
 
 ## Getting Started
 
 ### Requirements
 
 - Linux
-- Rust stable toolchain
+- The Rust toolchain pinned in `rust-toolchain.toml` (currently 1.97.1).
+  Slint 1.17.1 requires at least Rust 1.92.
+- Font and keyboard development headers for the Slint client, for example
+  `libfontconfig1-dev` and `libxkbcommon-dev` on Debian/Ubuntu
+- `python3` and the libcap tools (`getcap`/`setcap`) for `make gui` and the
+  launcher tests
+- `flock` for development profile locking; `pkexec` and a graphical Polkit
+  authentication agent for the launcher's live-update approval dialog
 
 The repository includes `rust-toolchain.toml` so the expected toolchain components are installed consistently for contributors.
 
@@ -67,41 +85,36 @@ cd needle
 cargo build --workspace
 ```
 
-### Linux GUI Packages
+### Desktop GUI
 
-Stable releases include x86_64 and ARM64 DEB, RPM, and AppImage packages. Each
-package includes the desktop application, the `toge` CLI, and the `toged` daemon
-the GUI starts on demand. DEB and RPM installation grants `toged` the Linux
-capabilities required for filesystem-wide fanotify marks. Release assets also
-include SHA-256 checksum files.
+Linux binary archives include `toge-slint`, `toge`, and `toged` for x86_64 and
+ARM64. Extract the archive and run `./toge-slint`; keep the bundled daemon beside
+it. The client uses Slint's software renderer and does not require Node or
+WebKit. See [the Slint guide](toge-slint/README.md) for system dependencies,
+keyboard controls, live-update setup, and current limitations. Release assets
+also include SHA-256 checksum files.
 
-AppImage cannot apply this privileged installation step; use the DEB or RPM
-package when live fanotify indexing is required.
-
-Source builds must grant those capabilities after rebuilding the daemon:
-
-```bash
-sudo ./scripts/setcap-toged.sh target/debug/toged
-```
-
-To build all GUI release formats locally:
+`toged` needs Linux capabilities for filesystem-wide fanotify marks. Grant them
+after extracting or rebuilding the daemon:
 
 ```bash
-npm ci --prefix toge-gui
-make gui-package V=0.1.12
+# From an extracted release archive (requires the libcap tools):
+sudo setcap cap_sys_admin,cap_dac_read_search+ep ./toged
+
+# From a source checkout after a debug build:
+./scripts/setcap-toged.sh target/debug/toged
 ```
 
 ### GUI Development Profiles
 
-`make gui` keeps its settings separate from an installed Toge instance. Its
-configuration persists under `~/.config/toge-dev/default/toge`, while its
-socket and index are temporary and are removed when the development session
-ends. Assign the development instance a different global shortcut in Options
-to exercise both applications side by side.
+`make gui` (alias `make slint`) keeps its settings separate from an installed
+Toge instance. Its configuration persists under `~/.config/toge-dev/slint/toge`
+and its index under `~/.local/state/toge-dev/slint/toge`; only the temporary
+socket directory is removed when the development session ends.
 
 Use `make gui-release` for performance testing. It uses the same isolated
-development profile and Vite frontend, but builds both the Tauri application
-and `toged` with Rust release optimizations.
+development profile, but builds both `toge-slint` and `toged` with Rust
+release optimizations.
 
 Use a named profile when you need another independent set of development
 settings:
@@ -110,8 +123,8 @@ settings:
 TOGE_DEV_PROFILE=alternate make gui
 ```
 
-Set `TOGE_DEV_CONFIG_ROOT` to override the parent directory for all development
-profiles.
+Set `TOGE_DEV_CONFIG_ROOT` or `TOGE_DEV_STATE_ROOT` to override the parent
+directory for all development profiles.
 
 ### Development Checks
 
@@ -119,39 +132,36 @@ profiles.
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --all-targets
+python3 -m unittest discover -s scripts/tests
 ```
-
-Note: parts of the implementation are still stubbed, so some tests currently fail until those modules are completed.
 
 ### Benchmarks And Profiling
 
 ```bash
 cargo run --release --example bench -p toge-core
 cargo run --release --example profile -p toge-core -- insert
-bash scripts/perf.sh run substring-miss substring-miss
-bash scripts/perf.sh run substring-hit substring-hit
+bash scripts/perf.sh run perf substring-miss substring-miss
+bash scripts/perf.sh run perf substring-hit substring-hit
 bash scripts/bench.sh run baseline
 bash scripts/bench.sh compare 5
-bash scripts/perf.sh compare substring-hit 5
+bash scripts/perf.sh compare perf substring-hit 5
 ```
 
 The `bench` example prints quick timing summaries. The `profile` example keeps each hot path busy for longer so external profilers can capture useful samples. `substring`, `substring-miss`, and `substring-hit` default to more iterations than the other scenarios so the commands above produce denser captures without extra flags.
 
-`bash scripts/perf.sh run ...` stores both the binary capture and a text report in `perf-results/`, which is ignored by git:
+`bash scripts/perf.sh run <backend> ...` accepts the `perf`, `time`, and `heaptrack` backends and stores its output under `perf-results/<backend>/`, which is ignored by git. A `perf` run keeps both the binary capture and a text report:
 
 ```text
-perf-results/substring-miss.data
-perf-results/substring-miss.report.txt
+perf-results/perf/substring-miss.data
+perf-results/perf/substring-miss.report.txt
 ```
 
 Both helpers also keep a local timestamped history so you can compare the last `x` runs while iterating on performance work:
 
 ```text
 bench-results/history/*.tsv
-perf-results/history/<label>/*.summary.tsv
+perf-results/history/<backend>/<label>/*.summary.tsv
 ```
-
-The current perf takeaways and optimization notes live in `needle-docs/findings.md`.
 
 ## Project Goals
 
@@ -172,7 +182,7 @@ Toge follows Semantic Versioning.
 - Pull requests must carry exactly one of `release:major`, `release:minor`, `release:patch`, or `release:none`
 - Merging the automated release PR on `main` creates the matching stable tag and triggers release publishing
 - GitHub Actions runs reusable checks on pull requests, `main`, `release/*`, and release tags
-- `main` also publishes nightly prerelease artifacts automatically
+- Nightly prerelease artifacts are built from `main` on a daily schedule
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and release checklist.
 
@@ -180,11 +190,10 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the contribution workflow and release
 
 Near-term priorities:
 
-- complete the unfinished `toge-core` implementations
-- bring the current test suite to green
-- define the first usable daemon/client interaction flow
-- stabilize basic indexing and search behavior
-- publish the first pre-release binaries
+- stabilize public interfaces ahead of `1.0`
+- autostart and daemon configuration editing in the Slint client; shortcut
+  preferences and portal-backed global shortcuts are already available
+- installer packages for the Slint client
 
 ## Contributing
 
@@ -193,7 +202,7 @@ Contributions, bug reports, and design feedback are welcome.
 If you want to help:
 
 - read [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow
-- review [needle-docs/architecture.md](needle-docs/architecture.md) for project direction
+- review the crate READMEs and [Slint validation notes](toge-slint/validation.md) for project direction
 - open an issue or pull request for focused, well-scoped changes
 
 ## Security
@@ -203,11 +212,3 @@ For security-sensitive reports, follow the guidance in [SECURITY.md](SECURITY.md
 ## License
 
 Toge is licensed under the Apache License, Version 2.0. See [LICENSE](LICENSE) for the full text.
-
-### Slint desktop client
-
-Linux binary archives include `toge-slint`, `toge`, and `toged` for x86_64 and
-ARM64. Extract the archive and run `./toge-slint`; keep the bundled daemon beside
-it. This experimental client uses the software renderer and does not require
-Node or WebKit. See [the Slint guide](toge-slint/README.md) for system dependencies,
-keyboard controls, live-update setup, and current limitations.

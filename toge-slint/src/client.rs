@@ -1,4 +1,4 @@
-// Adapted from the Tauri shell IPC client; shares the existing wire protocol.
+// Client for the toged IPC wire protocol.
 use std::env;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;

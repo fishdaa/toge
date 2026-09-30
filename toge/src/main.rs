@@ -1,9 +1,11 @@
 //! toge — CLI client for toged.
 
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Command};
 use std::thread;
@@ -11,7 +13,7 @@ use std::time::Duration;
 use toge_core::highlight::render_ansi;
 use toge_core::ipc::{
     DaemonStatus, MAX_IPC_MESSAGE_SIZE, OutputFormat as IpcFormat, QueryRequest, Request, Response,
-    StreamOrder, StreamQueryRequest, StreamSummary, stream_query,
+    ResultRow, StatusResponse, StreamOrder, StreamQueryRequest, StreamSummary, stream_query,
 };
 use toge_core::opts::{NdlOptions, OutputFormat};
 
@@ -26,6 +28,11 @@ fn usage() {
     println!("  -o, -offset <n>       Start from result n");
     println!("  -n, -max-results <n>  Max results");
     println!("  --stream             Stream results in index order (--sort enables sorting)");
+    println!();
+    println!("Output:");
+    println!("  --json                JSON Lines output (one object per result or status)");
+    println!("  --no-wait             Exit with code 10 instead of waiting for the index");
+    println!("  --                    Treat all following arguments as search text");
     println!();
     println!("Info:");
     println!("  -status               Daemon status");
@@ -60,10 +67,13 @@ fn ensure_daemon_running(sock: &Path) -> io::Result<()> {
         return Ok(());
     }
     eprintln!("toged is not running. Starting it...");
+    // Detach the daemon into its own process group so it outlives callers
+    // that kill the client's group on timeout (e.g. shell launcher plugins).
     daemon_command(sock)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
+        .process_group(0)
         .spawn()?;
     for _ in 0..100 {
         thread::sleep(Duration::from_millis(50));
@@ -75,6 +85,32 @@ fn ensure_daemon_running(sock: &Path) -> io::Result<()> {
         io::ErrorKind::NotFound,
         "daemon did not start",
     ))
+}
+
+/// Exit code returned by `--no-wait` when the daemon is still loading or indexing.
+const EXIT_NOT_READY: i32 = 10;
+
+/// Wait for the daemon to become ready, or exit immediately with
+/// [`EXIT_NOT_READY`] when `--no-wait` is set and it is not ready yet.
+fn ensure_ready(sock: &Path, opts: &NdlOptions) -> io::Result<()> {
+    if !opts.no_wait {
+        return wait_for_ready(sock, Duration::from_secs(30));
+    }
+    match send_simple(sock, &Request::Status)? {
+        Response::Status(status) if status.status == DaemonStatus::Ready => Ok(()),
+        Response::Status(status) => {
+            if opts.format == OutputFormat::Jsonl {
+                println!("{}", render_status_json(&status));
+            }
+            eprintln!("toge: daemon not ready: {}", status.status_message);
+            process::exit(EXIT_NOT_READY);
+        }
+        Response::Error(e) => Err(io::Error::other(e)),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "unexpected response type",
+        )),
+    }
 }
 
 fn wait_for_ready(sock: &Path, timeout: Duration) -> io::Result<()> {
@@ -162,7 +198,7 @@ fn run_query(
 ) -> io::Result<toge_core::ipc::ResultsResponse> {
     let mut stream = connect(sock)?;
     let format = match format {
-        OutputFormat::Default => IpcFormat::Default,
+        OutputFormat::Default | OutputFormat::Jsonl => IpcFormat::Default,
         OutputFormat::Csv => IpcFormat::Csv,
         OutputFormat::Tsv => IpcFormat::Tsv,
         OutputFormat::Txt => IpcFormat::Txt,
@@ -218,6 +254,10 @@ fn run_streamed_query<W: Write>(
         },
     };
     let summary = stream_query(&mut connection, &request, |rows| {
+        if opts.format == OutputFormat::Jsonl {
+            output.write_all(render_jsonl(rows).as_bytes())?;
+            return output.flush();
+        }
         let paths: Vec<String> = rows
             .iter()
             .map(|row| {
@@ -247,6 +287,10 @@ fn run_streamed_query<W: Write>(
 
 fn render_results(paths: &[String], format: OutputFormat, no_header: bool) -> String {
     match format {
+        OutputFormat::Jsonl => paths.iter().fold(String::new(), |mut output, path| {
+            let _ = writeln!(output, "{{\"path\":{}}}", json_string(path));
+            output
+        }),
         OutputFormat::Csv => render_table(paths, "Name", ",", "\r\n", no_header),
         OutputFormat::Tsv => render_table(paths, "Name", "\t", "\n", no_header),
         OutputFormat::Txt | OutputFormat::Default | OutputFormat::Efu => {
@@ -282,6 +326,66 @@ fn render_table(
         output.push_str(line_end);
     }
     output
+}
+
+fn render_jsonl(rows: &[ResultRow]) -> String {
+    let mut output = String::new();
+    for row in rows {
+        let _ = writeln!(
+            output,
+            "{{\"path\":{},\"name\":{},\"parent\":{},\"ext\":{},\"is_dir\":{},\"size\":{},\"modified\":{}}}",
+            json_string(&row.path),
+            json_string(&row.name),
+            json_string(&row.parent),
+            json_string(&row.extension),
+            row.is_dir,
+            row.size,
+            row.modified_unix,
+        );
+    }
+    output
+}
+
+fn render_status_json(status: &StatusResponse) -> String {
+    let name = match status.status {
+        DaemonStatus::Starting => "starting",
+        DaemonStatus::LoadingConfig => "loading_config",
+        DaemonStatus::LoadingIndex => "loading_index",
+        DaemonStatus::Indexing => "indexing",
+        DaemonStatus::StartingWatcher => "starting_watcher",
+        DaemonStatus::Ready => "ready",
+        DaemonStatus::Error => "error",
+    };
+    format!(
+        "{{\"status\":\"{}\",\"ready\":{},\"message\":{},\"indexed_count\":{},\"watcher_healthy\":{},\"watched_dir_count\":{},\"build_duration_ms\":{}}}",
+        name,
+        status.status == DaemonStatus::Ready,
+        json_string(&status.status_message),
+        status.indexed_count,
+        status.watcher_healthy,
+        status.watched_dir_count,
+        status.build_duration_ms,
+    )
+}
+
+fn json_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for c in value.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn send_simple(sock: &Path, req: &Request) -> io::Result<Response> {
@@ -322,6 +426,9 @@ fn main() {
 
     if opts.status {
         match send_simple(&sock, &Request::Status) {
+            Ok(Response::Status(s)) if opts.format == OutputFormat::Jsonl => {
+                println!("{}", render_status_json(&s));
+            }
             Ok(Response::Status(s)) => {
                 println!(
                     "Index: {} files | status: {:?} | {} | watcher healthy: {} | watched dirs: {} | watch failures: {} | overflows: {} | build time: {} ms",
@@ -336,7 +443,7 @@ fn main() {
                 );
                 if !s.watcher_healthy && s.watch_failure_count > 0 {
                     eprintln!(
-                        "warning: live updates are unavailable because fanotify setup failed. Reinstall the DEB/RPM package or run `sudo setcap cap_sys_admin,cap_dac_read_search+ep /usr/bin/toged`, then restart Toge."
+                        "warning: live updates are unavailable because fanotify setup failed. Run `sudo setcap cap_sys_admin,cap_dac_read_search+ep <path-to-toged>` (the `toged` beside your Toge binaries, or `$(command -v toged)`), then restart Toge."
                     );
                 }
             }
@@ -381,7 +488,7 @@ fn main() {
 
     if opts.stream {
         let result = (|| -> io::Result<StreamSummary> {
-            wait_for_ready(&sock, Duration::from_secs(30))?;
+            ensure_ready(&sock, &opts)?;
             if let Some(path) = opts
                 .export_file
                 .as_ref()
@@ -431,7 +538,7 @@ fn main() {
     }
 
     if opts.get_result_count {
-        if let Err(e) = wait_for_ready(&sock, Duration::from_secs(30)) {
+        if let Err(e) = ensure_ready(&sock, &opts) {
             eprintln!("query failed: {e}");
             process::exit(1);
         }
@@ -453,7 +560,7 @@ fn main() {
     }
 
     if opts.get_total_size {
-        if let Err(e) = wait_for_ready(&sock, Duration::from_secs(30)) {
+        if let Err(e) = ensure_ready(&sock, &opts) {
             eprintln!("query failed: {e}");
             process::exit(1);
         }
@@ -474,7 +581,7 @@ fn main() {
         return;
     }
 
-    if let Err(e) = wait_for_ready(&sock, Duration::from_secs(30)) {
+    if let Err(e) = ensure_ready(&sock, &opts) {
         eprintln!("query failed: {e}");
         process::exit(1);
     }
@@ -494,21 +601,24 @@ fn main() {
         }
     };
 
-    let mut paths = results.paths();
-    if opts.highlight {
-        let color = opts.highlight_color;
-        paths = paths.into_iter().map(|p| render_ansi(&p, color)).collect();
-    }
-
-    if opts.no_result_error && paths.is_empty() {
+    if opts.no_result_error && results.rows.is_empty() {
         process::exit(9);
     }
 
-    if opts.hide_empty && paths.is_empty() {
+    if opts.hide_empty && results.rows.is_empty() {
         return;
     }
 
-    let output = render_results(&paths, opts.format, opts.no_header);
+    let output = if opts.format == OutputFormat::Jsonl {
+        render_jsonl(&results.rows)
+    } else {
+        let mut paths = results.paths();
+        if opts.highlight {
+            let color = opts.highlight_color;
+            paths = paths.into_iter().map(|p| render_ansi(&p, color)).collect();
+        }
+        render_results(&paths, opts.format, opts.no_header)
+    };
 
     if let Some(path) = &opts.export_file {
         if let Err(e) = fs::write(path, &output) {

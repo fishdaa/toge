@@ -1,0 +1,51 @@
+# Toge — search the toge file index from the noctalia launcher.
+# `/toge <text>` runs the `toge` CLI, which queries the toged daemon (starting
+# it when needed) and prints one JSON object per match. Activating a result
+# opens it with xdg-open. The plugin keeps no index of its own.
+
+id = "fishdaa/toge"
+name = "Toge File Search"
+version = "0.1.0"
+# 22 for relative luau imports (results.luau), 24 for argv process execution:
+# the search text goes to toge as a single argument and paths go to xdg-open
+# directly, so no shell ever parses either.
+plugin_api = 24
+author = "fishdaa"
+license = "MIT"
+dependencies = ["toge", "toged", "xdg-open", "sleep"]
+tags = ["launcher", "productivity", "utility"]
+icon = "search"
+description = "Instant file and folder search in the launcher, backed by the toge indexing daemon."
+
+[[setting]]
+key = "max_results"
+type = "int"
+label_key = "settings.max_results.label"
+description_key = "settings.max_results.description"
+default = 20
+min = 5
+max = 100
+
+[[setting]]
+key = "toge_command"
+type = "string"
+label_key = "settings.toge_command.label"
+description_key = "settings.toge_command.description"
+default = "toge"
+advanced = true
+
+[[setting]]
+key = "gui_command"
+type = "string"
+label_key = "settings.gui_command.label"
+description_key = "settings.gui_command.description"
+default = "toge-slint"
+advanced = true
+
+[[launcher_provider]]
+id = "launcher"
+entry = "launcher.luau"
+prefix = "toge"
+glyph = "search"
+include_in_global_search = false
+debounce_ms = 100

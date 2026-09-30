@@ -454,3 +454,66 @@ fn streaming_cli_matches_sorted_output_and_exports_multiple_batches() {
     assert_eq!(missing.status.code(), Some(9));
     cleanup(&dir, &mut child);
 }
+
+#[test]
+fn ndl_json_output_and_status_are_machine_readable() {
+    if !uds_available("json") {
+        return;
+    }
+    let (dir, state, cfg, root) = setup("json");
+    fs::write(root.join("-dash.txt"), "x").unwrap();
+    let sock = socket_path("json");
+    let mut child = spawn_needled(&[
+        "--socket",
+        sock.to_str().unwrap(),
+        "--config",
+        cfg.to_str().unwrap(),
+        "--state-dir",
+        state.to_str().unwrap(),
+        "--clean",
+    ]);
+
+    assert!(wait_for_socket(&sock, 2_000), "socket not created");
+    assert!(wait_for_ready(&sock, 5_000), "daemon not ready");
+
+    let output = run_ndl(&sock, &["--json", "--no-wait", "sort:name-asc", "foo"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "unexpected stdout: {stdout}");
+    assert_eq!(
+        lines[0],
+        format!(
+            "{{\"path\":\"{}\",\"name\":\"foo.txt\",\"parent\":\"{}\",\"ext\":\"txt\",\"is_dir\":false,\"size\":5,",
+            root.join("foo.txt").display(),
+            root.display()
+        ) + &lines[0][lines[0].find("\"modified\"").unwrap()..]
+    );
+    assert!(lines[1].contains("\"name\":\"food.txt\""));
+
+    let streamed = run_ndl(&sock, &["--json", "--stream", "food"]);
+    assert!(streamed.status.success());
+    assert!(String::from_utf8_lossy(&streamed.stdout).contains("\"name\":\"food.txt\""));
+
+    let dashed = run_ndl(&sock, &["--json", "--", "-dash"]);
+    assert!(
+        dashed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&dashed.stderr)
+    );
+    assert!(String::from_utf8_lossy(&dashed.stdout).contains("\"name\":\"-dash.txt\""));
+
+    let status = run_ndl(&sock, &["--status", "--json"]);
+    assert!(status.status.success());
+    let status = String::from_utf8_lossy(&status.stdout);
+    assert!(
+        status.starts_with("{\"status\":\"ready\",\"ready\":true,"),
+        "{status}"
+    );
+
+    cleanup(&dir, &mut child);
+}

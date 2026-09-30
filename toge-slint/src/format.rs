@@ -16,16 +16,16 @@ pub fn format_size(size: u64) -> String {
     format!("{:.1} {}", value, units[unit_idx])
 }
 
-/// Search summary shown in the status bar, as in toge-gui.
+/// Search summary shown in the status bar.
 pub fn search_status(total_count: usize, total_size: u64, size_indexed: bool) -> String {
     if size_indexed {
-        format!("{total_count} results | {}", format_size(total_size))
+        format!("{total_count} | {}", format_size(total_size))
     } else {
-        format!("{total_count} results | size unavailable")
+        format!("{total_count} | size unavailable")
     }
 }
 
-/// Daemon summary shown in the status bar, as in toge-gui.
+/// Daemon summary shown in the status bar.
 pub fn index_status(status: &toge_core::ipc::StatusResponse) -> String {
     let count = format!("{} indexed", group_digits(status.indexed_count));
     if !status.watcher_healthy && status.watch_failure_count > 0 {
@@ -139,13 +139,13 @@ mod tests {
     }
 
     #[test]
-    fn search_status_matches_gui_format() {
-        assert_eq!(search_status(3, 2048, true), "3 results | 2.0 KB");
-        assert_eq!(search_status(1, 0, false), "1 results | size unavailable");
+    fn search_status_format() {
+        assert_eq!(search_status(3, 2048, true), "3 | 2.0 KB");
+        assert_eq!(search_status(1, 0, false), "1 | size unavailable");
     }
 
     #[test]
-    fn index_status_matches_gui_format() {
+    fn index_status_format() {
         let mut status = toge_core::ipc::StatusResponse {
             indexed_count: 1_234_567,
             status: toge_core::ipc::DaemonStatus::Ready,
