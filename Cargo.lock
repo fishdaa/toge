@@ -4736,6 +4736,7 @@ name = "toge-slint"
 version = "0.2.0"
 dependencies = [
  "clipboard-rs",
+ "image",
  "ksni",
  "slint",
  "slint-build",

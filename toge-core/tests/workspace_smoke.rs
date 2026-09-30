@@ -26,7 +26,7 @@ fn binaries_exist() {
     let needle_core_manifest = env!("CARGO_MANIFEST_DIR");
     let workspace_root = std::path::Path::new(needle_core_manifest).parent().unwrap();
     let target = format!("{}/target/debug", workspace_root.display());
-    assert!(std::path::Path::new(&format!("{}/toged", target)).exists());
-    assert!(std::path::Path::new(&format!("{}/toge", target)).exists());
-    assert!(std::path::Path::new(&format!("{}/toge-slint", target)).exists());
+    assert!(std::path::Path::new(&format!("{target}/toged")).exists());
+    assert!(std::path::Path::new(&format!("{target}/toge")).exists());
+    assert!(std::path::Path::new(&format!("{target}/toge-slint")).exists());
 }

@@ -203,5 +203,3 @@ the About dialog includes the `AboutSlint` attribution. See
 Toge source remains Apache-2.0.
 
 Validation and benchmark results are tracked in [validation.md](validation.md).
-The migration scope and acceptance targets are in
-[the MVP plan](../docs/slint-mvp-plan.md).

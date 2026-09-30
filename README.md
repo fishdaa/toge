@@ -36,7 +36,6 @@ Repository layout:
 ├── toged/         # daemon binary sources
 ├── toge/          # CLI binary sources
 ├── toge-slint/    # desktop GUI sources
-├── docs/          # design notes and plans
 ├── scripts/       # dev launcher, benchmarks, profiling, and release helpers
 └── .github/       # CI, release, and repo automation
 ```
@@ -184,7 +183,7 @@ Contributions, bug reports, and design feedback are welcome.
 If you want to help:
 
 - read [CONTRIBUTING.md](CONTRIBUTING.md) for the development workflow
-- review the crate READMEs and [docs/](docs/) for project direction
+- review the crate READMEs and [Slint validation notes](toge-slint/validation.md) for project direction
 - open an issue or pull request for focused, well-scoped changes
 
 ## Security

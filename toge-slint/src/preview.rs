@@ -21,7 +21,9 @@ const MAX_SVG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_PIXELS: u64 = 24_000_000;
 const MAX_SIDE: u32 = 8_192;
 const PREVIEW_SIDE: u32 = 1_200;
-const MAX_RENDER_BYTES: u64 = 6 * 1024 * 1024;
+// Supersample PDF glyphs before the Fit image is downscaled.
+const PDF_RENDER_SIDE: u32 = 1_800;
+const MAX_RENDER_BYTES: u64 = 10 * 1024 * 1024;
 const RENDER_TIMEOUT: Duration = Duration::from_secs(8);
 const DOCUMENT_TIMEOUT: Duration = Duration::from_secs(10);
 const SETTLE: Duration = Duration::from_millis(75);
@@ -47,9 +49,9 @@ enum Preview {
     Pdf {
         page: u32,
         pages: u32,
-        previous: Option<Pixels>,
-        current: Pixels,
-        next: Option<Pixels>,
+        previous: Option<PdfPage>,
+        current: PdfPage,
+        next: Option<PdfPage>,
     },
     Text(String),
 }
@@ -163,14 +165,23 @@ fn publish(
                 ui.set_preview_pdf_rendered_page(i32::try_from(page).unwrap_or(1));
                 ui.set_preview_pdf_pages(i32::try_from(pages).unwrap_or(1));
                 ui.set_preview_pdf_previous_ready(previous.is_some());
-                ui.set_preview_pdf_previous_image(
-                    previous.map_or_else(slint::Image::default, slint::Image::from_rgba8),
-                );
-                ui.set_preview_image(slint::Image::from_rgba8(current));
+                if let Some(previous) = previous {
+                    ui.set_preview_pdf_previous_image(slint::Image::from_rgba8(previous.full));
+                    ui.set_preview_pdf_previous_fit_image(slint::Image::from_rgba8(previous.fit));
+                } else {
+                    ui.set_preview_pdf_previous_image(slint::Image::default());
+                    ui.set_preview_pdf_previous_fit_image(slint::Image::default());
+                }
+                ui.set_preview_image(slint::Image::from_rgba8(current.full));
+                ui.set_preview_pdf_fit_image(slint::Image::from_rgba8(current.fit));
                 ui.set_preview_pdf_next_ready(next.is_some());
-                ui.set_preview_pdf_next_image(
-                    next.map_or_else(slint::Image::default, slint::Image::from_rgba8),
-                );
+                if let Some(next) = next {
+                    ui.set_preview_pdf_next_image(slint::Image::from_rgba8(next.full));
+                    ui.set_preview_pdf_next_fit_image(slint::Image::from_rgba8(next.fit));
+                } else {
+                    ui.set_preview_pdf_next_image(slint::Image::default());
+                    ui.set_preview_pdf_next_fit_image(slint::Image::default());
+                }
                 ui.set_preview_ready(true);
                 ui.set_preview_message("".into());
             }
@@ -268,6 +279,9 @@ pub fn connect(ui: &crate::AppWindow) {
         ui.set_preview_image(slint::Image::default());
         ui.set_preview_pdf_previous_image(slint::Image::default());
         ui.set_preview_pdf_next_image(slint::Image::default());
+        ui.set_preview_pdf_fit_image(slint::Image::default());
+        ui.set_preview_pdf_previous_fit_image(slint::Image::default());
+        ui.set_preview_pdf_next_fit_image(slint::Image::default());
         ui.set_preview_pdf_previous_ready(false);
         ui.set_preview_pdf_next_ready(false);
         ui.set_preview_pdf_rendered_page(0);
@@ -334,11 +348,17 @@ pub fn connect(ui: &crate::AppWindow) {
     });
 }
 
+#[derive(Clone)]
+struct PdfPage {
+    full: Pixels,
+    fit: Pixels,
+}
+
 #[derive(Default)]
 struct PdfCache {
     path: PathBuf,
     pages: u32,
-    images: BTreeMap<u32, Pixels>,
+    images: BTreeMap<u32, PdfPage>,
 }
 
 fn load(
@@ -615,8 +635,8 @@ fn random_seed() -> u64 {
 fn sample_positions(duration: f32, seed: u64) -> [f32; VIDEO_FRAMES] {
     let mut state = seed;
     // Pick one random instant from each fifth, then display them in time order.
-    // Stay slightly before the reported end so the decoder can find a frame.
-    let span = duration * 0.98;
+    // Stay clear of the reported end: sparse videos may have no frame there.
+    let span = duration * 0.90;
     std::array::from_fn(|index| {
         state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut bits = state;
@@ -908,8 +928,9 @@ fn load_pdf_preview(
             continue;
         }
         match load_pdf(path, number, request, serial) {
-            Ok(image) => {
-                cache.images.insert(number, image);
+            Ok(full) => {
+                let fit = smooth_pdf_fit(&full);
+                cache.images.insert(number, PdfPage { full, fit });
             }
             Err(error) if number == page => return Err(error),
             Err(_) => {}
@@ -927,6 +948,33 @@ fn load_pdf_preview(
             .ok_or("Cannot render PDF")?,
         next: cache.images.get(&page.saturating_add(1)).cloned(),
     })
+}
+
+// Downscale once with a low-pass filter before Slint fits the page into
+// the narrow pane. A single large reduction in the software renderer leaves
+// small glyphs harsh and uneven.
+fn smooth_pdf_fit(full: &Pixels) -> Pixels {
+    // The widest supported preview pane displays a page at about 560 px.
+    // Prefilter to that width so Slint does not shrink tiny glyphs again there.
+    const FIT_WIDTH: u32 = 560;
+    if full.width() <= FIT_WIDTH {
+        return full.clone();
+    }
+    let height = u32::try_from(
+        (u64::from(full.height()) * u64::from(FIT_WIDTH) + u64::from(full.width() / 2))
+            / u64::from(full.width()),
+    )
+    .unwrap()
+    .max(1);
+    let source = image::RgbaImage::from_raw(full.width(), full.height(), full.as_bytes().to_vec())
+        .expect("PDF pixel buffer has its declared dimensions");
+    let resized = image::imageops::resize(
+        &source,
+        FIT_WIDTH,
+        height,
+        image::imageops::FilterType::Gaussian,
+    );
+    SharedPixelBuffer::clone_from_slice(resized.as_raw(), FIT_WIDTH, height)
 }
 
 fn parse_pdf_page_count(output: &str) -> Option<u32> {
@@ -985,7 +1033,8 @@ fn load_pdf(
     let output = scratch.join("page.ppm");
     let mut poppler = Command::new("pdftoppm");
     let page = page.to_string();
-    poppler.args(["-f", &page, "-l", &page, "-singlefile", "-scale-to", "1200"]);
+    poppler.args(["-f", &page, "-l", &page, "-singlefile", "-scale-to"]);
+    poppler.arg(PDF_RENDER_SIDE.to_string());
     poppler.arg(path).arg(&prefix).stdout(Stdio::null());
     let poppler_result = run_command(
         poppler,
@@ -1010,7 +1059,11 @@ fn load_pdf(
     mupdf.args(["draw", "-q", "-F", "ppm", "-o"]);
     mupdf
         .arg(&output)
-        .args(["-w", "1200", "-h", "1200", "-m", "134217728"]);
+        .arg("-w")
+        .arg(PDF_RENDER_SIDE.to_string())
+        .arg("-h")
+        .arg(PDF_RENDER_SIDE.to_string())
+        .args(["-m", "134217728"]);
     mupdf.arg(path).arg(&page).stdout(Stdio::null());
     if let Err(error) = run_command(
         mupdf,
@@ -1126,7 +1179,7 @@ fn checked_pixel_count(
     channels: usize,
     length: usize,
 ) -> Result<(), &'static str> {
-    if width == 0 || height == 0 || width > PREVIEW_SIDE || height > PREVIEW_SIDE {
+    if width == 0 || height == 0 || width > PDF_RENDER_SIDE || height > PDF_RENDER_SIDE {
         return Err("Invalid preview dimensions");
     }
     let expected = usize::try_from(width).unwrap() * usize::try_from(height).unwrap() * channels;
@@ -1671,6 +1724,21 @@ mod tests {
         assert_eq!(pixels.as_bytes(), &[20, 40, 60, 255, 1, 2, 3, 255]);
         assert!(parse_pam(&pam[..pam.len() - 1]).is_err());
         assert!(parse_ppm(&ppm[..ppm.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn pdf_fit_prefilters_fine_edges() {
+        let mut stripes = Vec::with_capacity(1200 * 2 * 4);
+        for _ in 0..2 {
+            for x in 0..1200 {
+                let value = if x % 2 == 0 { 0 } else { 255 };
+                stripes.extend_from_slice(&[value, value, value, 255]);
+            }
+        }
+        let full = pixels_from_rgba(1200, 2, &stripes).unwrap();
+        let fit = smooth_pdf_fit(&full);
+        assert_eq!((fit.width(), fit.height()), (560, 1));
+        assert!((40..215).contains(&fit.as_bytes()[280 * 4]));
     }
 
     #[test]

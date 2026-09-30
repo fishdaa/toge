@@ -195,7 +195,7 @@ impl NdlOptions {
                 "hide-empty-search-results" => opts.hide_empty = true,
                 "h" | "help" => opts.help = true,
                 "v" | "version" => opts.version = true,
-                _ => return Err(format!("unknown flag: {}", arg)),
+                _ => return Err(format!("unknown flag: {arg}")),
             }
         }
 

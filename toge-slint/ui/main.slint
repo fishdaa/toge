@@ -171,8 +171,17 @@ export component AppWindow inherits Window {
     in property <int> preview-pdf-rendered-page: 0;
     in property <image> preview-pdf-previous-image;
     in property <image> preview-pdf-next-image;
+    in property <image> preview-pdf-fit-image;
+    in property <image> preview-pdf-previous-fit-image;
+    in property <image> preview-pdf-next-fit-image;
     in property <bool> preview-pdf-previous-ready: false;
     in property <bool> preview-pdf-next-ready: false;
+    // 0 fits the page to the panel; 100 displays it near native size.
+    in-out property <int> preview-pdf-zoom: 0;
+    changed preview-pdf-zoom => {
+        pdf-scroll.viewport-y = -(root.preview-pdf-page - 1) * pdf-scroll.page-height;
+        pdf-scroll.viewport-x = 0px;
+    }
     in-out property <length> preview-width: 300px;
     changed width => {
         if (root.width >= 560px) { root.preview-width = min(root.preview-width, root.width - 220px); }
@@ -188,6 +197,7 @@ export component AppWindow inherits Window {
         ? root.rows[root.selected][1].text + "/" + root.rows[root.selected][0].text : "";
     changed selected-preview-path => {
         pdf-scroll.viewport-y = 0px;
+        pdf-scroll.viewport-x = 0px;
         root.preview-requested(root.selected-preview-path, 1);
     }
     private property <bool> has-range: root.selection-anchor >= 0 && root.selected >= 0 && root.range-end > root.range-start;
@@ -649,14 +659,44 @@ export component AppWindow inherits Window {
                             color: Palette.foreground;
                             overflow: elide;
                         }
-                        if root.preview-pdf-active: Text {
-                            height: 18px;
-                            text: root.preview-pdf-pages > 0
-                                ? "Page " + root.preview-pdf-page + " of " + root.preview-pdf-pages
-                                : "PDF preview";
-                            font-size: 12px;
-                            color: Palette.foreground;
-                            opacity: 0.65;
+                        if root.preview-pdf-active: HorizontalLayout {
+                            spacing: 4px;
+                            Text {
+                                horizontal-stretch: 1;
+                                text: root.preview-pdf-pages > 0
+                                    ? "Page " + root.preview-pdf-page + " of " + root.preview-pdf-pages
+                                    : "PDF preview";
+                                font-size: 12px;
+                                color: Palette.foreground;
+                                opacity: 0.65;
+                                vertical-alignment: center;
+                            }
+                            Button {
+                                text: "−";
+                                width: 30px;
+                                enabled: root.preview-pdf-zoom > 50;
+                                clicked => {
+                                    root.preview-pdf-zoom = root.preview-pdf-zoom == 0 ? 50 : max(50, root.preview-pdf-zoom - 25);
+                                }
+                            }
+                            Text {
+                                text: root.preview-pdf-zoom == 0 ? "Fit" : root.preview-pdf-zoom + "%";
+                                font-size: 12px;
+                                color: Palette.foreground;
+                                vertical-alignment: center;
+                            }
+                            Button {
+                                text: "+";
+                                width: 30px;
+                                enabled: root.preview-pdf-zoom < 150;
+                                clicked => { root.preview-pdf-zoom = root.preview-pdf-zoom == 0 ? 100 : min(150, root.preview-pdf-zoom + 25); }
+                            }
+                            Button {
+                                text: "Fit";
+                                width: 38px;
+                                enabled: root.preview-pdf-zoom != 0;
+                                clicked => { root.preview-pdf-zoom = 0; }
+                            }
                         }
                         if root.preview-video-active: Text {
                             text: root.preview-video-frame > 0
@@ -679,42 +719,59 @@ export component AppWindow inherits Window {
                             pdf-scroll := ScrollView {
                                 width: parent.width; height: parent.height;
                                 visible: root.preview-pdf-active;
-                                viewport-width: self.visible-width;
+                                private property <length> page-width: root.preview-pdf-zoom == 0
+                                    ? max(1px, self.visible-width - 16px)
+                                    : 900px * root.preview-pdf-zoom / 100;
+                                // Reserve the tallest loaded page so the image cannot overlap the next slot.
+                                private property <length> page-height: max(self.visible-height,
+                                    max(self.page-width * root.preview-image.height / max(1, root.preview-image.width),
+                                        max(self.page-width * root.preview-pdf-previous-image.height / max(1, root.preview-pdf-previous-image.width),
+                                            self.page-width * root.preview-pdf-next-image.height / max(1, root.preview-pdf-next-image.width))) + 16px);
+                                viewport-width: max(self.visible-width, self.page-width + 16px);
                                 viewport-height: max(self.visible-height,
-                                    self.visible-height * max(1, root.preview-pdf-pages));
+                                    self.page-height * max(1, root.preview-pdf-pages));
                                 scrolled() => {
                                     root.preview-pdf-scrolled(root.selected-preview-path,
-                                        -self.viewport-y / max(1px, self.visible-height));
+                                        -self.viewport-y / max(1px, self.page-height));
                                 }
                                 Image {
-                                    y: (root.preview-pdf-rendered-page - 2) * pdf-scroll.visible-height + 8px;
-                                    width: pdf-scroll.visible-width;
-                                    height: max(1px, pdf-scroll.visible-height - 16px);
+                                    x: 8px;
+                                    y: (root.preview-pdf-rendered-page - 2) * pdf-scroll.page-height + 8px;
+                                    width: pdf-scroll.page-width;
+                                    height: max(1px, self.source.height * self.width / max(1, self.source.width));
                                     visible: root.preview-pdf-previous-ready;
-                                    source: root.preview-pdf-previous-image;
+                                    source: root.preview-pdf-zoom == 0
+                                        ? root.preview-pdf-previous-fit-image : root.preview-pdf-previous-image;
                                     image-fit: contain;
+                                    image-rendering: smooth;
                                 }
                                 Image {
-                                    y: (root.preview-pdf-rendered-page - 1) * pdf-scroll.visible-height + 8px;
-                                    width: pdf-scroll.visible-width;
-                                    height: max(1px, pdf-scroll.visible-height - 16px);
+                                    x: 8px;
+                                    y: (root.preview-pdf-rendered-page - 1) * pdf-scroll.page-height + 8px;
+                                    width: pdf-scroll.page-width;
+                                    height: max(1px, self.source.height * self.width / max(1, self.source.width));
                                     visible: root.preview-ready;
-                                    source: root.preview-image;
+                                    source: root.preview-pdf-zoom == 0
+                                        ? root.preview-pdf-fit-image : root.preview-image;
                                     image-fit: contain;
+                                    image-rendering: smooth;
                                 }
                                 Image {
-                                    y: root.preview-pdf-rendered-page * pdf-scroll.visible-height + 8px;
-                                    width: pdf-scroll.visible-width;
-                                    height: max(1px, pdf-scroll.visible-height - 16px);
+                                    x: 8px;
+                                    y: root.preview-pdf-rendered-page * pdf-scroll.page-height + 8px;
+                                    width: pdf-scroll.page-width;
+                                    height: max(1px, self.source.height * self.width / max(1, self.source.width));
                                     visible: root.preview-pdf-next-ready;
-                                    source: root.preview-pdf-next-image;
+                                    source: root.preview-pdf-zoom == 0
+                                        ? root.preview-pdf-next-fit-image : root.preview-pdf-next-image;
                                     image-fit: contain;
+                                    image-rendering: smooth;
                                 }
                                 Text {
                                     x: 16px;
-                                    y: (root.preview-pdf-page - 1) * pdf-scroll.visible-height + 16px;
-                                    width: pdf-scroll.visible-width - 32px;
-                                    height: max(1px, pdf-scroll.visible-height - 32px);
+                                    y: (root.preview-pdf-page - 1) * pdf-scroll.page-height + 16px;
+                                    width: pdf-scroll.page-width - 16px;
+                                    height: max(1px, pdf-scroll.page-height - 32px);
                                     visible: !root.preview-ready
                                         || (root.preview-pdf-page != root.preview-pdf-rendered-page
                                             && !(root.preview-pdf-page == root.preview-pdf-rendered-page - 1

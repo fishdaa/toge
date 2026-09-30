@@ -1,6 +1,7 @@
 //! toge — CLI client for toged.
 
 use std::env;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -286,10 +287,10 @@ fn run_streamed_query<W: Write>(
 
 fn render_results(paths: &[String], format: OutputFormat, no_header: bool) -> String {
     match format {
-        OutputFormat::Jsonl => paths
-            .iter()
-            .map(|path| format!("{{\"path\":{}}}\n", json_string(path)))
-            .collect(),
+        OutputFormat::Jsonl => paths.iter().fold(String::new(), |mut output, path| {
+            let _ = writeln!(output, "{{\"path\":{}}}", json_string(path));
+            output
+        }),
         OutputFormat::Csv => render_table(paths, "Name", ",", "\r\n", no_header),
         OutputFormat::Tsv => render_table(paths, "Name", "\t", "\n", no_header),
         OutputFormat::Txt | OutputFormat::Default | OutputFormat::Efu => {
@@ -330,8 +331,9 @@ fn render_table(
 fn render_jsonl(rows: &[ResultRow]) -> String {
     let mut output = String::new();
     for row in rows {
-        output.push_str(&format!(
-            "{{\"path\":{},\"name\":{},\"parent\":{},\"ext\":{},\"is_dir\":{},\"size\":{},\"modified\":{}}}\n",
+        let _ = writeln!(
+            output,
+            "{{\"path\":{},\"name\":{},\"parent\":{},\"ext\":{},\"is_dir\":{},\"size\":{},\"modified\":{}}}",
             json_string(&row.path),
             json_string(&row.name),
             json_string(&row.parent),
@@ -339,7 +341,7 @@ fn render_jsonl(rows: &[ResultRow]) -> String {
             row.is_dir,
             row.size,
             row.modified_unix,
-        ));
+        );
     }
     output
 }
@@ -376,7 +378,9 @@ fn json_string(value: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c if (c as u32) < 0x20 => {
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
             c => out.push(c),
         }
     }
@@ -535,7 +539,7 @@ fn main() {
 
     if opts.get_result_count {
         if let Err(e) = ensure_ready(&sock, &opts) {
-            eprintln!("query failed: {}", e);
+            eprintln!("query failed: {e}");
             process::exit(1);
         }
         match run_query(
@@ -557,7 +561,7 @@ fn main() {
 
     if opts.get_total_size {
         if let Err(e) = ensure_ready(&sock, &opts) {
-            eprintln!("query failed: {}", e);
+            eprintln!("query failed: {e}");
             process::exit(1);
         }
         match run_query(
@@ -578,7 +582,7 @@ fn main() {
     }
 
     if let Err(e) = ensure_ready(&sock, &opts) {
-        eprintln!("query failed: {}", e);
+        eprintln!("query failed: {e}");
         process::exit(1);
     }
 

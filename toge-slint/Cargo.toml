@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 toge-core.workspace = true
+image = { version = "0.25.10", default-features = false }
 slint = { version = "=1.17.1", default-features = false, features = ["std", "backend-winit", "renderer-software", "compat-1-2"] }
 time = { version = "0.3", features = ["formatting"] }
 ksni = { version = "0.3.6", default-features = false, features = ["blocking", "async-io"] }
