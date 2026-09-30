@@ -19,9 +19,9 @@ pub fn format_size(size: u64) -> String {
 /// Search summary shown in the status bar.
 pub fn search_status(total_count: usize, total_size: u64, size_indexed: bool) -> String {
     if size_indexed {
-        format!("{total_count} results | {}", format_size(total_size))
+        format!("{total_count} | {}", format_size(total_size))
     } else {
-        format!("{total_count} results | size unavailable")
+        format!("{total_count} | size unavailable")
     }
 }
 
@@ -140,8 +140,8 @@ mod tests {
 
     #[test]
     fn search_status_format() {
-        assert_eq!(search_status(3, 2048, true), "3 results | 2.0 KB");
-        assert_eq!(search_status(1, 0, false), "1 results | size unavailable");
+        assert_eq!(search_status(3, 2048, true), "3 | 2.0 KB");
+        assert_eq!(search_status(1, 0, false), "1 | size unavailable");
     }
 
     #[test]
