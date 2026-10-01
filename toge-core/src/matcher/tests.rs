@@ -415,3 +415,16 @@ fn test_glob_match_substring_matches_any_suffix() {
     assert!(glob_match_substring("README.md", "readme", true));
     assert!(!glob_match_substring("Main.RS", "*.rs", false));
 }
+
+#[test]
+fn parsed_negation_excludes_matching_names() {
+    let mut index = Index::new();
+    for path in ["/a/foo.txt", "/a/bar.txt", "/a/foo.pdf", "/a/!foo"] {
+        index.insert(path, false);
+    }
+    let ids = |raw: &str| match_query(&index, &Query::parse(raw).unwrap());
+    assert_eq!(ids("!foo"), vec![1]);
+    assert_eq!(ids("txt !\"foo\""), vec![1]);
+    assert_eq!(ids("!*.txt"), vec![2, 3]);
+    assert_eq!(ids("\"!foo\""), vec![3]);
+}

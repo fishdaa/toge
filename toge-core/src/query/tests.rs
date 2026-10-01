@@ -305,3 +305,34 @@ fn empty_quoted_term_does_not_hide_next_filter() {
     assert!(query.require_file);
     assert!(query.terms.is_empty());
 }
+
+#[test]
+fn leading_bang_negates_terms_unless_quoted() {
+    let not = |term| TextTerm::Not(Box::new(term));
+    assert_eq!(
+        Query::parse("!foo !\"two words\" !*.txt !a|b")
+            .unwrap()
+            .terms,
+        vec![
+            not(TextTerm::Substring("foo".into())),
+            not(TextTerm::Substring("two words".into())),
+            not(TextTerm::Wildcard("*.txt".into())),
+            not(TextTerm::Or(vec![
+                TextTerm::Substring("a".into()),
+                TextTerm::Substring("b".into())
+            ])),
+        ]
+    );
+    assert_eq!(
+        Query::parse("regex: !^foo").unwrap().terms,
+        vec![not(TextTerm::Regex("^foo".into()))]
+    );
+    // A quoted bang and a bare bang are literal text.
+    assert_eq!(
+        Query::parse("\"!foo\" !").unwrap().terms,
+        vec![
+            TextTerm::Substring("!foo".into()),
+            TextTerm::Substring("!".into())
+        ]
+    );
+}

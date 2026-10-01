@@ -124,6 +124,7 @@ impl Query {
                 Token::Function(name, value) => apply_function(&mut query, &name, &value)?,
                 Token::Macro(name) => apply_macro(&mut query, &name),
                 Token::Text(text) => add_text_term(&mut query, &text)?,
+                Token::Literal(text) => add_term_parts(&mut query, &text)?,
             }
         }
 
@@ -134,6 +135,8 @@ impl Query {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Token {
     Text(String),
+    /// Text that began with a quote, so a leading `!` is not negation.
+    Literal(String),
     Modifier(String, String),
     Function(String, String),
     Macro(String),
@@ -150,7 +153,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
             ' ' | '\t' | '\n' | '\r' => {
                 if !current.is_empty() {
                     tokens.push(if literal {
-                        Token::Text(current.clone())
+                        Token::Literal(current.clone())
                     } else {
                         classify_token(&current)
                     });
@@ -178,7 +181,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
 
     if !current.is_empty() {
         tokens.push(if literal {
-            Token::Text(current)
+            Token::Literal(current)
         } else {
             classify_token(&current)
         });
@@ -355,6 +358,20 @@ fn apply_macro(query: &mut Query, name: &str) {
 }
 
 fn add_text_term(query: &mut Query, text: &str) -> Result<(), ParseError> {
+    let Some(rest) = text.strip_prefix('!').filter(|rest| !rest.is_empty()) else {
+        return add_term_parts(query, text);
+    };
+    let count = query.terms.len();
+    add_term_parts(query, rest)?;
+    if query.terms.len() > count
+        && let Some(term) = query.terms.pop()
+    {
+        query.terms.push(TextTerm::Not(Box::new(term)));
+    }
+    Ok(())
+}
+
+fn add_term_parts(query: &mut Query, text: &str) -> Result<(), ParseError> {
     if query.mode == SearchMode::Regex {
         // Alternation belongs to the regex, including groups and escaped pipes.
         validate_regex(text)?;

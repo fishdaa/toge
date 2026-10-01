@@ -72,6 +72,9 @@ It accepts a count, ranges such as `2..4`, and comparisons such as `>=2`.
 `attrib:DH` selects hidden directories. Extension filters ignore extension case
 and exclude directories.
 
+A leading `!` excludes names matching a term, for example `report !draft` or
+`!*.tmp`. Quote the term to search for a literal `!`, as in `"!important"`.
+
 `child:`, `empty:`, `diacritics:`, and readonly/system attribute filters return
 explicit unsupported-filter errors. The current index does not store the
 information needed to evaluate them reliably. Empty extension filters and
