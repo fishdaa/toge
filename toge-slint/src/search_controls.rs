@@ -207,6 +207,11 @@ mod tests {
         index.insert("/fixture/Report.PDF", false);
         index.insert("/fixture/report.pdf", false);
         index.insert("/fixture/myreport.pdf", false);
+        let alternate = set_option("^(report|other)\\.pdf$", "regex", true);
+        assert_eq!(
+            match_query(&index, &Query::parse(&alternate).unwrap()),
+            vec![0, 1]
+        );
         let raw = set_option("wildcards: ^Report\\.PDF$", "regex", true);
         assert_eq!(
             match_query(&index, &Query::parse(&raw).unwrap()),

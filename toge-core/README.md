@@ -69,7 +69,8 @@ that folder, excluding descendants. Quote paths containing spaces, for example
 components below `/`: `/file.txt` has depth 0 and `/home/user/file.txt` has depth 2.
 It accepts a count, ranges such as `2..4`, and comparisons such as `>=2`.
 `attrib:D` selects directories and `attrib:H` selects names beginning with a dot;
-`attrib:DH` selects hidden directories. Extension filters exclude directories.
+`attrib:DH` selects hidden directories. Extension filters ignore extension case
+and exclude directories.
 
 `child:`, `empty:`, `diacritics:`, and readonly/system attribute filters return
 explicit unsupported-filter errors. The current index does not store the

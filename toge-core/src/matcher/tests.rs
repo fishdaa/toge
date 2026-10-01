@@ -3,6 +3,30 @@ use crate::index::Index;
 use crate::query::{Query, RangeFilter, SearchMode, TextTerm};
 
 #[test]
+fn extension_filters_match_uppercase_names_in_every_search_mode() {
+    let mut index = Index::new();
+    index.insert("/fixture/report.PDF", false);
+    index.insert("/fixture/other.Pdf", false);
+    index.insert("/fixture/normal.pdf", false);
+    index.insert("/fixture/folder.pdf", true);
+    for raw in ["ext:pdf", "ext:PDF", "doc:", "case: ext:pdf"] {
+        let query = Query::parse(raw).unwrap();
+        assert_eq!(match_query(&index, &query), vec![0, 1, 2], "{raw}");
+        assert_eq!(
+            iter_query(&index, &query).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "incremental {raw}"
+        );
+    }
+    index.remove("/fixture/other.Pdf");
+    index.remove("/fixture/report.PDF");
+    let query = Query::parse("doc:").unwrap();
+    assert_eq!(match_query(&index, &query).len(), 1);
+    index.compact();
+    assert_eq!(match_query(&index, &query).len(), 1);
+}
+
+#[test]
 fn structural_filters_work_in_both_collected_and_incremental_searches() {
     let mut index = Index::new();
     for (path, dir) in [

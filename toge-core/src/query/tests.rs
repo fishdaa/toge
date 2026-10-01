@@ -75,6 +75,14 @@ fn depth_filters_validate_ranges_and_overflow() {
 }
 
 #[test]
+fn regex_mode_preserves_grouped_alternation_and_escaped_pipes() {
+    for pattern in ["^(foo|bar)\\.pdf$", "foo\\|bar"] {
+        let query = Query::parse(&format!("regex: {pattern}")).unwrap();
+        assert_eq!(query.terms, vec![TextTerm::Regex(pattern.into())]);
+    }
+}
+
+#[test]
 fn test_parse_simple_substring() {
     let q = Query::parse("foo").unwrap();
     assert_eq!(q.mode, SearchMode::Substring);
@@ -290,4 +298,10 @@ fn test_parse_many_alternations_regex_reports_error() {
         .join("|");
     let err = Query::parse(&format!("regex:{pattern}")).unwrap_err();
     assert!(err.to_string().contains("regex too complex"));
+}
+#[test]
+fn empty_quoted_term_does_not_hide_next_filter() {
+    let query = Query::parse("\"\" file:").unwrap();
+    assert!(query.require_file);
+    assert!(query.terms.is_empty());
 }

@@ -155,8 +155,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, ParseError> {
                         classify_token(&current)
                     });
                     current.clear();
-                    literal = false;
                 }
+                literal = false;
             }
             '"' => {
                 literal |= current.is_empty();
@@ -355,16 +355,18 @@ fn apply_macro(query: &mut Query, name: &str) {
 }
 
 fn add_text_term(query: &mut Query, text: &str) -> Result<(), ParseError> {
+    if query.mode == SearchMode::Regex {
+        // Alternation belongs to the regex, including groups and escaped pipes.
+        validate_regex(text)?;
+        query.terms.push(TextTerm::Regex(text.to_string()));
+        return Ok(());
+    }
     let mut terms = Vec::new();
     for part in text.split('|') {
         if part.is_empty() {
             continue;
         }
         let term = match query.mode {
-            SearchMode::Regex => {
-                validate_regex(part)?;
-                TextTerm::Regex(part.to_string())
-            }
             _ if part.contains('*') || part.contains('?') => {
                 query.mode = SearchMode::Wildcard;
                 TextTerm::Wildcard(part.to_string())

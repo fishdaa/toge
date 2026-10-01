@@ -148,7 +148,14 @@ fn intersect_sorted_ids(left: &[u32], right: &[u32]) -> Vec<u32> {
 
 fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool {
     if let Some(exts) = &query.ext
-        && (entry.is_dir || !exts.iter().any(|ext| ext == entry.extension()))
+        && (entry.is_dir
+            || !exts.iter().any(|ext| {
+                if entry.extension().is_ascii() && ext.is_ascii() {
+                    ext.eq_ignore_ascii_case(entry.extension())
+                } else {
+                    *ext == entry.extension().to_lowercase()
+                }
+            }))
     {
         return false;
     }

@@ -34,6 +34,8 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 - Recognized unsupported search filters and attributes report errors instead of
   silently accepting them; regex matching respects the case setting.
+- Extension filters and file-type presets match uppercase extensions, including
+  restored indexes; narrow Slint windows retain horizontal result scrolling.
 
 - Video previews display the first frame while samples load and keep it visible
   if duration inspection or sampling fails.

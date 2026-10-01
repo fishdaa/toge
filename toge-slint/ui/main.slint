@@ -1,5 +1,10 @@
 import { VerticalBox, LineEdit, Button, CheckBox, ComboBox, StandardTableView, AboutSlint, Palette, ScrollView, ListView, Spinner } from "std-widgets.slint";
 
+component SearchResultsTable inherits StandardTableView {
+    // Columns keep their widths and scroll horizontally at narrow sizes.
+    min-width: 220px;
+}
+
 export struct PreviewToken {
     text: string,
     column: int,
@@ -176,6 +181,7 @@ export component AppWindow inherits Window {
     in property <string> index-status: "Index unavailable";
     in property <bool> busy: true;
     in property <bool> has-error: false;
+    in property <bool> has-query-error: false;
     in property <image> preview-image;
     in property <bool> preview-ready: false;
     in property <bool> preview-text-ready: false;
@@ -446,7 +452,7 @@ export component AppWindow inherits Window {
                         edited(text) => { root.cancel-rename(false); root.query-edited(text); }
                         accepted(text) => { root.submit(text); }
                     }
-                    if root.has-error: Button {
+                    if root.has-error && !root.has-query-error: Button {
                         text: "Retry";
                         clicked => { root.submit(search.text); }
                     }
@@ -522,7 +528,7 @@ export component AppWindow inherits Window {
                 }
                 // Rows that fit in the viewport, less one so a page step keeps context.
                 property <int> page-rows: max(1, floor(table.visible-height / max(1px, table.viewport-height / max(1, root.rows.length))) - 1);
-                table := StandardTableView {
+                table := SearchResultsTable {
                     width: 100%; height: 100%;
                     rows: root.rows;
                     enabled: !root.rename-working;

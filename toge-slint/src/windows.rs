@@ -127,6 +127,7 @@ pub fn open() -> Result<AppWindow, slint::PlatformError> {
                 crate::search_controls::sync(&ui, &text);
                 ui.set_busy(true);
                 ui.set_has_error(false);
+                ui.set_has_query_error(false);
                 ui.set_status("Searching…".into());
             }
         };
