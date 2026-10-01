@@ -452,48 +452,18 @@ export component AppWindow inherits Window {
                         edited(text) => { root.cancel-rename(false); root.query-edited(text); }
                         accepted(text) => { root.submit(text); }
                     }
+                    ComboBox {
+                        width: 160px;
+                        model: ["Everything", "Files", "Folders", "Audio", "Documents", "Pictures", "Video", "Archives", "Custom"];
+                        current-index <=> root.filter-preset;
+                        accessible-label: "File type filter";
+                        enabled: !root.rename-working;
+                        selected(value) => { root.cancel-rename(false); root.preset-selected(self.current-index); }
+                    }
                     if root.has-error && !root.has-query-error: Button {
                         text: "Retry";
                         clicked => { root.submit(search.text); }
                     }
-                }
-            }
-            Rectangle {
-                height: root.width < 700px ? 84px : 44px;
-                ComboBox {
-                    x: 16px; y: 4px; width: 160px; height: 32px;
-                    model: ["Everything", "Files", "Folders", "Audio", "Documents", "Pictures", "Video", "Archives", "Custom"];
-                    current-index <=> root.filter-preset;
-                    accessible-label: "File type filter";
-                    enabled: !root.rename-working;
-                    selected(value) => { root.cancel-rename(false); root.preset-selected(self.current-index); }
-                }
-                HorizontalLayout {
-                    x: root.width < 700px ? 16px : 196px;
-                    y: root.width < 700px ? 44px : 4px;
-                    width: parent.width - self.x - 16px; height: 32px;
-                    spacing: 12px;
-                    CheckBox {
-                        text: "Case"; accessible-label: "Match case";
-                        checked <=> root.match-case; enabled: !root.rename-working;
-                        toggled => { root.cancel-rename(false); root.search-option("case", self.checked); }
-                    }
-                    CheckBox {
-                        text: "Whole words"; accessible-label: "Match whole words";
-                        checked <=> root.match-whole-word; enabled: !root.rename-working;
-                        toggled => { root.cancel-rename(false); root.search-option("ww", self.checked); }
-                    }
-                    CheckBox {
-                        text: "Path"; accessible-label: "Match full path";
-                        checked <=> root.match-path; enabled: !root.rename-working;
-                        toggled => { root.cancel-rename(false); root.search-option("path", self.checked); }
-                    }
-                    CheckBox {
-                        text: "Regex"; accessible-label: "Use regular expressions";
-                        checked <=> root.regex-enabled; enabled: !root.rename-working;
-                        toggled => { root.cancel-rename(false); root.search-option("regex", self.checked); }
-                    }
-                    Rectangle { horizontal-stretch: 1; }
                 }
             }
             Rectangle { height: 1px; background: Palette.foreground; opacity: 0.10; }
