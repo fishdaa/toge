@@ -3,9 +3,12 @@
 use crate::index::{Entry, Index, contains_ignore_case, entry_id};
 use crate::query::{Query, RangeFilter, TextTerm};
 use regex::{Regex, RegexBuilder};
+use std::path::{Component, Path, PathBuf};
 
 struct CompiledTerms {
     items: Vec<CompiledTerm>,
+    /// Expected parent folder, lowercased once when matching ignores case.
+    parent: Option<PathBuf>,
 }
 
 enum CompiledTerm {
@@ -17,7 +20,7 @@ enum CompiledTerm {
 }
 
 // Case-insensitive needles are lowercased once here rather than per entry.
-fn compile_terms(terms: &[TextTerm], match_case: bool) -> CompiledTerms {
+fn compile_terms(terms: &[TextTerm], match_case: bool) -> Vec<CompiledTerm> {
     let cased = |text: &String| {
         if match_case {
             text.clone()
@@ -25,7 +28,7 @@ fn compile_terms(terms: &[TextTerm], match_case: bool) -> CompiledTerms {
             text.to_lowercase()
         }
     };
-    let items = terms
+    terms
         .iter()
         .map(|term| match term {
             TextTerm::Substring(s) => CompiledTerm::Substring(cased(s)),
@@ -38,15 +41,26 @@ fn compile_terms(terms: &[TextTerm], match_case: bool) -> CompiledTerms {
             ),
             TextTerm::Not(inner) => CompiledTerm::Not(Box::new(
                 compile_terms(&[inner.as_ref().clone()], match_case)
-                    .items
                     .into_iter()
                     .next()
                     .unwrap(),
             )),
-            TextTerm::Or(items) => CompiledTerm::Or(compile_terms(items, match_case).items),
+            TextTerm::Or(items) => CompiledTerm::Or(compile_terms(items, match_case)),
         })
-        .collect();
-    CompiledTerms { items }
+        .collect()
+}
+
+fn compile(query: &Query) -> CompiledTerms {
+    CompiledTerms {
+        items: compile_terms(&query.terms, query.match_case),
+        parent: query.parent_filter.as_ref().map(|parent| {
+            if query.match_case {
+                PathBuf::from(parent)
+            } else {
+                PathBuf::from(parent.to_lowercase())
+            }
+        }),
+    }
 }
 
 /// A reusable matcher for incremental scans, without a result-ID buffer.
@@ -58,7 +72,7 @@ pub struct QueryMatcher {
 
 impl QueryMatcher {
     pub fn new(query: Query) -> Self {
-        let compiled = compile_terms(&query.terms, query.match_case);
+        let compiled = compile(&query);
         Self { query, compiled }
     }
 
@@ -118,7 +132,7 @@ pub fn candidate_ids(index: &Index, query: &Query) -> Option<Vec<u32>> {
 pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
     let mut ids =
         candidate_ids(index, query).unwrap_or_else(|| (0..entry_id(index.count())).collect());
-    let compiled = compile_terms(&query.terms, query.match_case);
+    let compiled = compile(query);
 
     ids.retain(|&id| {
         let entry = &index.entries[id as usize];
@@ -159,30 +173,26 @@ fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool
     {
         return false;
     }
-    if let Some(parent) = &query.parent_filter {
-        let actual = std::path::Path::new(&entry.path)
+    if let Some(expected) = &compiled.parent {
+        let actual = Path::new(&entry.path)
             .parent()
-            .unwrap_or_else(|| std::path::Path::new(""));
-        let expected = std::path::Path::new(parent);
+            .unwrap_or_else(|| Path::new(""));
         let matches = if query.match_case {
             actual == expected
         } else {
-            std::path::Path::new(&actual.to_string_lossy().to_lowercase())
-                == std::path::Path::new(&expected.to_string_lossy().to_lowercase())
+            Path::new(&actual.to_string_lossy().to_lowercase()) == expected
         };
         if !matches {
             return false;
         }
     }
     if let Some(depth) = &query.depth {
-        let count = std::path::Path::new(&entry.path)
-            .parent()
-            .map_or(0, |parent| {
-                parent
-                    .components()
-                    .filter(|part| matches!(part, std::path::Component::Normal(_)))
-                    .count()
-            });
+        let count = Path::new(&entry.path).parent().map_or(0, |parent| {
+            parent
+                .components()
+                .filter(|part| matches!(part, Component::Normal(_)))
+                .count()
+        });
         if !in_range(u64::try_from(count).unwrap_or(u64::MAX), depth) {
             return false;
         }

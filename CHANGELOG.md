@@ -12,7 +12,6 @@ The format is based on Keep a Changelog and the project follows Semantic Version
   file-type presets that edit the raw query and stay in sync with typed modifiers.
 - Immediate-parent and depth query filters, quoted filter values, and hidden-name
   attribute matching.
-
 - CLI JSON Lines output (`--json`/`-jsonl`), nonblocking readiness checks
   (`--no-wait`), and `--` to separate query text from options.
 - Noctalia launcher plugin with file search, daemon progress, index rebuilding,
@@ -36,7 +35,6 @@ The format is based on Keep a Changelog and the project follows Semantic Version
   silently accepting them; regex matching respects the case setting.
 - Extension filters and file-type presets match uppercase extensions, including
   restored indexes; narrow Slint windows retain horizontal result scrolling.
-
 - Video previews display the first frame while samples load and keep it visible
   if duration inspection or sampling fails.
 - Slint keeps selected-file details and a compact result summary on one footer
