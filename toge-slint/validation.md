@@ -629,3 +629,39 @@ place.
   `visual-test-artifacts/video-first-frame-20260930/`.
 - Tailnet-only recording:
   [video-first-frame.mp4](https://fedora.taila85941.ts.net:8959/video-first-frame.mp4).
+
+## Search controls and filters — 2026-10-01
+
+Implemented on `feature/search-controls-filters`, using the Everything reference
+HTML under `legacy/`. The shared Slint search bar now provides case, whole-word,
+path and regex controls, plus Everything, Files, Folders, Audio, Documents,
+Pictures, Video and Archives presets. Typed queries and controls stay synchronized;
+custom extension filters display Custom.
+
+- `cargo test --workspace --all-targets --locked --offline -- --test-threads=1`
+  passed. The subsequent empty-quoted-term regression also passed in the full
+  186-test core library suite. `python3 -m unittest discover -s scripts/tests`
+  passed all 22 launcher tests.
+- `cargo clippy --workspace --all-targets --locked --offline -- -D warnings`,
+  formatting and `git diff --check` passed.
+- Parser/matcher regressions cover quoted parent paths, immediate-parent and
+  depth filters, hidden filenames, unsupported-filter errors, grouped regex
+  alternation and case matching, uppercase extensions, and restoring/removing
+  entries from older extension buckets.
+- Ordinary tests preceded the native visual run. The `search_controls_visual`
+  example uses the production modules and shared `ui/main.slint` against an
+  isolated real daemon indexing 1,028 fixture entries. All assertions passed:
+  typing/loading, keyboard focus and checkbox toggles, all presets, typed-query
+  synchronization, quoted parent and hidden filters, invalid filter/regex
+  recovery, row navigation and scrolling, and compact layout at 560 pixels.
+- Inspected recording frames for control layout, focus outlines, popup selection,
+  query/error text, scrolling and compact layout. At narrow widths the controls
+  use two rows and result columns remain horizontally scrollable.
+- Recording, approximately 31 seconds:
+  [search-controls.mp4](https://fedora.taila85941.ts.net:8964/search-controls.mp4)
+  (tailnet only; Funnel is disabled). Artifacts are outside version control in
+  `/tmp/toge-controls-verification-20261001/`.
+- Environment: native Slint/Winit window in a nested Niri Wayland compositor,
+  with injected keyboard and pointer events. Physical desktop input, tray and
+  portal integration were not exercised. Empty fixture media/PDF files produce
+  expected preview errors; this run verifies search interactions and layout.

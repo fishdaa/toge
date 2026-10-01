@@ -367,7 +367,7 @@ impl Index {
             } else {
                 ""
             };
-            push_index_value(self.by_ext.entry(ext.to_string()).or_default(), id);
+            push_index_value(self.by_ext.entry(ext.to_lowercase()).or_default(), id);
         }
 
         // Insert into trigram and prefix indexes using a temporary lowered copy.
@@ -410,7 +410,7 @@ impl Index {
         let ext = if is_dir {
             String::new()
         } else {
-            entry.extension().to_string()
+            entry.extension().to_lowercase()
         };
 
         // Remove from trigram index.
@@ -458,7 +458,7 @@ impl Index {
                 replace_sorted_id(list, old_last_id, id);
             }
             if !swapped_entry.is_dir {
-                let swapped_ext = swapped_entry.extension().to_string();
+                let swapped_ext = swapped_entry.extension().to_lowercase();
                 if let Some(list) = self.by_ext.get_mut(&swapped_ext) {
                     replace_sorted_id(list, old_last_id, id);
                 }
@@ -625,7 +625,7 @@ impl Index {
             let path_hash = fnv1a_64(entry.path.as_bytes());
             self.path_to_id.insert(path_hash, id);
             if !entry.is_dir {
-                let ext = entry.extension().to_string();
+                let ext = entry.extension().to_lowercase();
                 push_index_value(self.by_ext.entry(ext).or_default(), id);
             }
             let name_lower = lowered_bytes(entry.name());
@@ -640,7 +640,9 @@ impl Index {
 
     /// Look up entries by extension (used by the matcher).
     pub fn by_extension(&self, ext: &str) -> Option<&[u32]> {
-        self.by_ext.get(ext).map(std::vec::Vec::as_slice)
+        self.by_ext
+            .get(&ext.to_lowercase())
+            .map(std::vec::Vec::as_slice)
     }
 
     /// Look up an entry id by full path.

@@ -440,7 +440,7 @@ impl Index {
             data[offset + 3],
         ]) as usize;
         offset += 4;
-        let mut by_ext = HashMap::with_capacity(ext_count);
+        let mut by_ext: HashMap<String, Vec<u32>> = HashMap::with_capacity(ext_count);
         for _ in 0..ext_count {
             if offset + 4 > data.len() {
                 return Err(io::Error::new(
@@ -511,7 +511,12 @@ impl Index {
                 ]));
             }
             offset += values_size;
-            by_ext.insert(key, ids);
+            // Older indexes kept separate buckets for PDF, Pdf and pdf.
+            by_ext.entry(key.to_lowercase()).or_default().extend(ids);
+        }
+        for ids in by_ext.values_mut() {
+            ids.sort_unstable();
+            ids.dedup();
         }
 
         // Release the serialized bytes before allocating the search indexes.

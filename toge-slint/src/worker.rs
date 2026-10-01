@@ -240,7 +240,14 @@ fn run_session(
     daemon_start: &Arc<Mutex<()>>,
 ) {
     let size_indexed = config_size_indexed();
+    let query_error = toge_core::query::Query::parse(&q.text).err();
     let outcome = (|| {
+        if let Some(error) = &query_error {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                error.to_string(),
+            ));
+        }
         wait_until_ready(q, mailbox, ui, socket, daemon_start)?;
         let sort = mailbox.sort();
         let mut session = crate::client::open_session(
@@ -289,7 +296,12 @@ fn run_session(
                 results(&ui).detach();
                 ui.set_busy(false);
                 ui.set_has_error(true);
-                ui.set_status(format!("{error} — Retry to reconnect").into());
+                ui.set_has_query_error(query_error.is_some());
+                ui.set_status(if query_error.is_some() {
+                    error.to_string().into()
+                } else {
+                    format!("{error} — Retry to reconnect").into()
+                });
             }
         });
     }

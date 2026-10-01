@@ -11,6 +11,29 @@ fn sample_index() -> Index {
 }
 
 #[test]
+fn loading_older_case_sensitive_extension_buckets_merges_and_repairs_them() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    let mut original = Index::new();
+    original.insert("/fixture/upper.PDF", false);
+    original.insert("/fixture/mixed.Pdf", false);
+    original.insert("/fixture/lower.pdf", false);
+    // Reproduce the secondary-index layout written before normalization.
+    original.by_ext.clear();
+    original.by_ext.insert("PDF".into(), vec![0]);
+    original.by_ext.insert("Pdf".into(), vec![1]);
+    original.by_ext.insert("pdf".into(), vec![2]);
+    original.save(&path).unwrap();
+    let mut loaded = Index::load(&path).unwrap();
+    assert_eq!(loaded.by_extension("PDF").unwrap(), &[0, 1, 2]);
+    loaded.remove("/fixture/mixed.Pdf");
+    assert_eq!(loaded.by_extension("pdf").unwrap(), &[0, 1]);
+    loaded.save(&path).unwrap();
+    let loaded = Index::load(&path).unwrap();
+    assert_eq!(loaded.by_extension("pdf").unwrap(), &[0, 1]);
+}
+
+#[test]
 fn test_save_and_load_roundtrip() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("index.bin");

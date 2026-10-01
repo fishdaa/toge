@@ -2,10 +2,13 @@
 
 use crate::index::{Entry, Index, contains_ignore_case, entry_id};
 use crate::query::{Query, RangeFilter, TextTerm};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
+use std::path::{Component, Path, PathBuf};
 
 struct CompiledTerms {
     items: Vec<CompiledTerm>,
+    /// Expected parent folder, lowercased once when matching ignores case.
+    parent: Option<PathBuf>,
 }
 
 enum CompiledTerm {
@@ -17,7 +20,7 @@ enum CompiledTerm {
 }
 
 // Case-insensitive needles are lowercased once here rather than per entry.
-fn compile_terms(terms: &[TextTerm], match_case: bool) -> CompiledTerms {
+fn compile_terms(terms: &[TextTerm], match_case: bool) -> Vec<CompiledTerm> {
     let cased = |text: &String| {
         if match_case {
             text.clone()
@@ -25,25 +28,39 @@ fn compile_terms(terms: &[TextTerm], match_case: bool) -> CompiledTerms {
             text.to_lowercase()
         }
     };
-    let items = terms
+    terms
         .iter()
         .map(|term| match term {
             TextTerm::Substring(s) => CompiledTerm::Substring(cased(s)),
             TextTerm::Wildcard(p) => CompiledTerm::Wildcard(cased(p)),
             TextTerm::Regex(p) => CompiledTerm::Regex(
-                Regex::new(p).expect("regex patterns should be validated during query parsing"),
+                RegexBuilder::new(p)
+                    .case_insensitive(!match_case)
+                    .build()
+                    .expect("regex patterns should be validated during query parsing"),
             ),
             TextTerm::Not(inner) => CompiledTerm::Not(Box::new(
                 compile_terms(&[inner.as_ref().clone()], match_case)
-                    .items
                     .into_iter()
                     .next()
                     .unwrap(),
             )),
-            TextTerm::Or(items) => CompiledTerm::Or(compile_terms(items, match_case).items),
+            TextTerm::Or(items) => CompiledTerm::Or(compile_terms(items, match_case)),
         })
-        .collect();
-    CompiledTerms { items }
+        .collect()
+}
+
+fn compile(query: &Query) -> CompiledTerms {
+    CompiledTerms {
+        items: compile_terms(&query.terms, query.match_case),
+        parent: query.parent_filter.as_ref().map(|parent| {
+            if query.match_case {
+                PathBuf::from(parent)
+            } else {
+                PathBuf::from(parent.to_lowercase())
+            }
+        }),
+    }
 }
 
 /// A reusable matcher for incremental scans, without a result-ID buffer.
@@ -55,16 +72,11 @@ pub struct QueryMatcher {
 
 impl QueryMatcher {
     pub fn new(query: Query) -> Self {
-        let compiled = compile_terms(&query.terms, query.match_case);
+        let compiled = compile(&query);
         Self { query, compiled }
     }
 
     pub fn matches(&self, entry: &Entry) -> bool {
-        if let Some(exts) = &self.query.ext
-            && (entry.is_dir || !exts.iter().any(|ext| ext == entry.extension()))
-        {
-            return false;
-        }
         entry_matches(entry, &self.query, &self.compiled)
     }
 }
@@ -120,7 +132,7 @@ pub fn candidate_ids(index: &Index, query: &Query) -> Option<Vec<u32>> {
 pub fn match_query(index: &Index, query: &Query) -> Vec<u32> {
     let mut ids =
         candidate_ids(index, query).unwrap_or_else(|| (0..entry_id(index.count())).collect());
-    let compiled = compile_terms(&query.terms, query.match_case);
+    let compiled = compile(query);
 
     ids.retain(|&id| {
         let entry = &index.entries[id as usize];
@@ -149,6 +161,42 @@ fn intersect_sorted_ids(left: &[u32], right: &[u32]) -> Vec<u32> {
 }
 
 fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool {
+    if let Some(exts) = &query.ext
+        && (entry.is_dir
+            || !exts.iter().any(|ext| {
+                if entry.extension().is_ascii() && ext.is_ascii() {
+                    ext.eq_ignore_ascii_case(entry.extension())
+                } else {
+                    *ext == entry.extension().to_lowercase()
+                }
+            }))
+    {
+        return false;
+    }
+    if let Some(expected) = &compiled.parent {
+        let actual = Path::new(&entry.path)
+            .parent()
+            .unwrap_or_else(|| Path::new(""));
+        let matches = if query.match_case {
+            actual == expected
+        } else {
+            Path::new(&actual.to_string_lossy().to_lowercase()) == expected
+        };
+        if !matches {
+            return false;
+        }
+    }
+    if let Some(depth) = &query.depth {
+        let count = Path::new(&entry.path).parent().map_or(0, |parent| {
+            parent
+                .components()
+                .filter(|part| matches!(part, Component::Normal(_)))
+                .count()
+        });
+        if !in_range(u64::try_from(count).unwrap_or(u64::MAX), depth) {
+            return false;
+        }
+    }
     if query.require_file && entry.is_dir {
         return false;
     }
@@ -212,6 +260,13 @@ fn entry_matches(entry: &Entry, query: &Query, compiled: &CompiledTerms) -> bool
     if let Some(attrs) = &query.attributes
         && attrs.dir.is_some()
         && attrs.dir != Some(entry.is_dir)
+    {
+        return false;
+    }
+    if let Some(attrs) = &query.attributes
+        && attrs
+            .hidden
+            .is_some_and(|hidden| hidden != entry.name().starts_with('.'))
     {
         return false;
     }

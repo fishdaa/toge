@@ -1,6 +1,88 @@
 use super::*;
 
 #[test]
+fn quoted_filter_values_and_literal_modifiers_are_distinct() {
+    let query = Query::parse("parent:\"/My Files\" \"folder:\" \"two words\"").unwrap();
+    assert_eq!(query.parent_filter.as_deref(), Some("/My Files"));
+    assert!(!query.require_folder);
+    assert_eq!(
+        query.terms,
+        vec![
+            TextTerm::Substring("folder:".into()),
+            TextTerm::Substring("two words".into())
+        ]
+    );
+    assert!(
+        Query::parse("parent:\"/My Files")
+            .unwrap_err()
+            .to_string()
+            .contains("unterminated")
+    );
+    for name in ["parent", "infolder", "nosubfolders"] {
+        assert_eq!(
+            Query::parse(&format!("{name}:/tmp"))
+                .unwrap()
+                .parent_filter
+                .as_deref(),
+            Some("/tmp")
+        );
+        assert!(Query::parse(&format!("{name}:")).is_err());
+    }
+}
+
+#[test]
+fn unsupported_filters_and_attributes_report_errors() {
+    for raw in [
+        "child:foo",
+        "empty:",
+        "diacritics:",
+        "attrib:R",
+        "attrib:S",
+        "attrib:X",
+        "attrib:",
+        "ext:",
+    ] {
+        assert!(Query::parse(raw).is_err(), "silently accepted {raw}");
+    }
+    let attributes = Query::parse("attrib:dh").unwrap().attributes.unwrap();
+    assert_eq!(attributes.dir, Some(true));
+    assert_eq!(attributes.hidden, Some(true));
+}
+
+#[test]
+fn depth_filters_validate_ranges_and_overflow() {
+    for (raw, min, max) in [
+        ("depth:2", Some(2), Some(2)),
+        ("parents:2..4", Some(2), Some(4)),
+        ("depth:>2", Some(3), None),
+        ("depth:<=2", None, Some(2)),
+    ] {
+        assert_eq!(
+            Query::parse(raw).unwrap().depth,
+            Some(RangeFilter { min, max })
+        );
+    }
+    for raw in [
+        "depth:",
+        "depth:<0",
+        "depth:4-2",
+        "depth:>18446744073709551615",
+        "depth:-1",
+        "depth:1mb",
+    ] {
+        assert!(Query::parse(raw).is_err(), "accepted invalid range: {raw}");
+    }
+}
+
+#[test]
+fn regex_mode_preserves_grouped_alternation_and_escaped_pipes() {
+    for pattern in ["^(foo|bar)\\.pdf$", "foo\\|bar"] {
+        let query = Query::parse(&format!("regex: {pattern}")).unwrap();
+        assert_eq!(query.terms, vec![TextTerm::Regex(pattern.into())]);
+    }
+}
+
+#[test]
 fn test_parse_simple_substring() {
     let q = Query::parse("foo").unwrap();
     assert_eq!(q.mode, SearchMode::Substring);
@@ -216,4 +298,41 @@ fn test_parse_many_alternations_regex_reports_error() {
         .join("|");
     let err = Query::parse(&format!("regex:{pattern}")).unwrap_err();
     assert!(err.to_string().contains("regex too complex"));
+}
+#[test]
+fn empty_quoted_term_does_not_hide_next_filter() {
+    let query = Query::parse("\"\" file:").unwrap();
+    assert!(query.require_file);
+    assert!(query.terms.is_empty());
+}
+
+#[test]
+fn leading_bang_negates_terms_unless_quoted() {
+    let not = |term| TextTerm::Not(Box::new(term));
+    assert_eq!(
+        Query::parse("!foo !\"two words\" !*.txt !a|b")
+            .unwrap()
+            .terms,
+        vec![
+            not(TextTerm::Substring("foo".into())),
+            not(TextTerm::Substring("two words".into())),
+            not(TextTerm::Wildcard("*.txt".into())),
+            not(TextTerm::Or(vec![
+                TextTerm::Substring("a".into()),
+                TextTerm::Substring("b".into())
+            ])),
+        ]
+    );
+    assert_eq!(
+        Query::parse("regex: !^foo").unwrap().terms,
+        vec![not(TextTerm::Regex("^foo".into()))]
+    );
+    // A quoted bang and a bare bang are literal text.
+    assert_eq!(
+        Query::parse("\"!foo\" !").unwrap().terms,
+        vec![
+            TextTerm::Substring("!foo".into()),
+            TextTerm::Substring("!".into())
+        ]
+    );
 }

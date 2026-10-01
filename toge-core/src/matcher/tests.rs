@@ -2,6 +2,64 @@ use super::*;
 use crate::index::Index;
 use crate::query::{Query, RangeFilter, SearchMode, TextTerm};
 
+#[test]
+fn extension_filters_match_uppercase_names_in_every_search_mode() {
+    let mut index = Index::new();
+    index.insert("/fixture/report.PDF", false);
+    index.insert("/fixture/other.Pdf", false);
+    index.insert("/fixture/normal.pdf", false);
+    index.insert("/fixture/folder.pdf", true);
+    for raw in ["ext:pdf", "ext:PDF", "doc:", "case: ext:pdf"] {
+        let query = Query::parse(raw).unwrap();
+        assert_eq!(match_query(&index, &query), vec![0, 1, 2], "{raw}");
+        assert_eq!(
+            iter_query(&index, &query).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "incremental {raw}"
+        );
+    }
+    index.remove("/fixture/other.Pdf");
+    index.remove("/fixture/report.PDF");
+    let query = Query::parse("doc:").unwrap();
+    assert_eq!(match_query(&index, &query).len(), 1);
+    index.compact();
+    assert_eq!(match_query(&index, &query).len(), 1);
+}
+
+#[test]
+fn structural_filters_work_in_both_collected_and_incremental_searches() {
+    let mut index = Index::new();
+    for (path, dir) in [
+        ("/root/Report.pdf", false),
+        ("/root/.hidden.pdf", false),
+        ("/root/sub", true),
+        ("/root/sub/deep.pdf", false),
+        ("/root/.cache", true),
+        ("/other/report.pdf", false),
+    ] {
+        index.insert(path, dir);
+    }
+    for (raw, expected) in [
+        ("parent:/ROOT/ ext:pdf", vec![0, 1]),
+        ("case: parent:/ROOT/", vec![]),
+        ("parent:/root folder:", vec![2, 4]),
+        ("depth:1 ext:pdf", vec![0, 1, 5]),
+        ("depth:>1", vec![3]),
+        ("attrib:H", vec![1, 4]),
+        ("attrib:DH", vec![4]),
+        ("regex:^report\\.pdf$", vec![0, 5]),
+        ("case: regex:^report\\.pdf$", vec![5]),
+    ] {
+        let query = Query::parse(raw).unwrap();
+        assert_eq!(match_query(&index, &query), expected, "{raw}");
+        assert_eq!(
+            iter_query(&index, &query).collect::<Vec<_>>(),
+            expected,
+            "incremental {raw}"
+        );
+    }
+}
+
 fn sample_index() -> Index {
     let mut idx = Index::new();
     idx.insert("/home/alice/docs/foo.txt", false);
@@ -26,6 +84,8 @@ fn substring_query(text: &str) -> Query {
         terms: vec![TextTerm::Substring(text.into())],
         ext: None,
         path_filter: None,
+        parent_filter: None,
+        depth: None,
         size: None,
         date_modified: None,
         date_created: None,
@@ -214,6 +274,8 @@ fn test_all_terms_must_match_for_and_query() {
         ],
         ext: None,
         path_filter: None,
+        parent_filter: None,
+        depth: None,
         size: None,
         date_modified: None,
         date_created: None,
@@ -352,4 +414,17 @@ fn test_glob_match_substring_matches_any_suffix() {
     assert!(glob_match_substring("Main.RS", "*.rs", true));
     assert!(glob_match_substring("README.md", "readme", true));
     assert!(!glob_match_substring("Main.RS", "*.rs", false));
+}
+
+#[test]
+fn parsed_negation_excludes_matching_names() {
+    let mut index = Index::new();
+    for path in ["/a/foo.txt", "/a/bar.txt", "/a/foo.pdf", "/a/!foo"] {
+        index.insert(path, false);
+    }
+    let ids = |raw: &str| match_query(&index, &Query::parse(raw).unwrap());
+    assert_eq!(ids("!foo"), vec![1]);
+    assert_eq!(ids("txt !\"foo\""), vec![1]);
+    assert_eq!(ids("!*.txt"), vec![2, 3]);
+    assert_eq!(ids("\"!foo\""), vec![3]);
 }
