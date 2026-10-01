@@ -6,6 +6,14 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-01
+
+### Fixed
+
+- Fix search filters and add synchronized Slint search controls (#40)
+- Feature/noctalia plugin (#37)
+
+
 ### Added
 
 - Slint search controls for case, whole-word, path, and regex matching, plus
@@ -178,7 +186,8 @@ This version was released without a Git tag.
 - Initial public workspace structure for `needle-core`, `needled`, and `ndl`
 - Initial open source project scaffolding
 
-[Unreleased]: https://github.com/fishdaa/needle/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/fishdaa/needle/compare/v0.2.2...HEAD
+[0.2.2]: https://github.com/fishdaa/needle/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/fishdaa/needle/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/fishdaa/needle/compare/v0.1.16...v0.2.0
 [0.1.16]: https://github.com/fishdaa/needle/compare/v0.1.15...v0.1.16

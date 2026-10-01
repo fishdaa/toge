@@ -3,7 +3,7 @@ members = ["toge-core", "toged", "toge", "toge-slint"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 authors = ["fishdaa <git@fishda.net>"]
 license = "Apache-2.0"
@@ -21,7 +21,7 @@ similar_names = "allow"
 too_many_lines = "allow"
 
 [workspace.dependencies]
-toge-core = { package = "toge-core", version = "0.2.1", path = "toge-core" }
+toge-core = { package = "toge-core", version = "0.2.2", path = "toge-core" }
 
 # Slint's renderer leans on pure-Rust text shaping and rasterization that is
 # unusably slow without optimizations; unoptimized dependency code is what
