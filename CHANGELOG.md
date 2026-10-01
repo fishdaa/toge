@@ -8,12 +8,6 @@ The format is based on Keep a Changelog and the project follows Semantic Version
 
 ## [0.2.2] - 2026-10-01
 
-### Fixed
-
-- Fix search filters and add synchronized Slint search controls (#40)
-- Feature/noctalia plugin (#37)
-
-
 ### Added
 
 - Slint search controls for case, whole-word, path, and regex matching, plus
