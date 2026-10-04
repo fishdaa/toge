@@ -97,10 +97,9 @@ initially debounced by 100 ms; Enter in the search field submits immediately.
 The filter selector offers Everything, Files, Folders, Audio, Documents,
 Pictures, Video, and Archives. Choosing a preset replaces existing file-type
 filters while preserving the other query terms. Custom extension filters are
-shown as Custom. Case, Whole words, Path, and Regex controls edit the search text;
-typing the equivalent modifiers updates the controls. Quoted literals and
-quoted filter values are preserved. The controls wrap below the selector in
-narrow windows.
+shown as Custom. Quoted literals and quoted filter values are preserved. The
+Case, Whole words, Path, and Regex controls are currently hidden; use the
+equivalent query modifiers instead.
 The initial empty query lists indexed entries. Use Up/Down in the table, Enter
 or double-click to open, and Ctrl+L to return to the search field. Right-click a
 row for Open, Copy path, Open folder, Cut, Copy, Rename, Delete, and Delete

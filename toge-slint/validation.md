@@ -665,3 +665,20 @@ custom extension filters display Custom.
   with injected keyboard and pointer events. Physical desktop input, tray and
   portal integration were not exercised. Empty fixture media/PDF files produce
   expected preview errors; this run verifies search interactions and layout.
+
+### Update: filter dropdown beside search, option checkboxes hidden — 2026-10-01
+
+The file-type dropdown now sits on the search field row and the Case, Whole
+words, Path and Regex checkboxes are removed from the UI (properties and the
+`search-option` callback are kept). The toggles are exercised through the typed
+modifiers (`case:`, `ww:`, `regex:`, `path:`), which still synchronize the
+properties.
+
+- `cargo test -p toge-slint` passed (66 tests).
+- The `search_controls_visual` fixture was updated to type modifiers instead of
+  tabbing to checkboxes, and passed all stages natively with the same row counts.
+- Inspected frames: dropdown on the search row, no checkboxes, preset popup
+  opens and selects correctly. Environment as above (nested Niri, injected input).
+- Recording, approximately 31 seconds:
+  [search-controls.mp4](https://fedora.taila85941.ts.net:8971/search-controls.mp4)
+  (tailnet only; Funnel is disabled).

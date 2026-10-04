@@ -105,10 +105,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("stage {stage}: query={} rows={} busy={} error={} status={}", ui.get_query_text(), worker::results(&ui).total(), ui.get_busy(), ui.get_has_error(), ui.get_status());
         match stage {
             1 => { assert!(!ui.get_busy()); replace_query(&ui, "Report"); assert!(ui.get_busy(), "typing must enter the loading state"); }
-            2 => { ready(&ui, 513); focus_control(&ui, 2); key(&ui, " ".into()); assert!(ui.get_match_case()); }
-            3 => { ready(&ui, 257); focus_control(&ui, 3); key(&ui, " ".into()); assert!(ui.get_match_whole_word()); }
-            4 => { ready(&ui, 256); replace_query(&ui, "^Report-[0-9]+\\.pdf$"); focus_control(&ui, 5); key(&ui, " ".into()); assert!(ui.get_regex_enabled()); }
-            5 => { ready(&ui, 512); focus_control(&ui, 2); key(&ui, " ".into()); }
+            2 => { ready(&ui, 513); replace_query(&ui, "case: Report"); }
+            3 => { ready(&ui, 257); assert!(ui.get_match_case()); replace_query(&ui, "case: ww: Report"); }
+            4 => { ready(&ui, 256); assert!(ui.get_match_whole_word()); replace_query(&ui, "regex: ^Report-[0-9]+\\.pdf$"); }
+            5 => { ready(&ui, 512); assert!(ui.get_regex_enabled()); replace_query(&ui, "case: regex: ^Report-[0-9]+\\.pdf$"); }
             6 => { ready(&ui, 256); replace_query(&ui, ""); focus_control(&ui, 1); key(&ui, Key::Return.into()); }
             7 => { key(&ui, Key::DownArrow.into()); assert_eq!(ui.get_filter_preset(), 1); }
             8 => { ready(&ui, 1026); key(&ui, Key::DownArrow.into()); assert_eq!(ui.get_filter_preset(), 2); }
@@ -116,14 +116,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             10 | 12 | 13 => { ready(&ui, 128); key(&ui, Key::DownArrow.into()); }
             11 => { ready(&ui, 514); key(&ui, Key::DownArrow.into()); }
             14 => { ready(&ui, 128); key(&ui, Key::Escape.into()); replace_query(&ui, "file: Nested"); }
-            15 => { ready(&ui, 0); focus_control(&ui, 4); key(&ui, " ".into()); assert!(ui.get_match_path()); }
-            16 => { ready(&ui, 1); replace_query(&ui, &format!("parent:\"{root}\" ext:pdf")); }
+            15 => { ready(&ui, 0); replace_query(&ui, "path: file: Nested"); }
+            16 => { ready(&ui, 1); assert!(ui.get_match_path()); replace_query(&ui, &format!("parent:\"{root}\" ext:pdf")); }
             17 => { ready(&ui, 513); assert_eq!(ui.get_filter_preset(), 8); replace_query(&ui, "attrib:H"); }
             18 => { ready(&ui, 1); replace_query(&ui, "child:foo"); }
             19 => { assert!(ui.get_has_error()); assert!(ui.get_has_query_error()); assert!(ui.get_status().contains("unsupported search filter: child:")); assert!(!ui.get_status().contains("reconnect")); replace_query(&ui, "video:"); }
             20 => { ready(&ui, 128); assert_eq!(ui.get_filter_preset(), 6); replace_query(&ui, "regex:["); }
-            21 => { assert!(ui.get_has_error()); assert!(ui.get_has_query_error()); assert!(ui.get_regex_enabled()); click(&ui, LogicalPosition::new(484.0, 80.0)); assert!(!ui.get_regex_enabled()); }
-            22 => { ready(&ui, 0); replace_query(&ui, "file:"); }
+            21 => { assert!(ui.get_has_error()); assert!(ui.get_has_query_error()); assert!(ui.get_regex_enabled()); replace_query(&ui, "zzz-no-match"); }
+            22 => { ready(&ui, 0); assert!(!ui.get_regex_enabled()); replace_query(&ui, "file:"); }
             23 => { ready(&ui, 1026); click(&ui, LogicalPosition::new(120.0, 210.0)); key(&ui, Key::PageDown.into()); }
             24 => { assert!(ui.get_selected() > 0); ui.window().dispatch_event(WindowEvent::PointerScrolled { position: LogicalPosition::new(150.0, 350.0), delta_x: 0.0, delta_y: -700.0 }); }
             25 => {
@@ -149,8 +149,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     assert!(std::process::Command::new("niri").args(["msg", "action", "set-window-width", "--id", &id, "560"]).status().unwrap().success());
                 }
             }
-            27 => { let size = ui.window().size().to_logical(ui.window().scale_factor()); assert!(size.width < 700.0, "narrow fixture width={}", size.width); focus_control(&ui, 2); key(&ui, " ".into()); assert!(ui.get_match_case()); }
-            28 => { ready(&ui, 1026); println!("PASS: native search controls, all presets, typed synchronization, quoted parent/hidden filters, error recovery, loading, focus, keyboard navigation, scrolling and narrow layout"); }
+            27 => { let size = ui.window().size().to_logical(ui.window().scale_factor()); assert!(size.width < 700.0, "narrow fixture width={}", size.width); }
+            28 => { ready(&ui, 1026); println!("PASS: native filter dropdown, typed option synchronization, all presets, quoted parent/hidden filters, error recovery, loading, focus, keyboard navigation, scrolling and narrow layout"); }
             30 => { windows::shutdown(); slint::quit_event_loop().unwrap(); }
             _ => {}
         }
